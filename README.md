@@ -119,3 +119,14 @@ Conformance is tracked against the
 [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite)
 (`p1/wasitest_exec_test.go`, gated on `WAGO_WASITEST_DIR`) and a corpus of real
 Rust/WASI programs (`p1/wasi_apps_test.go`).
+
+## Manifest
+
+[`wago-plugin.json`](wago-plugin.json) is this module's manifest: the extensions it
+ships (`p1`, `unstable`) with their identity, provenance, compatibility (semver
+`engines`, `tinygo`, platforms), capabilities, and full host-import signatures — the
+data a registry or build tool reads without compiling. It is generated from the code:
+
+```console
+go generate ./...        # or: go run ./internal/genmanifest
+```

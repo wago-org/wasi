@@ -20,6 +20,8 @@
 //	in.Invoke("_start")
 package wasi
 
+//go:generate go run ./internal/genmanifest
+
 import (
 	wago "github.com/wago-org/wago"
 	"github.com/wago-org/wasi/p1"
