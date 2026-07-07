@@ -1,5 +1,5 @@
-// Command genmanifest regenerates wago-plugin.json from the extensions this module
-// provides. The manifest is package.json-style: per extension, its basic details,
+// Command genmanifest regenerates wago-plugin.json from the subpackages this module
+// provides. The manifest is package.json-style: per subpackage, its basic details,
 // tags, repository, version, and engines — the metadata a registry or catalog reads
 // without compiling. (Host-import signatures are deliberately left out; discover
 // those by compiling or via `wago plugin inspect`.)
@@ -20,17 +20,17 @@ import (
 	"github.com/wago-org/wasi/unstable"
 )
 
-// manifest is the wago-plugin.json document: what extensions this module ships.
+// manifest is the wago-plugin.json document: what subpackages this module ships.
 type manifest struct {
-	Schema     string      `json:"schema"`
-	Module     string      `json:"module"`
-	Extensions []extension `json:"extensions"`
+	Schema      string       `json:"schema"`
+	Module      string       `json:"module"`
+	Subpackages []subpackage `json:"subpackages"`
 }
 
-// extension is one shipped extension: its import path plus its package.json-style
+// subpackage is one shipped subpackage: its import path plus its package.json-style
 // self-description (ExtensionInfo flattened — id/name/version/description, repo,
-// license, tags, engines, …).
-type extension struct {
+// license, tags, engines, …). Each subpackage provides a wago Extension.
+type subpackage struct {
 	Import             string `json:"import"`
 	wago.ExtensionInfo        // flattened
 }
@@ -39,7 +39,7 @@ func main() {
 	m := manifest{
 		Schema: "wago-plugin/v1",
 		Module: "github.com/wago-org/wasi",
-		Extensions: []extension{
+		Subpackages: []subpackage{
 			{Import: "github.com/wago-org/wasi/p1", ExtensionInfo: p1.Ext(p1.Config{}).Info()},
 			{Import: "github.com/wago-org/wasi/unstable", ExtensionInfo: unstable.Ext(unstable.Config{}).Info()},
 		},
