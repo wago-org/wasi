@@ -75,7 +75,7 @@ func main() {
 		License:      "Apache-2.0",
 		Homepage:     "https://github.com/wago-org/wasi",
 		Repository:   "https://github.com/wago-org/wasi",
-		Author:       "The wago authors",
+		Author:       "Jairus Tanaka <me@jairus.dev>",
 		Keywords:     []string{"wasi", "syscall", "posix", "stdio"},
 		Engines:      map[string]string{"wago": ">=0.1.0", "tinygo": "*"},
 		Subpackages: map[string]subpackage{
