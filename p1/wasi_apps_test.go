@@ -37,12 +37,12 @@ func TestWASIApps(t *testing.T) {
 			if err != nil {
 				t.Skipf("%s not present", tc.file)
 			}
-			c, err := wago.Compile(src)
+			c, err := wago.Compile(nil, src)
 			if err != nil {
 				t.Fatalf("compile: %v", err)
 			}
 			var stdout bytes.Buffer
-			in, err := wago.Instantiate(c, p1.Imports(p1.Config{Stdout: &stdout, Args: []string{tc.file}}))
+			in, err := wago.Instantiate(c, wago.InstantiateOptions{Imports: p1.Imports(p1.Config{Stdout: &stdout, Args: []string{tc.file}})})
 			if err != nil {
 				t.Fatalf("instantiate: %v", err)
 			}

@@ -31,7 +31,7 @@ var wasiHelloWasm = []byte{
 func TestWASIHelloWorld(t *testing.T) {
 	c := wago.MustCompile(wasiHelloWasm)
 	var out bytes.Buffer
-	in, err := wago.Instantiate(c, p1.Imports(p1.Config{Stdout: &out}))
+	in, err := wago.Instantiate(c, wago.InstantiateOptions{Imports: p1.Imports(p1.Config{Stdout: &out})})
 	if err != nil {
 		t.Fatalf("instantiate: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestWASIProcExitCode(t *testing.T) {
 	// exit is covered by the unit behavior of procExit (panic(HostExit)); here we
 	// assert the happy exit path returns a zero-code ExitError (or nil).
 	c := wago.MustCompile(wasiHelloWasm)
-	in, err := wago.Instantiate(c, p1.Imports(p1.Config{}))
+	in, err := wago.Instantiate(c, wago.InstantiateOptions{Imports: p1.Imports(p1.Config{})})
 	if err != nil {
 		t.Fatalf("instantiate: %v", err)
 	}

@@ -110,7 +110,7 @@ func runOneWASITest(wasmPath string, man wasiManifest) string {
 	if err != nil {
 		return err.Error()
 	}
-	c, err := wago.Compile(src)
+	c, err := wago.Compile(nil, src)
 	if err != nil {
 		return "compile: " + err.Error()
 	}
@@ -123,7 +123,7 @@ func runOneWASITest(wasmPath string, man wasiManifest) string {
 	// the module path as argv[0] followed by the test's args.
 	args := append([]string{filepath.Base(wasmPath)}, man.Args...)
 	var stdout bytes.Buffer
-	in, err := wago.Instantiate(c, p1.Imports(p1.Config{Stdout: &stdout, Args: args, Env: env}))
+	in, err := wago.Instantiate(c, wago.InstantiateOptions{Imports: p1.Imports(p1.Config{Stdout: &stdout, Args: args, Env: env})})
 	if err != nil {
 		return "instantiate: " + err.Error()
 	}
