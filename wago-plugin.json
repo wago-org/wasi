@@ -1,66 +1,27 @@
 {
-  "schema": "wago-plugin/v1",
-  "module": "github.com/wago-org/wasi",
-  "subpackages": [
-    {
-      "import": "github.com/wago-org/wasi/p1",
-      "id": "wago.wasi.preview1",
-      "name": "WASI preview 1",
-      "version": "1.0.0",
-      "description": "Minimal wasi_snapshot_preview1: stdio, args/env, clock, random, exit.",
-      "stability": "stable",
-      "homepage": "https://github.com/wago-org/wasi",
-      "repository": "https://github.com/wago-org/wasi",
-      "license": "Apache-2.0",
-      "authors": [
-        "The wago authors"
-      ],
-      "tags": [
-        "wasi",
-        "wasi-preview1",
-        "syscall",
-        "posix",
-        "stdio"
-      ],
-      "compatibility": {
-        "engines": {
-          "tinygo": "*",
-          "wago": ">=0.1.0"
-        },
-        "platforms": [
-          "linux/amd64"
-        ]
-      }
+  "name": "github.com/wago-org/wasi",
+  "version": "1.0.0",
+  "description": "WASI host functions for wago.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/wago-org/wasi",
+  "repository": "https://github.com/wago-org/wasi",
+  "author": "The wago authors",
+  "keywords": [
+    "wasi",
+    "syscall",
+    "posix",
+    "stdio"
+  ],
+  "engines": {
+    "tinygo": "*",
+    "wago": ">=0.1.0"
+  },
+  "subpackages": {
+    "p1": {
+      "description": "Minimal wasi_snapshot_preview1: stdio, args/env, clock, random, exit."
     },
-    {
-      "import": "github.com/wago-org/wasi/unstable",
-      "id": "wago.wasi.unstable",
-      "name": "WASI unstable (snapshot 0)",
-      "version": "1.0.0",
-      "description": "Pre-preview1 wasi_unstable: stdio, args/env, clock, random, exit.",
-      "stability": "deprecated",
-      "homepage": "https://github.com/wago-org/wasi",
-      "repository": "https://github.com/wago-org/wasi",
-      "license": "Apache-2.0",
-      "authors": [
-        "The wago authors"
-      ],
-      "tags": [
-        "wasi",
-        "wasi-unstable",
-        "snapshot0",
-        "syscall",
-        "posix"
-      ],
-      "compatibility": {
-        "engines": {
-          "tinygo": "*",
-          "wago": ">=0.1.0"
-        },
-        "platforms": [
-          "linux/amd64"
-        ]
-      }
+    "unstable": {
+      "description": "Pre-preview1 wasi_unstable: stdio, args/env, clock, random, exit."
     }
-  ]
+  }
 }
