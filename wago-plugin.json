@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "homepage": "https://github.com/wago-org/wasi",
   "repository": "https://github.com/wago-org/wasi",
-  "author": "The wago authors",
+  "author": "Jairus Tanaka <me@jairus.dev>",
   "keywords": [
     "wasi",
     "syscall",
