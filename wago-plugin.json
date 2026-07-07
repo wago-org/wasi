@@ -1,7 +1,7 @@
 {
   "schema": "wago-plugin/v1",
   "module": "github.com/wago-org/wasi",
-  "extensions": [
+  "subpackages": [
     {
       "import": "github.com/wago-org/wasi/p1",
       "id": "wago.wasi.preview1",

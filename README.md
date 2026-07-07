@@ -122,7 +122,7 @@ Rust/WASI programs (`p1/wasi_apps_test.go`).
 
 ## Manifest
 
-[`wago-plugin.json`](wago-plugin.json) is this module's manifest: the extensions it
+[`wago-plugin.json`](wago-plugin.json) is this module's manifest: the subpackages it
 ships (`p1`, `unstable`) with their identity, provenance, compatibility (semver
 `engines`, `tinygo`, platforms), capabilities, and full host-import signatures — the
 data a registry or build tool reads without compiling. It is generated from the code:
