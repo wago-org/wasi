@@ -1,14 +1,27 @@
-# WASI plugin
+# wasi
 
 A minimal [WASI](https://wasi.dev/) host interface for wasm guests, packaged as a
-wago plugin. It covers the surface a typical `_start` command-line program needs:
-the standard streams, process exit, and args / env / clock / random.
+[wago](https://github.com/wago-org/wago) plugin. It gives a `_start` command-line
+program the surface it actually needs: the standard streams, process exit, and
+args / env / clock / random.
 
-It is enough to run real `wasm32-wasip1` programs (Rust, C, Go, AssemblyScript)
-that talk to stdio — no filesystem, sockets, or polling (those imports are present
-but return a clean `errno` so a module still instantiates).
+That is enough to run real `wasm32-wasip1` programs (Rust, C, Go, AssemblyScript)
+that talk to stdio. The filesystem, sockets, and polling are **not** implemented —
+but their imports are present and return a clean `errno`, so a module that links
+the whole snapshot still instantiates and fails gracefully at the call, not at load.
 
-## Layout — pick a version by its import path
+```go
+rt := wago.NewRuntime()
+rt.Use(wasi.Ext(wasi.Config{Stdout: os.Stdout, Args: os.Args[1:], Env: os.Environ()}))
+mod, _ := rt.Compile(src)
+in, _ := rt.Instantiate(ctx, mod)
+in.Invoke("_start")            // hello, wasi
+```
+
+## Pick a version by its import path
+
+Every version shares one implementation (`internal/core`); only the wasm module
+name and the extension identity differ.
 
 | Import path | Package | wasm module | Notes |
 |---|---|---|---|
@@ -18,9 +31,8 @@ but return a clean `errno` so a module still instantiates).
 | `github.com/wago-org/wasi/p2` | `p2` | — | Placeholder for preview 2 (component model); not implemented. |
 
 `import "github.com/wago-org/wasi"` gives you plain `wasi.Ext` / `wasi.Imports` /
-`wasi.Config` bound to `wasi_snapshot_preview1`. To pin a specific snapshot,
-import the versioned subpackage by its full path instead. Every version shares one
-implementation (`internal/core`); only the module name and identity differ.
+`wasi.Config` bound to `wasi_snapshot_preview1`. To pin a specific snapshot, import
+the versioned subpackage by its full path instead.
 
 ## Library usage
 
@@ -31,7 +43,6 @@ Two ways to wire it in.
 ```go
 rt := wago.NewRuntime()
 rt.Use(wasi.Ext(wasi.Config{Stdout: os.Stdout, Args: os.Args[1:], Env: os.Environ()}))
-mod, _ := rt.Compile(src)
 in, _ := rt.Instantiate(ctx, mod)
 in.Invoke("_start")
 ```
@@ -65,6 +76,9 @@ in, _ := wago.Instantiate(c, unstable.Imports(unstable.Config{Stdout: os.Stdout}
 
 ### Config
 
+Every field is optional; the zero value is a silent, deterministic sandbox (no
+output, immediate EOF on stdin, fixed clock, `crypto/rand`).
+
 ```go
 type Config struct {
     Stdout, Stderr io.Writer    // nil discards
@@ -90,8 +104,8 @@ $ wago run --plugin wasi/unstable old-program.wasm    # pre-preview1 ABI
 ```
 
 The plugin name is a path: `wasi` is the default (preview1), and `wasi/<version>`
-selects a specific snapshot (`wasi/p1`, `wasi/unstable`). `wasi/p2` is reserved for
-preview 2 and errors until it is implemented.
+selects a specific snapshot. `wasi/p2` is reserved for preview 2 and errors until
+it is implemented.
 
 Inspect it like any other plugin:
 
@@ -108,9 +122,9 @@ module may reach.
 
 ## Coverage
 
-**Implemented:** `fd_write` / `fd_read` (stdio), `fd_close`, `fd_fdstat_get`,
-`args_*`, `environ_*`, `clock_time_get` / `clock_res_get`, `random_get`,
-`proc_exit`, plus benign no-ops (`sched_yield`, `fd_sync`, …).
+**Implemented:** `fd_write` / `fd_read` (stdio), `fd_close`, `fd_seek` (ESPIPE),
+`fd_fdstat_get`, `args_*`, `environ_*`, `clock_time_get` / `clock_res_get`,
+`random_get`, `proc_exit`, plus benign no-ops (`sched_yield`, `fd_sync`, …).
 
 **Stubbed** (return `ENOSYS` / `ENOTSUP` / `EBADF` so a module still instantiates):
 the filesystem (`path_*`, real `fd_*`), sockets (`sock_*`), and `poll_oneoff`.
@@ -122,11 +136,31 @@ Rust/WASI programs (`p1/wasi_apps_test.go`).
 
 ## Manifest
 
-[`wago-plugin.json`](wago-plugin.json) is this module's manifest: the subpackages it
-ships (`p1`, `unstable`) with their identity, provenance, compatibility (semver
-`engines`, `tinygo`, platforms), capabilities, and full host-import signatures — the
-data a registry or build tool reads without compiling. It is generated from the code:
+[`wago-plugin.json`](wago-plugin.json) is this module's manifest, modeled on
+`package.json`: shared module metadata (name, version, provenance, `engines`) plus a
+`subpackages` map of the extensions it ships — the data a registry or catalog reads
+without compiling. (Host-import signatures are deliberately left out; discover those
+by compiling or via `wago plugin inspect`.) It is generated from the code, so
+regenerate it after changing extension identity:
 
 ```console
-go generate ./...        # or: go run ./internal/genmanifest
+$ go generate ./...        # or: go run ./internal/genmanifest
 ```
+
+## Layout
+
+```
+.                     default package: re-exports p1 as wasi_snapshot_preview1
+├── p1/               wasi_snapshot_preview1 extension (+ the test corpus)
+├── unstable/         wasi_unstable "snapshot 0" extension
+├── p2/               preview 2 placeholder (no API yet)
+└── internal/
+    ├── core/         the shared host-function implementation
+    └── genmanifest/  generator for wago-plugin.json
+```
+
+Each directory has its own README with the details.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
