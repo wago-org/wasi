@@ -1,0 +1,9 @@
+{
+  "schema": "wago-plugin/v1",
+  "module": "github.com/wago-org/wasi/p2",
+  "name": "WASI preview 2",
+  "description": "WASI preview 2 (component model). Placeholder — not yet implemented.",
+  "stability": "experimental",
+  "keywords": ["wasi", "wasi-preview2", "component-model"],
+  "engines": { "wago": ">=0.1.0" }
+}

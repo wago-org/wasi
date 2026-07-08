@@ -7,7 +7,7 @@
 //
 //	// As a plugin on a Runtime (capability-gated, inspectable):
 //	rt := wago.NewRuntime()
-//	rt.Use(p1.Ext(p1.Config{Stdout: os.Stdout}))
+//	rt.Use(p1.Init(p1.Config{Stdout: os.Stdout}))
 //
 //	// As a raw host-import bundle on the low-level Instantiate path:
 //	in, _ := wago.Instantiate(c, p1.Imports(p1.Config{Stdout: os.Stdout}))
@@ -16,8 +16,12 @@ package p1
 
 import (
 	wago "github.com/wago-org/wago"
+	"github.com/wago-org/wasi"
 	"github.com/wago-org/wasi/internal/core"
 )
+
+// ID is this extension's module path — its key in the module's wago.json.
+const ID = "github.com/wago-org/wasi/p1"
 
 // Module is the wasm import module name these functions bind under.
 const Module = "wasi_snapshot_preview1"
@@ -28,24 +32,10 @@ const Cap = core.Cap
 // Config configures the host bundle. See core.Config for field semantics.
 type Config = core.Config
 
-// Ext constructs the wasi_snapshot_preview1 extension from cfg.
-func Ext(cfg Config) wago.Extension {
-	return core.New(Module, wago.ExtensionInfo{
-		ID:          "wago.wasi.preview1",
-		Name:        "WASI preview 1",
-		Version:     "1.0.0",
-		Description: "Minimal wasi_snapshot_preview1: stdio, args/env, clock, random, exit.",
-		Stability:   wago.Stable,
-		Homepage:    "https://github.com/wago-org/wasi",
-		Repository:  "https://github.com/wago-org/wasi",
-		License:     "Apache-2.0",
-		Authors:     []string{"The wago authors"},
-		Tags:        []string{"wasi", "wasi-preview1", "syscall", "posix", "stdio"},
-		Compat: wago.Compatibility{
-			Engines:   map[string]string{"wago": ">=0.1.0", "tinygo": "*"},
-			Platforms: []string{"linux/amd64"},
-		},
-	}, cfg)
+// Init constructs the wasi_snapshot_preview1 extension from cfg; its identity is
+// loaded from the module's wago.json.
+func Init(cfg Config) wago.Extension {
+	return core.New(Module, wasi.Info(ID), cfg)
 }
 
 // Imports returns the wasi_snapshot_preview1 host bundle for the low-level

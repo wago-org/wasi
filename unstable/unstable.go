@@ -9,8 +9,12 @@ package unstable
 
 import (
 	wago "github.com/wago-org/wago"
+	"github.com/wago-org/wasi"
 	"github.com/wago-org/wasi/internal/core"
 )
+
+// ID is this extension's module path — its key in the module's wago.json.
+const ID = "github.com/wago-org/wasi/unstable"
 
 // Module is the wasm import module name these functions bind under.
 const Module = "wasi_unstable"
@@ -21,24 +25,10 @@ const Cap = core.Cap
 // Config configures the host bundle. See core.Config for field semantics.
 type Config = core.Config
 
-// Ext constructs the wasi_unstable extension from cfg.
-func Ext(cfg Config) wago.Extension {
-	return core.New(Module, wago.ExtensionInfo{
-		ID:          "wago.wasi.unstable",
-		Name:        "WASI unstable (snapshot 0)",
-		Version:     "1.0.0",
-		Description: "Pre-preview1 wasi_unstable: stdio, args/env, clock, random, exit.",
-		Stability:   wago.Deprecated,
-		Homepage:    "https://github.com/wago-org/wasi",
-		Repository:  "https://github.com/wago-org/wasi",
-		License:     "Apache-2.0",
-		Authors:     []string{"The wago authors"},
-		Tags:        []string{"wasi", "wasi-unstable", "snapshot0", "syscall", "posix"},
-		Compat: wago.Compatibility{
-			Engines:   map[string]string{"wago": ">=0.1.0", "tinygo": "*"},
-			Platforms: []string{"linux/amd64"},
-		},
-	}, cfg)
+// Init constructs the wasi_unstable extension from cfg; its identity is loaded
+// from the module's wago.json.
+func Init(cfg Config) wago.Extension {
+	return core.New(Module, wasi.Info(ID), cfg)
 }
 
 // Imports returns the wasi_unstable host bundle for the low-level

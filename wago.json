@@ -1,0 +1,33 @@
+{
+  "schema": "wago-plugin/v1",
+  "module": "github.com/wago-org/wasi",
+  "name": "WASI",
+  "version": "0.0.0",
+  "description": "WASI host functions for wago: stdio, args/env, clock, random, exit.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/wago-org/wasi",
+  "repository": "https://github.com/wago-org/wasi",
+  "authors": ["The wago authors"],
+  "keywords": ["wasi", "syscall", "posix", "stdio"],
+  "engines": { "wago": ">=0.1.0", "tinygo": "*" },
+  "platforms": ["linux/amd64"],
+  "subpackages": [
+    {
+      "module": "github.com/wago-org/wasi/p1",
+      "name": "WASI preview 1",
+      "version": "1.0.0",
+      "description": "Minimal wasi_snapshot_preview1: stdio, args/env, clock, random, exit.",
+      "stability": "stable",
+      "keywords": ["wasi", "wasi-preview1", "syscall", "posix", "stdio"]
+    },
+    {
+      "module": "github.com/wago-org/wasi/unstable",
+      "name": "WASI unstable (snapshot 0)",
+      "version": "1.0.0",
+      "description": "Pre-preview1 wasi_unstable: stdio, args/env, clock, random, exit.",
+      "stability": "deprecated",
+      "keywords": ["wasi", "wasi-unstable", "snapshot0", "syscall", "posix"]
+    },
+    "./p2/wago.json"
+  ]
+}
