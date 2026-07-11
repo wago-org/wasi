@@ -4,13 +4,10 @@
 </div>
 
 <p align="center">
-    <a href="https://pkg.go.dev/github.com/wago-org/wasi"><img src="https://pkg.go.dev/badge/github.com/wago-org/wasi.svg" alt="Go Reference"></a>
     <a href="https://github.com/wago-org/wasi/actions/workflows/ci.yml"><img src="https://github.com/wago-org/wasi/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="https://codecov.io/gh/wago-org/wasi"><img src="https://codecov.io/gh/wago-org/wasi/branch/main/graph/badge.svg" alt="Coverage"></a>
-    <a href="https://github.com/wago-org/wago"><img src="https://img.shields.io/badge/wago-%3E%3D0.1.0-6E56CF.svg" alt="Wago >= 0.1.0"></a>
     <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-%3E%3D1.22-00ADD8.svg" alt="Go >= 1.22"></a>
-    <a href="https://tinygo.org/"><img src="https://img.shields.io/badge/tinygo-compatible-00A3E0.svg" alt="TinyGo compatible"></a>
-    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+    <a href="https://github.com/wago-org/wago"><img src="https://img.shields.io/badge/wago-%3E%3D0.1.0-6E56CF.svg" alt="Wago >= 0.1.0"></a>
 </p>
 
 <details>
