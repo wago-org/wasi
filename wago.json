@@ -1,7 +1,6 @@
 {
   "schema": "wago-plugin/v1",
   "module": "github.com/wago-org/wasi",
-  "name": "WASI",
   "version": "0.0.0",
   "description": "WASI host functions for wago: stdio, args/env, clock, random, exit.",
   "license": "Apache-2.0",

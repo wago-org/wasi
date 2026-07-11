@@ -31,7 +31,7 @@ func init() {
 			Env: os.Environ(),
 		}
 	}
-	wago.RegisterExtension("github.com/wago-org/wasi", func() wago.Extension { return wasi.Init(std()) })
-	wago.RegisterExtension("github.com/wago-org/wasi/p1", func() wago.Extension { return p1.Init(std()) })
-	wago.RegisterExtension("github.com/wago-org/wasi/unstable", func() wago.Extension { return unstable.Init(std()) })
+	wago.RegisterExtension("wago-org/wasi", func() wago.Extension { return wasi.Init(std()) })
+	wago.RegisterExtension("wago-org/wasi/p1", func() wago.Extension { return p1.Init(std()) })
+	wago.RegisterExtension("wago-org/wasi/unstable", func() wago.Extension { return unstable.Init(std()) })
 }
