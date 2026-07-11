@@ -162,6 +162,12 @@ func Info(module string) wago.ExtensionInfo {
 		Tags:        p.Keywords,
 		Private:     p.Private,
 		Compat:      wago.Compatibility{Engines: p.Engines, Platforms: p.Platforms},
+		// WASI contributes host imports and obtains CLI argv from Wago's narrow
+		// host environment when it is loaded as a manifest plugin.
+		RequiresCapabilities: []wago.PluginCapability{
+			wago.PluginHostImports,
+			wago.PluginHostEnvironment,
+		},
 	}
 }
 

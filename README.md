@@ -128,7 +128,7 @@ in.Invoke("_start")
 ### From the command line
 
 ```sh
-wago run --plugin wasi program.wasm arg1 arg2
+wago run --plugin github.com/wago-org/wasi program.wasm arg1 arg2
 ```
 
 The CLI feeds the process's own stdio and environment to the guest and forwards the

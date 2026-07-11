@@ -16,7 +16,7 @@ import (
 
 // Cap is the capability guarding the whole WASI surface. A policy can allow or
 // deny it; with no policy it is permitted.
-const Cap = wago.CapWASI
+const Cap wago.Capability = "wasi"
 
 // WASI errno values (subset used here); identical across snapshots.
 const (
@@ -66,8 +66,22 @@ func (e *Extension) Info() wago.ExtensionInfo { return e.info }
 
 // Register wires the host imports onto reg under the extension's module name.
 func (e *Extension) Register(reg *wago.Registry) error {
+	// Manifest-loaded WASI gets the current command's argv through the scoped
+	// host environment. An explicitly configured argv remains authoritative for
+	// the programmatic API.
+	env, err := reg.HostEnvironment()
+	if err != nil {
+		return err
+	}
+	if e.cfg.Args == nil {
+		e.cfg.Args = env.GuestArgs()
+	}
+	imports, err := reg.HostImports()
+	if err != nil {
+		return err
+	}
 	reg.Capability(Cap, wago.CapabilityDocs("wasi: stdio, args/env, clock, random, process exit"))
-	m := reg.ImportModule(e.module)
+	m := imports.Module(e.module)
 	for _, b := range e.bindings() {
 		m.Func(b.name, b.fn).Params(b.params...).Results(b.results...).Capability(Cap).Docs(b.docs)
 	}
