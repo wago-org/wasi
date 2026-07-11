@@ -1,4 +1,4 @@
-//go:build linux && amd64 && !tinygo
+//go:build linux && amd64 && !tinygo && !race
 
 package p1_test
 

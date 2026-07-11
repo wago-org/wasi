@@ -9,7 +9,7 @@ import (
 
 func TestWASIPluginRequiresScopedHostGrants(t *testing.T) {
 	if err := wago.NewRuntime().LoadPlugins([]wago.PluginConfig{{
-		Name:         "wasi",
+		Name:         "github.com/wago-org/wasi",
 		Capabilities: []wago.PluginCapability{wago.PluginHostImports},
 	}}); !errors.Is(err, wago.ErrPermissionDenied) {
 		t.Fatalf("LoadPlugins without host.environment = %v, want permission denial", err)
@@ -18,7 +18,7 @@ func TestWASIPluginRequiresScopedHostGrants(t *testing.T) {
 	rt := wago.NewRuntime()
 	defer rt.Close()
 	if err := rt.LoadPlugins([]wago.PluginConfig{{
-		Name: "wasi",
+		Name: "github.com/wago-org/wasi",
 		Capabilities: []wago.PluginCapability{
 			wago.PluginHostImports,
 			wago.PluginHostEnvironment,
