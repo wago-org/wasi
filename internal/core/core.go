@@ -16,7 +16,7 @@ import (
 
 // Cap is the capability guarding the whole WASI surface. A policy can allow or
 // deny it; with no policy it is permitted.
-const Cap = wago.CapWASI
+const Cap wago.Capability = "wasi"
 
 // WASI errno values (subset used here); identical across snapshots.
 const (
