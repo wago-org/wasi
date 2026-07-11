@@ -23,13 +23,12 @@ import (
 )
 
 func init() {
-	// Host config: the wago process's own stdio + environment, and the run's argv
-	// from the engine host environment (set by the CLI before each run).
+	// Host config: the wago process's own stdio and environment. Register obtains
+	// the run's argv from Wago's capability-gated host environment.
 	std := func() wasi.Config {
 		return wasi.Config{
 			Stdout: os.Stdout, Stderr: os.Stderr, Stdin: os.Stdin,
-			Env:  os.Environ(),
-			Args: wago.GuestArgs(),
+			Env: os.Environ(),
 		}
 	}
 	wago.RegisterExtension("wasi", func() wago.Extension { return wasi.Init(std()) })
