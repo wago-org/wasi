@@ -15,6 +15,7 @@ package register
 
 import (
 	"os"
+	"time"
 
 	wago "github.com/wago-org/wago"
 	"github.com/wago-org/wasi"
@@ -29,6 +30,7 @@ func init() {
 		return wasi.Config{
 			Stdout: os.Stdout, Stderr: os.Stderr, Stdin: os.Stdin,
 			Env: os.Environ(),
+			Now: func() int64 { return time.Now().UnixNano() },
 		}
 	}
 	wago.RegisterExtension("github.com/wago-org/wasi", func() wago.Extension { return wasi.Init(std()) })
