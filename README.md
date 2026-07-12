@@ -222,6 +222,13 @@ Two larger tiers are gated so a plain `go test` stays fast and hermetic:
   preopen, sockets, or an unimplemented feature are skipped; the rest must match their
   manifest's exit code and stdout.
 
+The preview 1 corpus benchmarks compare Wago with Wazero's compiler runtime on
+the same application binaries. Run them on Darwin or Linux `amd64`/`arm64` with:
+
+```sh
+go test -run '^$' -bench '^Benchmark(Wazero)?WASI' -benchmem -count=1 -benchtime=2000ms ./p1
+```
+
 ## Architecture
 
 - **`wasi.go`** - the module root: the default (`wasi_snapshot_preview1`) `Init` /
