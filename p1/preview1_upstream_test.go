@@ -12,6 +12,7 @@ import (
 
 	wago "github.com/wago-org/wago"
 	"github.com/wago-org/wasi/p1"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -171,6 +172,7 @@ const (
 	errnoInval      = uint32(28)
 	errnoIO         = uint32(29)
 	errnoLoop       = uint32(32)
+	errnoMfile      = uint32(33)
 	errnoNoent      = uint32(44)
 	errnoNotsock    = uint32(57)
 	errnoNotcapable = uint32(76)
@@ -429,4 +431,91 @@ func TestPreview1WazeroSocketDescriptorErrors(t *testing.T) {
 	)
 	requireErrno(t, errnoBadf, h.call(t, "sock_shutdown", 42, 3))
 	requireErrno(t, errnoNotsock, h.call(t, "sock_shutdown", 3, 3))
+}
+
+func TestPreview1RightsAttenuationCannotBeReEscalated(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(root+"/child", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+		preview1Func{"fd_fdstat_get", []byte{wasmI32, wasmI32}},
+		preview1Func{"fd_fdstat_set_rights", []byte{wasmI32, wasmI64, wasmI64}},
+		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
+	)
+	requireErrno(t, errnoSuccess, h.call(t, "fd_fdstat_get", 3, 64))
+	base := binary.LittleEndian.Uint64(h.memory()[72:])
+	requireErrno(t, errnoSuccess, h.call(t, "fd_fdstat_set_rights", 3, base, rightFDReadDir))
+	copy(h.memory()[32:], "child")
+	requireErrno(t, errnoNotcapable, h.call(t, "path_open", 3, 0, 32, 5, 2, rightFDReadDir, rightFDRead, 0, 16))
+}
+
+func TestPreview1OpenFileQuota(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/file", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}, MaxOpenFiles: 4},
+		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
+	)
+	copy(h.memory()[32:], "file")
+	requireErrno(t, errnoMfile, h.call(t, "path_open", 3, 0, 32, 4, 0, rightFDRead, 0, 0, 16))
+}
+
+func TestPreview1SymlinkSwapCannotEscapePreopen(t *testing.T) {
+	base := t.TempDir()
+	root, outside := base+"/root", base+"/outside"
+	for _, dir := range []string{root, outside, root + "/gate"} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(root+"/gate/victim", []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside+"/victim", []byte("outside-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../outside", root+"/swap"); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
+		preview1Func{"fd_close", []byte{wasmI32}},
+	)
+	copy(h.memory()[32:], "gate/victim")
+	stop := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if err := unix.Renameat2(unix.AT_FDCWD, root+"/gate", unix.AT_FDCWD, root+"/swap", unix.RENAME_EXCHANGE); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		errno := h.call(t, "path_open", 3, 1, 32, 11, 8, rightFDWrite, 0, 0, 16)
+		if errno == errnoSuccess {
+			requireErrno(t, errnoSuccess, h.call(t, "fd_close", uint64(binary.LittleEndian.Uint32(h.memory()[16:]))))
+		} else if errno != errnoNotcapable && errno != errnoNoent {
+			t.Fatalf("path_open during swap errno = %d", errno)
+		}
+	}
+	close(stop)
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
+	got, err := os.ReadFile(outside + "/victim")
+	if err != nil || string(got) != "outside-secret" {
+		t.Fatalf("outside capability was modified: %q, %v", got, err)
+	}
 }

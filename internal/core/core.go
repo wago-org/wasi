@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"io"
+	"time"
 
 	wago "github.com/wago-org/wago"
 )
@@ -41,6 +42,12 @@ type Config struct {
 	// directories. Each entry is exposed as a capability-scoped preopen starting
 	// at fd 3. No host filesystem is visible when this is nil.
 	Preopens map[string]string
+	// MaxOpenFiles bounds the host descriptors owned by one guest instance,
+	// including stdio and preopens. Zero uses the secure default of 1024.
+	MaxOpenFiles uint32
+	// MaxPollDuration rejects clock subscriptions longer than this duration so a
+	// guest cannot pin a host call indefinitely. Zero uses one second.
+	MaxPollDuration time.Duration
 }
 
 // Extension is a WASI extension bound to one wasm import module name. p1 and
@@ -88,6 +95,7 @@ func (e *Extension) Register(reg *wago.Registry) error {
 		return err
 	}
 	e.guard.resolver = imports.CallerResolver()
+	reg.Hooks().AfterClose(func(ctx *wago.InstanceContext) { e.closeInstance(ctx.Instance) })
 	reg.Capability(Cap, wago.CapabilityDocs("wasi: stdio, args/env, clock, random, process exit"))
 	m := imports.Module(e.module)
 	for _, b := range e.bindings() {

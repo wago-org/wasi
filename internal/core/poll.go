@@ -29,6 +29,10 @@ func (e *Extension) pollOneoff(m wago.HostModule, p, r []uint64) {
 	events := make([]event, 0, n)
 	clocks := make([]event, 0, n)
 	var delay time.Duration
+	maxDelay := e.cfg.MaxPollDuration
+	if maxDelay <= 0 {
+		maxDelay = time.Second
+	}
 	for i := uint32(0); i < n; i++ {
 		sub := mem[in+i*48 : in+(i+1)*48]
 		ev := event{userdata: binary.LittleEndian.Uint64(sub), typ: sub[8]}
@@ -53,6 +57,10 @@ func (e *Extension) pollOneoff(m wago.HostModule, p, r []uint64) {
 					timeout = 0
 				}
 			}
+			if timeout > uint64(maxDelay) {
+				r[0] = wasiEInval
+				return
+			}
 			if d := time.Duration(timeout); delay == 0 || d < delay {
 				delay = d
 			}
@@ -76,7 +84,12 @@ func (e *Extension) pollOneoff(m wago.HostModule, p, r []uint64) {
 	}
 	if len(events) == 0 {
 		if delay > 0 {
+			// withFS owns this lock while resolving descriptors. No filesystem
+			// state is used after this point, so release it while waiting to keep
+			// one guest clock from blocking unrelated WASI instances.
+			e.guard.mu.Unlock()
 			time.Sleep(delay)
+			e.guard.mu.Lock()
 		}
 		events = append(events, clocks...)
 	}

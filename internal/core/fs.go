@@ -4,32 +4,37 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	wago "github.com/wago-org/wago"
+	"golang.org/x/sys/unix"
 )
+
+const maxDirectoryEntries = 16384
+const maxInt64Value = uint64(^uint64(0) >> 1)
 
 type fsState struct {
 	fds    map[uint32]*fdEntry
 	nextFD uint32
+	maxFDs uint32
 }
 
 type fsGuard struct {
 	mu       sync.Mutex
 	resolver *wago.CallerResolver
 	states   map[*wago.Instance]*fsState
+	raw      map[wago.HostModule]*fsState
+	claimed  bool
 }
 
 type fdEntry struct {
 	file       *os.File
-	path       string
-	root       string
 	mount      string
 	preopen    string
 	flags      uint16
@@ -39,12 +44,19 @@ type fdEntry struct {
 }
 
 func (e *Extension) initFS() {
-	e.guard = &fsGuard{states: make(map[*wago.Instance]*fsState)}
+	e.guard = &fsGuard{states: make(map[*wago.Instance]*fsState), raw: make(map[wago.HostModule]*fsState)}
 	e.fs = e.makeFS()
 }
 
 func (e *Extension) makeFS() *fsState {
-	s := &fsState{fds: make(map[uint32]*fdEntry), nextFD: 3}
+	maxFDs := e.cfg.MaxOpenFiles
+	if maxFDs == 0 {
+		maxFDs = 1024
+	}
+	if maxFDs < 3 {
+		maxFDs = 3
+	}
+	s := &fsState{fds: make(map[uint32]*fdEntry), nextFD: 3, maxFDs: maxFDs}
 	for fd := uint32(0); fd < 3; fd++ {
 		rights := rightFDFilestatGet | rightPollFDReadWrite
 		if fd == 0 {
@@ -60,6 +72,9 @@ func (e *Extension) makeFS() *fsState {
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if uint32(len(s.fds)) >= maxFDs {
+			break
+		}
 		host, err := filepath.Abs(e.cfg.Preopens[name])
 		if err != nil {
 			continue
@@ -70,7 +85,7 @@ func (e *Extension) makeFS() *fsState {
 		}
 		fd := s.nextFD
 		s.nextFD++
-		s.fds[fd] = &fdEntry{file: f, path: host, root: host, mount: host, preopen: name, rights: directoryRights, inheriting: allRights, dirCookies: map[uint64]bool{0: true}}
+		s.fds[fd] = &fdEntry{file: f, mount: host, preopen: name, rights: directoryRights, inheriting: allRights, dirCookies: map[uint64]bool{0: true}}
 	}
 	return s
 }
@@ -83,19 +98,51 @@ func (e *Extension) withFS(m wago.HostModule, call func()) {
 		if in, err := e.guard.resolver.Resolve(m); err == nil {
 			state = e.guard.states[in]
 			if state == nil {
-				if len(e.guard.states) == 0 {
+				if !e.guard.claimed {
 					state = e.fs
+					e.guard.claimed = true
 				} else {
 					state = e.makeFS()
 				}
 				e.guard.states[in] = state
 			}
 		}
+	} else if m != nil {
+		state = e.guard.raw[m]
+		if state == nil {
+			if !e.guard.claimed {
+				state = e.fs
+				e.guard.claimed = true
+			} else {
+				state = e.makeFS()
+			}
+			e.guard.raw[m] = state
+		}
 	}
 	previous := e.fs
 	e.fs = state
 	defer func() { e.fs = previous }()
 	call()
+}
+
+func closeFS(state *fsState) {
+	if state == nil {
+		return
+	}
+	for _, entry := range state.fds {
+		if entry.file != nil {
+			_ = entry.file.Close()
+		}
+	}
+	clear(state.fds)
+}
+
+func (e *Extension) closeInstance(in *wago.Instance) {
+	e.guard.mu.Lock()
+	defer e.guard.mu.Unlock()
+	state := e.guard.states[in]
+	delete(e.guard.states, in)
+	closeFS(state)
 }
 
 func (e *Extension) entry(fd uint32) (*fdEntry, uint64) {
@@ -124,9 +171,9 @@ func guestBytes(mem []byte, ptr, n uint32) (string, uint64) {
 	return string(b), wasiOK
 }
 
-// resolve confines path lookup to the capability root associated with dirfd.
-// The final symlink is intentionally not evaluated: callers choose os.Stat or
-// os.Lstat depending on their lookup flags.
+// resolve validates a guest path and returns its directory capability. Kernel
+// operations below additionally enforce RESOLVE_BENEATH so validation and use
+// cannot be separated by a symlink race.
 func (e *Extension) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
 	d, code := e.entry(fd)
 	if code != 0 {
@@ -142,13 +189,13 @@ func (e *Extension) resolve(fd uint32, guest string) (*fdEntry, string, uint64) 
 	if !st.IsDir() {
 		return nil, "", wasiENotdir
 	}
-	if guest == "" || filepath.IsAbs(guest) {
+	if guest == "" || strings.HasPrefix(guest, "/") {
 		return nil, "", wasiENotcapable
 	}
 	depth := 0
-	for _, part := range strings.FieldsFunc(filepath.ToSlash(guest), func(r rune) bool { return r == '/' }) {
+	for _, part := range strings.Split(guest, "/") {
 		switch part {
-		case ".":
+		case "", ".":
 		case "..":
 			depth--
 		default:
@@ -158,46 +205,52 @@ func (e *Extension) resolve(fd uint32, guest string) (*fdEntry, string, uint64) 
 			return nil, "", wasiENotcapable
 		}
 	}
-	target := filepath.Clean(filepath.Join(d.path, filepath.FromSlash(guest)))
-	rel, err := filepath.Rel(d.root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, "", wasiENotcapable
-	}
-	// Resolve existing parents so an intermediate symlink cannot escape.
-	if target != d.root {
-		parent := filepath.Dir(target)
-		realParent, err := filepath.EvalSymlinks(parent)
-		if err == nil {
-			rel, err = filepath.Rel(d.root, realParent)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return nil, "", wasiENotcapable
-			}
-			target = filepath.Join(realParent, filepath.Base(target))
-		}
-	}
-	return d, target, wasiOK
+	return d, path.Clean(guest), wasiOK
 }
 
-func confineFollow(d *fdEntry, path string) (string, uint64) {
-	real, err := filepath.EvalSymlinks(path)
+const secureResolve = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS
+
+func capabilityErr(err error) uint64 {
+	if err == syscall.EXDEV {
+		return wasiENotcapable
+	}
+	return errno(err)
+}
+
+func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
+	if flags&unix.O_CREAT == 0 {
+		mode = 0
+	}
+	fd, err := unix.Openat2(int(d.file.Fd()), name, &unix.OpenHow{
+		Flags: uint64(flags | unix.O_CLOEXEC), Mode: uint64(mode), Resolve: secureResolve,
+	})
 	if err != nil {
-		return "", errno(err)
+		return nil, capabilityErr(err)
 	}
-	rel, err := filepath.Rel(d.root, real)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", wasiENotcapable
-	}
-	return real, wasiOK
+	return os.NewFile(uintptr(fd), name), wasiOK
 }
 
-func (e *Extension) alloc(entry *fdEntry) uint32 {
+func openParent(d *fdEntry, name string) (*os.File, string, uint64) {
+	parent, leaf := path.Split(name)
+	parent = strings.TrimSuffix(parent, "/")
+	if parent == "" {
+		parent = "."
+	}
+	f, code := openAt(d, parent, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	return f, leaf, code
+}
+
+func (e *Extension) alloc(entry *fdEntry) (uint32, uint64) {
+	if uint32(len(e.fs.fds)) >= e.fs.maxFDs {
+		return 0, wasiEMfile
+	}
 	fd := e.fs.nextFD
 	for e.fs.fds[fd] != nil {
 		fd++
 	}
 	e.fs.nextFD = fd + 1
 	e.fs.fds[fd] = entry
-	return fd
+	return fd, wasiOK
 }
 
 func iovecs(mem []byte, ptr, count uint32) ([][]byte, uint64) {
@@ -295,7 +348,7 @@ func (e *Extension) fdFdstatSetFlags(_ wago.HostModule, p, r []uint64) {
 	if code == 0 {
 		code = require(f, rightFDStatSetFlags)
 	}
-	if code == 0 && flags&^uint16(0x1f) != 0 {
+	if code == 0 && p[1]&^uint64(0x1f) != 0 {
 		code = wasiEInval
 	}
 	if code == 0 {
@@ -361,19 +414,25 @@ func (e *Extension) fdFilestatSetSize(_ wago.HostModule, p, r []uint64) {
 	if code == 0 && f.file == nil {
 		code = wasiEBadf
 	}
+	if code == 0 && p[1] > maxInt64Value {
+		code = wasiEOverflow
+	}
 	if code == 0 {
 		code = errno(f.file.Truncate(int64(p[1])))
 	}
 	r[0] = code
 }
 
-func validFstFlags(flags uint16) bool {
-	return flags&^uint16(15) == 0 && flags&3 != 3 && flags&12 != 12
+func validFstFlags(flags uint64) bool {
+	return flags&^uint64(15) == 0 && flags&3 != 3 && flags&12 != 12
 }
 
-func setTimes(path string, info os.FileInfo, atim, mtim int64, flags uint16) uint64 {
+func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64) ([]unix.Timespec, uint64) {
 	if !validFstFlags(flags) {
-		return wasiEInval
+		return nil, wasiEInval
+	}
+	if flags&1 != 0 && atim > maxInt64Value || flags&4 != 0 && mtim > maxInt64Value {
+		return nil, wasiEOverflow
 	}
 	a, mt := info.ModTime(), info.ModTime()
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
@@ -381,51 +440,18 @@ func setTimes(path string, info os.FileInfo, atim, mtim int64, flags uint16) uin
 	}
 	now := time.Now()
 	if flags&1 != 0 {
-		a = time.Unix(0, atim)
+		a = time.Unix(0, int64(atim))
 	}
 	if flags&2 != 0 {
 		a = now
 	}
 	if flags&4 != 0 {
-		mt = time.Unix(0, mtim)
+		mt = time.Unix(0, int64(mtim))
 	}
 	if flags&8 != 0 {
 		mt = now
 	}
-	return errno(os.Chtimes(path, a, mt))
-}
-
-func setSymlinkTimes(path string, info os.FileInfo, atim, mtim int64, flags uint16) uint64 {
-	if !validFstFlags(flags) {
-		return wasiEInval
-	}
-	a, mt := info.ModTime(), info.ModTime()
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		a = time.Unix(st.Atim.Sec, st.Atim.Nsec)
-	}
-	now := time.Now()
-	if flags&1 != 0 {
-		a = time.Unix(0, atim)
-	}
-	if flags&2 != 0 {
-		a = now
-	}
-	if flags&4 != 0 {
-		mt = time.Unix(0, mtim)
-	}
-	if flags&8 != 0 {
-		mt = now
-	}
-	ts := [2]syscall.Timespec{syscall.NsecToTimespec(a.UnixNano()), syscall.NsecToTimespec(mt.UnixNano())}
-	p, err := syscall.BytePtrFromString(path)
-	if err != nil {
-		return wasiEInval
-	}
-	_, _, callErr := syscall.Syscall6(syscall.SYS_UTIMENSAT, ^uintptr(99), uintptr(unsafe.Pointer(p)), uintptr(unsafe.Pointer(&ts[0])), 0x100, 0, 0)
-	if callErr != 0 {
-		return errno(callErr)
-	}
-	return wasiOK
+	return []unix.Timespec{unix.NsecToTimespec(a.UnixNano()), unix.NsecToTimespec(mt.UnixNano())}, wasiOK
 }
 
 func (e *Extension) fdFilestatSetTimes(_ wago.HostModule, p, r []uint64) {
@@ -441,7 +467,11 @@ func (e *Extension) fdFilestatSetTimes(_ wago.HostModule, p, r []uint64) {
 		if err != nil {
 			code = errno(err)
 		} else {
-			code = setTimes(f.path, st, int64(p[1]), int64(p[2]), uint16(p[3]))
+			times, timeCode := timesFor(st, p[1], p[2], p[3])
+			code = timeCode
+			if code == 0 {
+				code = errno(unix.UtimesNanoAt(int(f.file.Fd()), "", times, unix.AT_EMPTY_PATH))
+			}
 		}
 	}
 	r[0] = code
@@ -460,6 +490,9 @@ func (e *Extension) readAt(m wago.HostModule, p, r []uint64) {
 		code = memCode
 	}
 	var total uint32
+	if code == 0 && p[3] > maxInt64Value {
+		code = wasiEOverflow
+	}
 	off := int64(p[3])
 	if code == 0 && f.file == nil {
 		code = wasiEBadf
@@ -494,6 +527,9 @@ func (e *Extension) writeAt(m wago.HostModule, p, r []uint64) {
 		code = memCode
 	}
 	var total uint32
+	if code == 0 && p[3] > maxInt64Value {
+		code = wasiEOverflow
+	}
 	off := int64(p[3])
 	if code == 0 && f.file == nil {
 		code = wasiEBadf
@@ -505,12 +541,7 @@ func (e *Extension) writeAt(m wago.HostModule, p, r []uint64) {
 		var n int
 		var err error
 		if f.flags&1 != 0 {
-			var appendFile *os.File
-			appendFile, err = os.OpenFile(f.path, os.O_WRONLY|os.O_APPEND, 0)
-			if err == nil {
-				n, err = appendFile.Write(b)
-				_ = appendFile.Close()
-			}
+			n, err = unix.Pwrite(int(f.file.Fd()), b, off)
 		} else {
 			n, err = f.file.WriteAt(b, off)
 		}
@@ -540,10 +571,15 @@ func (e *Extension) fdReaddir(m wago.HostModule, p, r []uint64) {
 	}
 	var entries []os.DirEntry
 	if code == 0 {
-		var err error
-		entries, err = os.ReadDir(f.path)
-		if err != nil {
-			code = errno(err)
+		dir, openCode := openAt(f, ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+		code = openCode
+		if code == 0 {
+			var err error
+			entries, err = dir.ReadDir(maxDirectoryEntries)
+			_ = dir.Close()
+			if err != nil && err != io.EOF {
+				code = errno(err)
+			}
 		}
 	}
 	buf, bufLen := uint32(p[1]), uint32(p[2])
@@ -557,13 +593,19 @@ func (e *Extension) fdReaddir(m wago.HostModule, p, r []uint64) {
 		var info os.FileInfo
 		var err error
 		if i == 0 {
-			info, err = os.Stat(f.path)
+			info, err = f.file.Stat()
 		} else if i == 1 {
 			name = ".."
-			info, err = os.Stat(filepath.Dir(f.path))
+			info, err = f.file.Stat()
 		} else {
 			name = entries[i-2].Name()
-			info, err = entries[i-2].Info()
+			entryFile, openCode := openAt(f, name, unix.O_PATH|unix.O_NOFOLLOW, 0)
+			if openCode != 0 {
+				code = openCode
+				break
+			}
+			info, err = entryFile.Stat()
+			_ = entryFile.Close()
 		}
 		if err != nil {
 			code = errno(err)
@@ -643,12 +685,12 @@ func (e *Extension) fdTell(m wago.HostModule, p, r []uint64) {
 }
 
 func (e *Extension) pathCreateDirectory(m wago.HostModule, p, r []uint64) {
-	e.pathUnary(m, p, r, rightPathCreateDirectory, func(path string) error { return os.Mkdir(path, 0o777) })
+	e.pathUnary(m, p, r, rightPathCreateDirectory, func(fd int, name string) error { return unix.Mkdirat(fd, name, 0o777) })
 }
 
-func (e *Extension) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op func(string) error) {
+func (e *Extension) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op func(int, string) error) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
-	d, path, pathCode := e.resolve(uint32(p[0]), name)
+	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
 	}
@@ -656,33 +698,43 @@ func (e *Extension) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op
 		code = require(d, right)
 	}
 	if code == 0 {
-		code = errno(op(path))
+		parent, leaf, parentCode := openParent(d, name)
+		code = parentCode
+		if code == 0 {
+			code = errno(op(int(parent.Fd()), leaf))
+			_ = parent.Close()
+		}
 	}
 	r[0] = code
 }
 
 func (e *Extension) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
-	d, path, pathCode := e.resolve(uint32(p[0]), name)
+	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
 	}
 	if code == 0 {
 		code = require(d, rightPathFilestatGet)
 	}
-	if code == 0 && uint16(p[1])&1 != 0 {
-		path, code = confineFollow(d, path)
+	if code == 0 && p[1]&^uint64(1) != 0 {
+		code = wasiEInval
 	}
 	var st os.FileInfo
 	if code == 0 {
-		var err error
-		if uint16(p[1])&1 != 0 {
-			st, err = os.Stat(path)
-		} else {
-			st, err = os.Lstat(path)
+		flags := unix.O_PATH
+		if uint16(p[1])&1 == 0 {
+			flags |= unix.O_NOFOLLOW
 		}
-		if err != nil {
-			code = errno(err)
+		f, openCode := openAt(d, name, flags, 0)
+		code = openCode
+		if code == 0 {
+			var err error
+			st, err = f.Stat()
+			_ = f.Close()
+			if err != nil {
+				code = errno(err)
+			}
 		}
 	}
 	if code == 0 {
@@ -693,31 +745,55 @@ func (e *Extension) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 
 func (e *Extension) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
-	d, path, pathCode := e.resolve(uint32(p[0]), name)
+	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
 	}
 	if code == 0 {
 		code = require(d, rightPathFilestatSetTimes)
 	}
-	if code == 0 && uint16(p[1])&1 != 0 {
-		path, code = confineFollow(d, path)
+	if code == 0 && p[1]&^uint64(1) != 0 {
+		code = wasiEInval
 	}
 	if code == 0 {
 		follow := uint16(p[1])&1 != 0
-		var st os.FileInfo
-		var err error
 		if follow {
-			st, err = os.Stat(path)
+			f, openCode := openAt(d, name, unix.O_PATH, 0)
+			code = openCode
+			if code == 0 {
+				st, err := f.Stat()
+				if err != nil {
+					code = errno(err)
+				} else {
+					times, timeCode := timesFor(st, p[4], p[5], p[6])
+					code = timeCode
+					if code == 0 {
+						code = errno(unix.UtimesNanoAt(int(f.Fd()), "", times, unix.AT_EMPTY_PATH))
+					}
+				}
+				_ = f.Close()
+			}
 		} else {
-			st, err = os.Lstat(path)
-		}
-		if err != nil {
-			code = errno(err)
-		} else if !follow && st.Mode()&os.ModeSymlink != 0 {
-			code = setSymlinkTimes(path, st, int64(p[4]), int64(p[5]), uint16(p[6]))
-		} else {
-			code = setTimes(path, st, int64(p[4]), int64(p[5]), uint16(p[6]))
+			parent, leaf, parentCode := openParent(d, name)
+			code = parentCode
+			if code == 0 {
+				f, openCode := openAt(d, name, unix.O_PATH|unix.O_NOFOLLOW, 0)
+				code = openCode
+				if code == 0 {
+					st, err := f.Stat()
+					_ = f.Close()
+					if err != nil {
+						code = errno(err)
+					} else {
+						times, timeCode := timesFor(st, p[4], p[5], p[6])
+						code = timeCode
+						if code == 0 {
+							code = errno(unix.UtimesNanoAt(int(parent.Fd()), leaf, times, unix.AT_SYMLINK_NOFOLLOW))
+						}
+					}
+				}
+				_ = parent.Close()
+			}
 		}
 	}
 	r[0] = code
@@ -726,8 +802,9 @@ func (e *Extension) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 func (e *Extension) pathLink(m wago.HostModule, p, r []uint64) {
 	oldName, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
 	newName, code2 := guestBytes(m.Memory(), uint32(p[5]), uint32(p[6]))
-	od, oldPath, c1 := e.resolve(uint32(p[0]), oldName)
-	nd, newPath, c2 := e.resolve(uint32(p[4]), newName)
+	oldTrailing, newTrailing := strings.HasSuffix(oldName, "/"), strings.HasSuffix(newName, "/")
+	od, oldName, c1 := e.resolve(uint32(p[0]), oldName)
+	nd, newName, c2 := e.resolve(uint32(p[4]), newName)
 	for _, c := range []uint64{code2, c1, c2} {
 		if code == 0 {
 			code = c
@@ -740,30 +817,47 @@ func (e *Extension) pathLink(m wago.HostModule, p, r []uint64) {
 		code = require(nd, rightPathLinkTarget)
 	}
 	oldFlags := uint16(p[1])
-	if code == 0 && oldFlags&^uint16(1) != 0 {
+	if code == 0 && p[1]&^uint64(1) != 0 {
 		code = wasiEInval
 	}
-	if code == 0 && oldFlags&1 != 0 {
-		oldPath, code = confineFollow(od, oldPath)
-	}
-	if code == 0 && strings.HasSuffix(oldName, "/") {
+	if code == 0 && oldTrailing {
 		code = wasiENotdir
 	}
-	if code == 0 && strings.HasSuffix(newName, "/") {
+	if code == 0 && newTrailing {
 		code = wasiENoent
 	}
 	if code == 0 && od.mount != nd.mount {
 		code = 75
 	}
 	if code == 0 {
-		code = errno(os.Link(oldPath, newPath))
+		newParent, newLeaf, parentCode := openParent(nd, newName)
+		code = parentCode
+		if code == 0 {
+			if oldFlags&1 != 0 {
+				oldFile, openCode := openAt(od, oldName, unix.O_PATH, 0)
+				code = openCode
+				if code == 0 {
+					code = errno(unix.Linkat(int(oldFile.Fd()), "", int(newParent.Fd()), newLeaf, unix.AT_EMPTY_PATH))
+					_ = oldFile.Close()
+				}
+			} else {
+				oldParent, oldLeaf, oldCode := openParent(od, oldName)
+				code = oldCode
+				if code == 0 {
+					code = errno(unix.Linkat(int(oldParent.Fd()), oldLeaf, int(newParent.Fd()), newLeaf, 0))
+					_ = oldParent.Close()
+				}
+			}
+			_ = newParent.Close()
+		}
 	}
 	r[0] = code
 }
 
 func (e *Extension) pathOpen(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
-	d, path, pathCode := e.resolve(uint32(p[0]), name)
+	trailingSlash := strings.HasSuffix(name, "/")
+	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
 	}
@@ -771,10 +865,10 @@ func (e *Extension) pathOpen(m wago.HostModule, p, r []uint64) {
 		code = require(d, rightPathOpen)
 	}
 	oflags, rights, inheriting, fdflags := uint16(p[4]), p[5], p[6], uint16(p[7])
-	if code == 0 && (oflags&^uint16(15) != 0 || fdflags&^uint16(31) != 0) {
+	if code == 0 && (p[1]&^uint64(1) != 0 || p[4]&^uint64(15) != 0 || p[7]&^uint64(31) != 0) {
 		code = wasiEInval
 	}
-	if code == 0 && rights&^d.inheriting != 0 {
+	if code == 0 && (rights&^d.inheriting != 0 || inheriting&^d.inheriting != 0) {
 		code = wasiENotcapable
 	}
 	if code == 0 && oflags&1 != 0 {
@@ -782,22 +876,6 @@ func (e *Extension) pathOpen(m wago.HostModule, p, r []uint64) {
 	}
 	if code == 0 && oflags&8 != 0 {
 		code = require(d, rightPathFilestatSetSize)
-	}
-	if code == 0 && strings.HasSuffix(name, "/") {
-		if st, err := os.Stat(path); err != nil {
-			code = errno(err)
-		} else if !st.IsDir() {
-			code = wasiENotdir
-		}
-	}
-	if code == 0 {
-		if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink != 0 {
-			if uint16(p[1])&1 == 0 {
-				code = wasiELoop
-			} else {
-				path, code = confineFollow(d, path)
-			}
-		}
 	}
 	flags := 0
 	read, write := rights&rightFDRead != 0, rights&rightFDWrite != 0
@@ -820,13 +898,15 @@ func (e *Extension) pathOpen(m wago.HostModule, p, r []uint64) {
 	if fdflags&1 != 0 {
 		flags |= os.O_APPEND
 	}
+	if oflags&2 != 0 || trailingSlash {
+		flags |= unix.O_DIRECTORY
+	}
+	if uint16(p[1])&1 == 0 {
+		flags |= unix.O_NOFOLLOW
+	}
 	var f *os.File
 	if code == 0 {
-		var err error
-		f, err = os.OpenFile(path, flags, 0o666)
-		if err != nil {
-			code = errno(err)
-		}
+		f, code = openAt(d, name, flags, 0o666)
 	}
 	openedDir := false
 	if code == 0 {
@@ -850,16 +930,15 @@ func (e *Extension) pathOpen(m wago.HostModule, p, r []uint64) {
 			_ = f.Close()
 		}
 	} else {
-		capRoot := d.root
-		if openedDir {
-			capRoot = path
-		}
-		entry := &fdEntry{file: f, path: path, root: capRoot, mount: d.mount, flags: fdflags, rights: rights, inheriting: inheriting}
+		entry := &fdEntry{file: f, mount: d.mount, flags: fdflags, rights: rights, inheriting: inheriting}
 		if openedDir {
 			entry.dirCookies = map[uint64]bool{0: true}
 		}
-		fd := e.alloc(entry)
-		if !putLe32(m.Memory(), uint32(p[8]), fd) {
+		fd, allocCode := e.alloc(entry)
+		if allocCode != 0 {
+			_ = f.Close()
+			code = allocCode
+		} else if !putLe32(m.Memory(), uint32(p[8]), fd) {
 			_ = f.Close()
 			delete(e.fs.fds, fd)
 			code = wasiEFault
@@ -870,7 +949,7 @@ func (e *Extension) pathOpen(m wago.HostModule, p, r []uint64) {
 
 func (e *Extension) pathReadlink(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
-	d, path, pathCode := e.resolve(uint32(p[0]), name)
+	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
 	}
@@ -879,10 +958,19 @@ func (e *Extension) pathReadlink(m wago.HostModule, p, r []uint64) {
 	}
 	var target string
 	if code == 0 {
-		var err error
-		target, err = os.Readlink(path)
-		if err != nil {
-			code = errno(err)
+		parent, leaf, parentCode := openParent(d, name)
+		code = parentCode
+		if code == 0 {
+			buf := make([]byte, 4096)
+			n, err := unix.Readlinkat(int(parent.Fd()), leaf, buf)
+			_ = parent.Close()
+			if err != nil {
+				code = errno(err)
+			} else if n == len(buf) {
+				code = wasiENametoolong
+			} else {
+				target = string(buf[:n])
+			}
 		}
 	}
 	buf, n := uint32(p[3]), uint32(p[4])
@@ -903,46 +991,43 @@ func (e *Extension) pathReadlink(m wago.HostModule, p, r []uint64) {
 }
 
 func (e *Extension) pathRemoveDirectory(m wago.HostModule, p, r []uint64) {
-	e.pathUnary(m, p, r, rightPathRemoveDirectory, func(path string) error {
-		if st, err := os.Lstat(path); err != nil {
-			return err
-		} else if !st.IsDir() {
-			return syscall.ENOTDIR
-		}
-		return os.Remove(path)
+	e.pathUnary(m, p, r, rightPathRemoveDirectory, func(fd int, name string) error {
+		return unix.Unlinkat(fd, name, unix.AT_REMOVEDIR)
 	})
 }
 
 func (e *Extension) pathUnlinkFile(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
 	if code == 0 && strings.HasSuffix(name, "/") {
-		_, path, pathCode := e.resolve(uint32(p[0]), name)
+		d, clean, pathCode := e.resolve(uint32(p[0]), name)
 		if pathCode != 0 {
 			r[0] = pathCode
 			return
 		}
-		if st, err := os.Lstat(path); err == nil && st.IsDir() {
+		f, openCode := openAt(d, clean, unix.O_PATH|unix.O_NOFOLLOW, 0)
+		if openCode != 0 {
+			r[0] = openCode
+			return
+		}
+		st, err := f.Stat()
+		_ = f.Close()
+		if err == nil && st.IsDir() {
 			r[0] = wasiEIsdir
 		} else {
 			r[0] = wasiENotdir
 		}
 		return
 	}
-	e.pathUnary(m, p, r, rightPathUnlinkFile, func(path string) error {
-		if st, err := os.Lstat(path); err != nil {
-			return err
-		} else if st.IsDir() {
-			return syscall.EISDIR
-		}
-		return os.Remove(path)
+	e.pathUnary(m, p, r, rightPathUnlinkFile, func(fd int, name string) error {
+		return unix.Unlinkat(fd, name, 0)
 	})
 }
 
 func (e *Extension) pathRename(m wago.HostModule, p, r []uint64) {
 	oldName, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
 	newName, code2 := guestBytes(m.Memory(), uint32(p[4]), uint32(p[5]))
-	od, oldPath, c1 := e.resolve(uint32(p[0]), oldName)
-	nd, newPath, c2 := e.resolve(uint32(p[3]), newName)
+	od, oldName, c1 := e.resolve(uint32(p[0]), oldName)
+	nd, newName, c2 := e.resolve(uint32(p[3]), newName)
 	for _, c := range []uint64{code2, c1, c2} {
 		if code == 0 {
 			code = c
@@ -958,25 +1043,16 @@ func (e *Extension) pathRename(m wago.HostModule, p, r []uint64) {
 		code = 75
 	}
 	if code == 0 {
-		oldStat, oldErr := os.Lstat(oldPath)
-		newStat, newErr := os.Lstat(newPath)
-		if oldErr == nil && newErr == nil && oldStat.IsDir() && newStat.IsDir() {
-			entries, err := os.ReadDir(newPath)
-			if err != nil {
-				code = errno(err)
-			} else if len(entries) != 0 {
-				code = wasiENotempty
-			} else if err = os.Remove(newPath); err != nil {
-				code = errno(err)
-			} else {
-				code = errno(os.Rename(oldPath, newPath))
+		oldParent, oldLeaf, oldCode := openParent(od, oldName)
+		code = oldCode
+		if code == 0 {
+			newParent, newLeaf, newCode := openParent(nd, newName)
+			code = newCode
+			if code == 0 {
+				code = errno(unix.Renameat(int(oldParent.Fd()), oldLeaf, int(newParent.Fd()), newLeaf))
+				_ = newParent.Close()
 			}
-		} else if oldErr == nil && newErr == nil && !oldStat.IsDir() && newStat.IsDir() {
-			code = wasiEIsdir
-		} else if oldErr == nil && newErr == nil && oldStat.IsDir() && !newStat.IsDir() {
-			code = wasiENotdir
-		} else {
-			code = errno(os.Rename(oldPath, newPath))
+			_ = oldParent.Close()
 		}
 	}
 	r[0] = code
@@ -985,7 +1061,8 @@ func (e *Extension) pathRename(m wago.HostModule, p, r []uint64) {
 func (e *Extension) pathSymlink(m wago.HostModule, p, r []uint64) {
 	target, code := guestBytes(m.Memory(), uint32(p[0]), uint32(p[1]))
 	name, code2 := guestBytes(m.Memory(), uint32(p[3]), uint32(p[4]))
-	d, path, pathCode := e.resolve(uint32(p[2]), name)
+	trailingSlash := strings.HasSuffix(name, "/")
+	d, name, pathCode := e.resolve(uint32(p[2]), name)
 	for _, c := range []uint64{code2, pathCode} {
 		if code == 0 {
 			code = c
@@ -994,20 +1071,19 @@ func (e *Extension) pathSymlink(m wago.HostModule, p, r []uint64) {
 	if code == 0 {
 		code = require(d, rightPathSymlink)
 	}
-	if code == 0 && filepath.IsAbs(target) {
+	if code == 0 && strings.HasPrefix(target, "/") {
 		code = wasiENotcapable
 	}
-	if code == 0 && strings.HasSuffix(name, "/") {
-		if st, err := os.Lstat(path); err != nil {
-			code = wasiENoent
-		} else if st.IsDir() {
-			code = wasiEExist
-		} else {
-			code = wasiENotdir
-		}
+	if code == 0 && trailingSlash {
+		code = wasiENoent
 	}
 	if code == 0 {
-		code = errno(os.Symlink(target, path))
+		parent, leaf, parentCode := openParent(d, name)
+		code = parentCode
+		if code == 0 {
+			code = errno(unix.Symlinkat(target, int(parent.Fd()), leaf))
+			_ = parent.Close()
+		}
 	}
 	r[0] = code
 }

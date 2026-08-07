@@ -22,6 +22,7 @@ func TestWASIPluginRequiresScopedHostGrants(t *testing.T) {
 		Capabilities: []wago.PluginCapability{
 			wago.PluginHostImports,
 			wago.PluginHostEnvironment,
+			wago.PluginInstanceHooks,
 		},
 	}}); err != nil {
 		t.Fatalf("LoadPlugins with WASI grants: %v", err)

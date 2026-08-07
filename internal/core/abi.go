@@ -16,6 +16,7 @@ const (
 	wasiEIo          = 29
 	wasiEIsdir       = 31
 	wasiELoop        = 32
+	wasiEMfile       = 33
 	wasiENametoolong = 37
 	wasiENoent       = 44
 	wasiENotdir      = 54

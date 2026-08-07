@@ -167,6 +167,7 @@ func Info(module string) wago.ExtensionInfo {
 		RequiresCapabilities: []wago.PluginCapability{
 			wago.PluginHostImports,
 			wago.PluginHostEnvironment,
+			wago.PluginInstanceHooks,
 		},
 	}
 }
