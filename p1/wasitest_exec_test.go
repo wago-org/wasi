@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,40 +26,16 @@ import (
 type wasiManifest struct {
 	Args     []string          `json:"args"`
 	Env      map[string]string `json:"env"`
-	Root     json.RawMessage   `json:"root"`       // presence ⇒ needs a preopened dir (filesystem)
+	Root     string            `json:"root"`
 	Ops      json.RawMessage   `json:"operations"` // presence ⇒ socket/interactive (wasip3)
 	ExitCode int               `json:"exit_code"`
 	Stdout   string            `json:"stdout"`
 }
 
-// wasiSkip lists wasm32-wasip1 tests wago cannot yet pass beyond the ones auto-
-// skipped for needing a filesystem `root`: features not implemented (sockets,
-// poll, real fd stat/seek/readdir, path ops) or behavior wago intentionally
-// differs on. Keyed by test base name. Curated to keep TestWASISuite green; each
-// entry is a concrete growth target.
-var wasiSkip = map[string]bool{
-	// poll_oneoff is stubbed ENOSYS, so the guest's unwrap() panics. Growth
-	// target: a minimal poll_oneoff (stdio is always ready).
-	"poll_oneoff_stdio": true,
-
-	// Import ONLY the void proc_exit, so the module uses the async host-call path
-	// where proc_exit is a no-op (it never returns to wasm to trap/exit). Programs
-	// that also import a returning function (fd_write, …) run proc_exit
-	// synchronously and work — see TestWASIHelloWorld. Growth target: always-sync
-	// host calls.
-	"proc_exit-success": true,
-	"proc_exit-failure": true,
-
-	// Sockets are not implemented (sock_* stubbed ENOTSUP).
-	"sock_shutdown-invalid_fd": true,
-	"sock_shutdown-not_sock":   true,
-}
-
 // TestWASISuite runs the WebAssembly/wasi-testsuite preview1 tests (the submodule
 // at tests/wasi) through wago.WASI as a conformance oracle for the sync host-call
-// path. Gated on WAGO_WASITEST_DIR (a checked-out wasi-testsuite). Tests that need
-// a filesystem preopen, socket operations, or an unimplemented feature are
-// skipped; the rest must match their manifest's exit code and stdout.
+// path. Gated on WAGO_WASITEST_DIR (a checked-out wasi-testsuite). Every P1 test
+// must run; a manifest root is preopened as fd 3 by runOneWASITest.
 func TestWASISuite(t *testing.T) {
 	dir := os.Getenv("WAGO_WASITEST_DIR")
 	if dir == "" {
@@ -78,7 +55,7 @@ func TestWASISuite(t *testing.T) {
 	for _, wasmPath := range wasms {
 		name := strings.TrimSuffix(filepath.Base(wasmPath), ".wasm")
 		man := loadWASIManifest(strings.TrimSuffix(wasmPath, ".wasm") + ".json")
-		if man.Root != nil || man.Ops != nil || wasiSkip[name] {
+		if man.Ops != nil {
 			skip++
 			continue
 		}
@@ -122,8 +99,23 @@ func runOneWASITest(wasmPath string, man wasiManifest) string {
 	// Guest argv is [program name, manifest args...] — the reference adapters pass
 	// the module path as argv[0] followed by the test's args.
 	args := append([]string{filepath.Base(wasmPath)}, man.Args...)
-	var stdout bytes.Buffer
-	in, err := wago.Instantiate(c, wago.InstantiateOptions{Imports: p1.Imports(p1.Config{Stdout: &stdout, Args: args, Env: env})})
+	cfg := p1.Config{Args: args, Env: env}
+	if man.Root != "" {
+		tmp, err := os.MkdirTemp("", "wago-wasi-p1-")
+		if err != nil {
+			return "temp root: " + err.Error()
+		}
+		defer os.RemoveAll(tmp)
+		srcRoot := filepath.Join(filepath.Dir(wasmPath), man.Root)
+		if err = copyTree(srcRoot, tmp); err != nil {
+			return "copy root: " + err.Error()
+		}
+		cfg.Preopens = map[string]string{"/": tmp}
+	}
+	var stdout, stderr bytes.Buffer
+	cfg.Stdout = &stdout
+	cfg.Stderr = &stderr
+	in, err := wago.Instantiate(c, wago.InstantiateOptions{Imports: p1.Imports(cfg)})
 	if err != nil {
 		return "instantiate: " + err.Error()
 	}
@@ -133,7 +125,7 @@ func runOneWASITest(wasmPath string, man wasiManifest) string {
 	if _, err := in.Invoke("_start"); err != nil {
 		var ex *wago.ExitError
 		if !errors.As(err, &ex) {
-			return "trap: " + err.Error()
+			return "trap: " + err.Error() + "; stderr: " + strings.TrimSpace(stderr.String())
 		}
 		code = int(ex.Code)
 	}
@@ -144,4 +136,46 @@ func runOneWASITest(wasmPath string, man wasiManifest) string {
 		return fmt.Sprintf("stdout %q, want %q", stdout.String(), man.Stdout)
 	}
 	return ""
+}
+
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(out, in)
+		closeErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
 }

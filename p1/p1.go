@@ -1,7 +1,7 @@
 // Package p1 provides the wasi_snapshot_preview1 host interface as a wago plugin.
 // This is the common WASI ABI emitted by wasm32-wasip1 toolchains (Rust, C, Go,
-// AssemblyScript): enough for programs that read/write the standard streams, exit,
-// and query args/env/clock/random.
+// AssemblyScript), including capability-scoped filesystem operations, polling,
+// standard streams, process exit, args/env, clocks, and random data.
 //
 // Two ways to use it:
 //

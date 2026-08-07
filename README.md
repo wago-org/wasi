@@ -1,6 +1,6 @@
 <div align="center">
     <h1><code>wasi</code></h1>
-    <p>A WASI host interface for the <a href="https://github.com/wago-org/wago">Wago</a> WebAssembly runtime - stdio, args/env, clock, random, and exit for <code>wasm32-wasip1</code> command-line programs.</p>
+    <p>A WASI Preview 1 host interface for the <a href="https://github.com/wago-org/wago">Wago</a> WebAssembly runtime, including capability-scoped filesystems, polling, stdio, args/env, clocks, random, and process exit.</p>
 </div>
 
 <p align="center">
@@ -34,23 +34,22 @@
 ## Overview
 
 `wasi` is the default WASI host interface for [Wago](https://github.com/wago-org/wago).
-It implements the slice of [`wasi_snapshot_preview1`](https://github.com/WebAssembly/WASI)
-that a `wasm32-wasip1` command-line program actually uses over stdio: the standard
-streams, `args`, `environ`, `clock`, `random`, and `proc_exit`. That is enough to run
-real programs - Rust, C, TinyGo, and AssemblyScript binaries that read input, compute,
-and write output - without a filesystem.
+It implements the [`wasi_snapshot_preview1`](https://github.com/WebAssembly/WASI)
+command ABI used by Rust, C, TinyGo, and AssemblyScript `wasm32-wasip1` programs.
 
 What you get out of the box:
 
-- **The stdio command surface**: `fd_write` / `fd_read`, `args_*`, `environ_*`,
-  `clock_*`, `random_get`, and `proc_exit`, wired to plain `io.Writer` / `io.Reader`
-  and `[]string` you supply.
+- **Capability-scoped filesystems**: preopened host directories, descriptor rights,
+  path operations, metadata, links, directory iteration, seeking, allocation, and
+  positional I/O.
+- **The command surface**: stdio, `args_*`, `environ_*`, clocks, polling,
+  `random_get`, and `proc_exit`, wired to ordinary Go values.
 - **Bounds-checked by construction**: every guest pointer is validated against linear
-  memory; a malformed pointer returns `EINVAL`, never a host-side panic that would
+  memory; a malformed pointer returns `EFAULT`, never a host-side panic that would
   abort the instance.
-- **Graceful degradation**: the filesystem, sockets, and polling are stubbed with a
-  clean errno (`ENOSYS` / `ENOTSUP` / `EBADF`). A module that links the whole snapshot
-  still instantiates; the unimplemented calls fail at call time, not at load.
+- **Complete import surface**: modules can link every Preview 1 function. Socket calls
+  report `ENOTSUP`, `ENOTSOCK`, or `EBADF` because this package does not grant network
+  descriptors.
 - **Snapshot-versioned**: pin `wasi_snapshot_preview1` (default) or the older
   `wasi_unstable` ABI by import path; preview 2 has a reserved slot.
 
@@ -101,6 +100,7 @@ func main() {
 		Stderr: os.Stderr,
 		Args:   os.Args[1:],
 		Env:    os.Environ(),
+		Preopens: map[string]string{"/": "/srv/guest-data"},
 	}))
 	defer rt.Close()
 
@@ -165,26 +165,25 @@ field is optional and has a sensible zero behavior.
 | `Env` | `[]string` | empty environment (`"KEY=VALUE"` entries) |
 | `Now` | `func() int64` | a fixed clock - deterministic, handy for tests |
 | `Rand` | `io.Reader` | `crypto/rand.Reader` |
+| `Preopens` | `map[string]string` | no host filesystem access; maps guest directory names to host directories starting at fd 3 |
 
 ## Syscall support
 
-**Implemented** - the stdio command surface, fully wired:
+**Implemented**:
 
 | Group | Functions |
 | --- | --- |
-| Streams | `fd_write`, `fd_read`, `fd_close`, `fd_seek` (`ESPIPE`), `fd_fdstat_get` |
+| Descriptors | `fd_advise`, `fd_allocate`, `fd_close`, `fd_datasync`, `fd_fdstat_*`, `fd_filestat_*`, `fd_pread`, `fd_prestat_*`, `fd_pwrite`, `fd_read`, `fd_readdir`, `fd_renumber`, `fd_seek`, `fd_sync`, `fd_tell`, `fd_write` |
+| Paths | `path_create_directory`, `path_filestat_get`, `path_filestat_set_times`, `path_link`, `path_open`, `path_readlink`, `path_remove_directory`, `path_rename`, `path_symlink`, `path_unlink_file` |
 | Process | `proc_exit` |
 | Args / env | `args_sizes_get`, `args_get`, `environ_sizes_get`, `environ_get` |
 | Clock | `clock_time_get`, `clock_res_get` |
 | Random | `random_get` |
+| Events | `poll_oneoff`, `sched_yield` |
 
-**No-op** - benign hints, flushes, and cooperative yields return success:
-`sched_yield`, `fd_advise`, `fd_datasync`, `fd_sync`, `fd_fdstat_set_flags`.
-
-**Stubbed** - the filesystem (`path_*`, real `fd_*`), sockets (`sock_*`), polling
-(`poll_oneoff`), and timers return a clean errno (`ENOSYS` / `ENOTSUP` / `EBADF` /
-`ESPIPE`) rather than a missing-import failure. Each is a concrete growth target, not a
-dead end.
+`sock_accept`, `sock_recv`, `sock_send`, `sock_shutdown`, and `proc_raise` are present
+but do not receive ambient host authority; they return the corresponding unsupported,
+not-a-socket, or bad-descriptor errno.
 
 ## Compatibility
 
@@ -208,7 +207,10 @@ go test ./...
 
 The default suite is self-contained: `TestWASIHelloWorld` runs a hand-assembled
 `wasi_snapshot_preview1` module end to end (no external toolchain), and the `unstable`
-package mirrors it for the older ABI.
+package mirrors it for the older ABI. Hermetic syscall tests adapted from Wazero and
+Wasmtime exercise the public import boundary: memory faults, preopens, descriptor
+rights and I/O, opaque directory cookies, path confinement, symlinks, file polling,
+socket errors, and descriptor-table stress.
 
 Two larger tiers are gated so a plain `go test` stays fast and hermetic:
 
@@ -218,9 +220,9 @@ Two larger tiers are gated so a plain `go test` stays fast and hermetic:
   deterministic output. It skips any binary that isn't present.
 - **Conformance oracle** (`TestWASISuite`) runs the
   [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) preview1
-  corpus when `WAGO_WASITEST_DIR` points at a checkout. Tests needing a filesystem
-  preopen, sockets, or an unimplemented feature are skipped; the rest must match their
-  manifest's exit code and stdout.
+  corpus when `WAGO_WASITEST_DIR` points at a checkout. The harness runs all 72
+  wasm32-wasip1 binaries with isolated copies of their filesystem fixtures; no P1 test
+  is skipped.
 
 The preview 1 corpus benchmarks compare Wago with Wazero's compiler runtime on
 the same application binaries. Run them on Darwin or Linux `amd64`/`arm64` with:
@@ -234,10 +236,8 @@ go test -run '^$' -bench '^Benchmark(Wazero)?WASI' -benchmem -count=1 -benchtime
 - **`wasi.go`** - the module root: the default (`wasi_snapshot_preview1`) `Init` /
   `Imports`, plus `Info`, which resolves extension identity from `wago.json` (self-similar
   manifest, subpackages inherit parent metadata).
-- **`internal/core/`** - the shared implementation. The minimal snapshot surface is
-  identical across `wasi_unstable` and `wasi_snapshot_preview1`, so both wrap this
-  package with only a different module name. Holds every host function and its
-  bounds-checked memory helpers.
+- **`internal/core/`** - the shared implementation: ABI/memory helpers, descriptor and
+  capability state, filesystem/path operations, polling, and command functions.
 - **`p1/`**, **`unstable/`** - thin wrappers that bind `core` under their module name and
   identity. `p2/` marks the reserved preview-2 slot.
 - **`register/`** - a blank-import shim (`import _ ".../wasi/register"`) that wires the
