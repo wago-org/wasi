@@ -1,6 +1,6 @@
 // Package core is the shared implementation behind the versioned WASI plugins.
-// The minimal snapshot surface (stdio, args/env, clock, random, exit) is the same
-// across wasi_unstable (pre-preview1) and wasi_snapshot_preview1; only the wasm
+// The command and filesystem surface is shared across wasi_unstable
+// (pre-preview1) and wasi_snapshot_preview1; only the wasm
 // import module name and extension identity differ, so both wrap this package with
 // their own module string. It is internal: use the plugins/wasi/p1 or
 // plugins/wasi/unstable wrappers.
@@ -23,8 +23,7 @@ const (
 	wasiOK      = 0
 	wasiEBadf   = 8
 	wasiEInval  = 28
-	wasiESpipe  = 29
-	wasiENosys  = 52
+	wasiESpipe  = 70
 	wasiENotsup = 58
 )
 
@@ -38,6 +37,10 @@ type Config struct {
 	Env            []string     // "KEY=VALUE" entries
 	Now            func() int64 // wall-clock nanoseconds for clock_time_get
 	Rand           io.Reader    // random source for random_get
+	// Preopens maps guest-visible directory names (commonly "/") to host
+	// directories. Each entry is exposed as a capability-scoped preopen starting
+	// at fd 3. No host filesystem is visible when this is nil.
+	Preopens map[string]string
 }
 
 // Extension is a WASI extension bound to one wasm import module name. p1 and
@@ -47,12 +50,16 @@ type Extension struct {
 	module string
 	info   wago.ExtensionInfo
 	cfg    Config
+	fs     *fsState
+	guard  *fsGuard
 }
 
 // New builds a WASI extension that binds its imports under module, identifying
 // itself with info.
 func New(module string, info wago.ExtensionInfo, cfg Config) *Extension {
-	return &Extension{module: module, info: info, cfg: cfg}
+	e := &Extension{module: module, info: info, cfg: cfg}
+	e.initFS()
+	return e
 }
 
 // Imports returns the host bundle for module on the low-level
@@ -80,6 +87,7 @@ func (e *Extension) Register(reg *wago.Registry) error {
 	if err != nil {
 		return err
 	}
+	e.guard.resolver = imports.CallerResolver()
 	reg.Capability(Cap, wago.CapabilityDocs("wasi: stdio, args/env, clock, random, process exit"))
 	m := imports.Module(e.module)
 	for _, b := range e.bindings() {
@@ -107,18 +115,6 @@ type binding struct {
 	docs            string
 }
 
-// errStub is a host function that ignores its args and returns a fixed errno —
-// used for the parts of the snapshot wago does not implement, so a guest (which
-// links imports for the whole surface) still instantiates and gets a clean error
-// rather than a missing-import failure.
-func errStub(errno uint64) wago.HostFunc {
-	return func(_ wago.HostModule, _, r []uint64) {
-		if len(r) > 0 {
-			r[0] = errno
-		}
-	}
-}
-
 func (e *Extension) bindings() []binding {
 	i32 := []wago.ValType{wago.ValI32}
 	i32x2 := []wago.ValType{wago.ValI32, wago.ValI32}
@@ -127,11 +123,7 @@ func (e *Extension) bindings() []binding {
 	i64 := wago.ValI64
 	i32v := wago.ValI32
 
-	stub := func(name string, errno uint64, docs string) binding {
-		return binding{name: name, fn: errStub(errno), results: i32, docs: docs}
-	}
-
-	return []binding{
+	bindings := []binding{
 		{"fd_write", e.fdWrite, i32x4, i32, "write iovecs to a file descriptor (stdout/stderr)"},
 		{"fd_read", e.fdRead, i32x4, i32, "read into iovecs from a file descriptor (stdin)"},
 		{"fd_close", e.fdClose, i32, i32, "close a file descriptor (streams: no-op)"},
@@ -148,45 +140,48 @@ func (e *Extension) bindings() []binding {
 		{"clock_res_get", e.clockResGet, i32x2, i32, "read a clock's resolution"},
 		{"random_get", e.randomGet, i32x2, i32, "fill a buffer with random bytes"},
 
-		// Benign no-ops (hints / flushes / cooperative yield): success.
-		stub("sched_yield", wasiOK, "cooperative yield (no-op)"),
-		stub("fd_advise", wasiOK, "access-pattern hint (no-op)"),
-		stub("fd_datasync", wasiOK, "flush data (no-op)"),
-		stub("fd_sync", wasiOK, "flush (no-op)"),
-		stub("fd_fdstat_set_flags", wasiOK, "set fd flags (no-op)"),
-
-		// Not implemented (filesystem, sockets, polling, timers): a clean errno so
-		// guests fall back gracefully instead of failing to instantiate.
-		stub("fd_allocate", wasiENosys, "not implemented"),
-		stub("fd_fdstat_set_rights", wasiENosys, "not implemented"),
-		stub("fd_filestat_get", wasiENosys, "not implemented"),
-		stub("fd_filestat_set_size", wasiENosys, "not implemented"),
-		stub("fd_filestat_set_times", wasiENosys, "not implemented"),
-		stub("fd_pread", wasiENosys, "not implemented"),
-		stub("fd_pwrite", wasiENosys, "not implemented"),
-		stub("fd_readdir", wasiENosys, "not implemented"),
-		stub("fd_renumber", wasiENosys, "not implemented"),
-		stub("fd_tell", wasiESpipe, "streams are not seekable"),
-		stub("path_create_directory", wasiENosys, "not implemented"),
-		stub("path_filestat_get", wasiENosys, "not implemented"),
-		stub("path_filestat_set_times", wasiENosys, "not implemented"),
-		stub("path_link", wasiENosys, "not implemented"),
-		stub("path_open", wasiEBadf, "no preopened dirs"),
-		stub("path_readlink", wasiENosys, "not implemented"),
-		stub("path_remove_directory", wasiENosys, "not implemented"),
-		stub("path_rename", wasiENosys, "not implemented"),
-		stub("path_symlink", wasiENosys, "not implemented"),
-		stub("path_unlink_file", wasiENosys, "not implemented"),
-		stub("poll_oneoff", wasiENosys, "not implemented"),
-		stub("proc_raise", wasiENosys, "not implemented"),
-		stub("sock_accept", wasiENotsup, "sockets not supported"),
-		stub("sock_recv", wasiENotsup, "sockets not supported"),
-		stub("sock_send", wasiENotsup, "sockets not supported"),
-		stub("sock_shutdown", wasiENotsup, "sockets not supported"),
+		{"sched_yield", e.schedYield, nil, i32, "yield execution"},
+		{"fd_advise", e.fdAdvise, []wago.ValType{i32v, i64, i64, i32v}, i32, "provide file access advice"},
+		{"fd_allocate", e.fdAllocate, []wago.ValType{i32v, i64, i64}, i32, "allocate file space"},
+		{"fd_datasync", e.fdDatasync, i32, i32, "synchronize file data"},
+		{"fd_sync", e.fdSync, i32, i32, "synchronize a file"},
+		{"fd_fdstat_set_flags", e.fdFdstatSetFlags, i32x2, i32, "set descriptor flags"},
+		{"fd_fdstat_set_rights", e.fdFdstatSetRights, []wago.ValType{i32v, i64, i64}, i32, "reduce descriptor rights"},
+		{"fd_filestat_get", e.fdFilestatGet, i32x2, i32, "get file metadata"},
+		{"fd_filestat_set_size", e.fdFilestatSetSize, []wago.ValType{i32v, i64}, i32, "set file size"},
+		{"fd_filestat_set_times", e.fdFilestatSetTimes, []wago.ValType{i32v, i64, i64, i32v}, i32, "set file timestamps"},
+		{"fd_pread", e.fdPread, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, "read at an offset"},
+		{"fd_pwrite", e.fdPwrite, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, "write at an offset"},
+		{"fd_readdir", e.fdReaddir, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, "read directory entries"},
+		{"fd_renumber", e.fdRenumber, i32x2, i32, "renumber a descriptor"},
+		{"fd_tell", e.fdTell, i32x2, i32, "get a descriptor offset"},
+		{"path_create_directory", e.pathCreateDirectory, i32x3, i32, "create a directory"},
+		{"path_filestat_get", e.pathFilestatGet, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, "get path metadata"},
+		{"path_filestat_set_times", e.pathFilestatSetTimes, []wago.ValType{i32v, i32v, i32v, i32v, i64, i64, i32v}, i32, "set path timestamps"},
+		{"path_link", e.pathLink, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v, i32v}, i32, "create a hard link"},
+		{"path_open", e.pathOpen, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i64, i64, i32v, i32v}, i32, "open a path"},
+		{"path_readlink", e.pathReadlink, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, "read a symbolic link"},
+		{"path_remove_directory", e.pathRemoveDirectory, i32x3, i32, "remove a directory"},
+		{"path_rename", e.pathRename, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, "rename a path"},
+		{"path_symlink", e.pathSymlink, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, "create a symbolic link"},
+		{"path_unlink_file", e.pathUnlinkFile, i32x3, i32, "unlink a file"},
+		{"poll_oneoff", e.pollOneoff, i32x4, i32, "wait for events"},
+		{"proc_raise", e.procRaise, i32, i32, "raise a signal"},
+		{"sock_accept", e.sockAccept, i32x3, i32, "accept a socket"},
+		{"sock_recv", e.sockRecv, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, "receive from a socket"},
+		{"sock_send", e.sockSend, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, "send to a socket"},
+		{"sock_shutdown", e.sockShutdown, i32x2, i32, "shut down a socket"},
 	}
+	for i := range bindings {
+		fn := bindings[i].fn
+		bindings[i].fn = func(m wago.HostModule, p, r []uint64) {
+			e.withFS(m, func() { fn(m, p, r) })
+		}
+	}
+	return bindings
 }
 
-// --- memory helpers (bounds-checked; malformed pointers yield EINVAL, never a
+// --- memory helpers (bounds-checked; malformed pointers yield EFAULT, never a
 // Go panic that would abort the whole instance) ---
 
 func le32(mem []byte, off uint32) (uint32, bool) {
@@ -215,7 +210,7 @@ func putLe64(mem []byte, off uint32, v uint64) bool {
 // --- fd_* ---
 
 func (e *Extension) fdWrite(m wago.HostModule, p, r []uint64) {
-	fd, iovs, n, nwrittenPtr := int32(p[0]), uint32(p[1]), uint32(p[2]), uint32(p[3])
+	fd, iovs, n, nwrittenPtr := uint32(p[0]), uint32(p[1]), uint32(p[2]), uint32(p[3])
 	var out io.Writer
 	switch fd {
 	case 1:
@@ -223,95 +218,204 @@ func (e *Extension) fdWrite(m wago.HostModule, p, r []uint64) {
 	case 2:
 		out = e.cfg.Stderr
 	default:
-		r[0] = wasiEBadf
-		return
-	}
-	mem := m.Memory()
-	var total uint32
-	for i := uint32(0); i < n; i++ {
-		base, ok1 := le32(mem, iovs+i*8)
-		length, ok2 := le32(mem, iovs+i*8+4)
-		if !ok1 || !ok2 || int(base)+int(length) > len(mem) {
-			r[0] = wasiEInval
+		f, code := e.entry(fd)
+		if code != 0 {
+			r[0] = code
 			return
 		}
+		if code = require(f, rightFDWrite); code != 0 {
+			r[0] = code
+			return
+		}
+		if f.file == nil {
+			r[0] = wasiEBadf
+			return
+		}
+		out = f.file
+	}
+	mem := m.Memory()
+	bufs, code := iovecs(mem, iovs, n)
+	if code != 0 {
+		r[0] = code
+		return
+	}
+	var total uint32
+	for _, buf := range bufs {
 		if out != nil {
-			nn, err := out.Write(mem[base : base+length])
+			nn, err := out.Write(buf)
 			total += uint32(nn)
 			if err != nil {
-				r[0] = wasiEInval
+				r[0] = errno(err)
 				return
 			}
 		} else {
-			total += length
+			total += uint32(len(buf))
 		}
 	}
 	if !putLe32(mem, nwrittenPtr, total) {
-		r[0] = wasiEInval
+		r[0] = wasiEFault
 		return
 	}
 	r[0] = wasiOK
 }
 
 func (e *Extension) fdRead(m wago.HostModule, p, r []uint64) {
-	fd, iovs, n, nreadPtr := int32(p[0]), uint32(p[1]), uint32(p[2]), uint32(p[3])
-	if fd != 0 || e.cfg.Stdin == nil {
-		if fd == 0 { // stdin with no reader: clean EOF
+	fd, iovs, n, nreadPtr := uint32(p[0]), uint32(p[1]), uint32(p[2]), uint32(p[3])
+	var in io.Reader
+	if fd == 0 {
+		in = e.cfg.Stdin
+		if in == nil { // stdin with no reader: clean EOF
 			if putLe32(m.Memory(), nreadPtr, 0) {
 				r[0] = wasiOK
 				return
 			}
-		}
-		r[0] = wasiEBadf
-		return
-	}
-	mem := m.Memory()
-	var total uint32
-	for i := uint32(0); i < n; i++ {
-		base, ok1 := le32(mem, iovs+i*8)
-		length, ok2 := le32(mem, iovs+i*8+4)
-		if !ok1 || !ok2 || int(base)+int(length) > len(mem) {
-			r[0] = wasiEInval
+			r[0] = wasiEFault
 			return
 		}
-		nn, err := e.cfg.Stdin.Read(mem[base : base+length])
+	} else {
+		f, code := e.entry(fd)
+		if code != 0 {
+			r[0] = code
+			return
+		}
+		if code = require(f, rightFDRead); code != 0 {
+			r[0] = code
+			return
+		}
+		if f.file == nil {
+			r[0] = wasiEBadf
+			return
+		}
+		in = f.file
+	}
+	mem := m.Memory()
+	bufs, code := iovecs(mem, iovs, n)
+	if code != 0 {
+		r[0] = code
+		return
+	}
+	var total uint32
+	for _, buf := range bufs {
+		nn, err := in.Read(buf)
 		total += uint32(nn)
-		if err != nil { // EOF or error: stop after this partial read
+		if err != nil || nn < len(buf) {
 			break
 		}
 	}
 	if !putLe32(mem, nreadPtr, total) {
-		r[0] = wasiEInval
+		r[0] = wasiEFault
 		return
 	}
 	r[0] = wasiOK
 }
 
-func (e *Extension) fdClose(_ wago.HostModule, p, r []uint64) { r[0] = wasiOK }
+func (e *Extension) fdClose(_ wago.HostModule, p, r []uint64) {
+	fd := uint32(p[0])
+	f, code := e.entry(fd)
+	if code == 0 {
+		if f.file != nil {
+			code = errno(f.file.Close())
+		}
+		if code == 0 {
+			delete(e.fs.fds, fd)
+		}
+	}
+	r[0] = code
+}
 
-func (e *Extension) fdSeek(_ wago.HostModule, p, r []uint64) { r[0] = wasiESpipe } // streams are not seekable
+func (e *Extension) fdSeek(m wago.HostModule, p, r []uint64) {
+	f, code := e.entry(uint32(p[0]))
+	if code == 0 {
+		code = require(f, rightFDSeek)
+	}
+	if code == 0 && f.file == nil {
+		code = wasiESpipe
+	}
+	if code == 0 {
+		if st, err := f.file.Stat(); err != nil {
+			code = errno(err)
+		} else if st.IsDir() {
+			code = wasiEBadf
+		}
+	}
+	whence := int(p[2])
+	if code == 0 && (whence < 0 || whence > 2) {
+		code = wasiEInval
+	}
+	if code == 0 {
+		off, err := f.file.Seek(int64(p[1]), whence)
+		if err != nil {
+			code = errno(err)
+		} else if !putLe64(m.Memory(), uint32(p[3]), uint64(off)) {
+			code = wasiEFault
+		}
+	}
+	r[0] = code
+}
 
 func (e *Extension) fdFdstatGet(m wago.HostModule, p, r []uint64) {
-	fd, buf := int32(p[0]), uint32(p[1])
-	if fd < 0 || fd > 2 {
-		r[0] = wasiEBadf
+	fd, buf := uint32(p[0]), uint32(p[1])
+	f, code := e.entry(fd)
+	if code != 0 {
+		r[0] = code
 		return
 	}
 	mem := m.Memory()
 	if int(buf)+24 > len(mem) {
-		r[0] = wasiEInval
+		r[0] = wasiEFault
 		return
 	}
 	for i := uint32(0); i < 24; i++ {
 		mem[buf+i] = 0
 	}
-	mem[buf] = 2 // fs_filetype = CHARACTER_DEVICE
+	if f.file == nil {
+		mem[buf] = filetypeCharacterDevice
+	} else if st, err := f.file.Stat(); err != nil {
+		r[0] = errno(err)
+		return
+	} else {
+		mem[buf] = filetype(st)
+	}
+	binary.LittleEndian.PutUint16(mem[buf+2:], f.flags)
+	binary.LittleEndian.PutUint64(mem[buf+8:], f.rights)
+	binary.LittleEndian.PutUint64(mem[buf+16:], f.inheriting)
 	r[0] = wasiOK
 }
 
-func (e *Extension) fdPrestatGet(_ wago.HostModule, p, r []uint64) { r[0] = wasiEBadf } // no preopened dirs
+func (e *Extension) fdPrestatGet(m wago.HostModule, p, r []uint64) {
+	f, code := e.entry(uint32(p[0]))
+	if code == 0 && f.preopen == "" {
+		code = wasiEBadf
+	}
+	if code == 0 {
+		mem, ptr := m.Memory(), uint32(p[1])
+		if uint64(ptr)+8 > uint64(len(mem)) {
+			code = wasiEFault
+		} else {
+			clear(mem[ptr : ptr+8])
+			binary.LittleEndian.PutUint32(mem[ptr+4:], uint32(len(f.preopen)))
+		}
+	}
+	r[0] = code
+}
 
-func (e *Extension) fdPrestatDirName(_ wago.HostModule, p, r []uint64) { r[0] = wasiEBadf }
+func (e *Extension) fdPrestatDirName(m wago.HostModule, p, r []uint64) {
+	f, code := e.entry(uint32(p[0]))
+	if code == 0 && f.preopen == "" {
+		code = wasiEBadf
+	}
+	ptr, n := uint32(p[1]), uint32(p[2])
+	if code == 0 && n < uint32(len(f.preopen)) {
+		code = wasiENametoolong
+	}
+	if code == 0 && uint64(ptr)+uint64(len(f.preopen)) > uint64(len(m.Memory())) {
+		code = wasiEFault
+	}
+	if code == 0 {
+		copy(m.Memory()[ptr:], f.preopen)
+	}
+	r[0] = code
+}
 
 // --- process / args / env ---
 
@@ -342,7 +446,7 @@ func writeCounts(mem []byte, countPtr, sizePtr uint32, items []string) uint64 {
 		total += len(s) + 1
 	}
 	if !putLe32(mem, countPtr, uint32(len(items))) || !putLe32(mem, sizePtr, uint32(total)) {
-		return wasiEInval
+		return wasiEFault
 	}
 	return wasiOK
 }
@@ -352,10 +456,10 @@ func writeStrings(mem []byte, ptrArray, buf uint32, items []string) uint64 {
 	cur := buf
 	for i, s := range items {
 		if !putLe32(mem, ptrArray+uint32(i)*4, cur) {
-			return wasiEInval
+			return wasiEFault
 		}
 		if int(cur)+len(s)+1 > len(mem) {
-			return wasiEInval
+			return wasiEFault
 		}
 		copy(mem[cur:], s)
 		mem[cur+uint32(len(s))] = 0
@@ -367,12 +471,16 @@ func writeStrings(mem []byte, ptrArray, buf uint32, items []string) uint64 {
 // --- clock / random ---
 
 func (e *Extension) clockTimeGet(m wago.HostModule, p, r []uint64) {
+	if p[0] > 3 {
+		r[0] = wasiEInval
+		return
+	}
 	var now int64
 	if e.cfg.Now != nil {
 		now = e.cfg.Now()
 	}
 	if !putLe64(m.Memory(), uint32(p[2]), uint64(now)) {
-		r[0] = wasiEInval
+		r[0] = wasiEFault
 		return
 	}
 	r[0] = wasiOK
@@ -380,8 +488,12 @@ func (e *Extension) clockTimeGet(m wago.HostModule, p, r []uint64) {
 
 // clockResGet writes a coarse clock resolution (1ns) and succeeds.
 func (e *Extension) clockResGet(m wago.HostModule, p, r []uint64) {
-	if !putLe64(m.Memory(), uint32(p[1]), 1) {
+	if p[0] > 3 {
 		r[0] = wasiEInval
+		return
+	}
+	if !putLe64(m.Memory(), uint32(p[1]), 1) {
+		r[0] = wasiEFault
 		return
 	}
 	r[0] = wasiOK
@@ -391,7 +503,7 @@ func (e *Extension) randomGet(m wago.HostModule, p, r []uint64) {
 	buf, n := uint32(p[0]), uint32(p[1])
 	mem := m.Memory()
 	if int(buf)+int(n) > len(mem) {
-		r[0] = wasiEInval
+		r[0] = wasiEFault
 		return
 	}
 	src := e.cfg.Rand
@@ -399,7 +511,7 @@ func (e *Extension) randomGet(m wago.HostModule, p, r []uint64) {
 		src = rand.Reader
 	}
 	if _, err := io.ReadFull(src, mem[buf:buf+n]); err != nil {
-		r[0] = wasiEInval
+		r[0] = wasiEIo
 		return
 	}
 	r[0] = wasiOK
