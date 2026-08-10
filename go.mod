@@ -2,7 +2,7 @@ module github.com/wago-org/wasi
 
 go 1.22.0
 
-require github.com/wago-org/wago v0.0.0-20260810175722-e4a3d7d7c759
+require github.com/wago-org/wago v0.0.0-20260810180754-f272f785895d
 
 require (
 	github.com/tetratelabs/wazero v1.9.0
