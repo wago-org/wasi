@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wago-org/wago/src/component"
+	"github.com/wago-org/wago/src/wago"
 )
 
 // This file implements a host WASI 0.2 ("wasip2") surface sufficient to run
@@ -1094,11 +1095,18 @@ func wasiGetDirectoriesSig() (component.FuncDesc, component.Resolver) {
 // package-qualified name: wasip2.Config reads better than wasip2.WASIConfig.
 type Config = WASIConfig
 
+// Enable installs Wago's capability-gated Component Model plugin and returns
+// its runtime-scoped execution service.
+func Enable(rt *wago.Runtime) (*component.Runtime, error) { return component.Enable(rt) }
+
 // With returns the Options wiring the WASI 0.2 host interfaces per cfg.
-// Spread it into component.Instantiate:
+// Spread it into the component runtime returned by Enable:
 //
-//	inst, err := component.Instantiate(ctx, r, wasm, wasip2.With(wasip2.Config{
+//	components, err := wasip2.Enable(r)
+//	if err != nil {
+//		return err
+//	}
+//	inst, err := components.Instantiate(ctx, wasm, wasip2.With(wasip2.Config{
 //		Stdout: os.Stdout,
-//		FS:     wazy.NewFSConfig().WithDirMount(dir, "/"),
 //	})...)
 func With(cfg Config) []component.Option { return WithWASI(cfg) }

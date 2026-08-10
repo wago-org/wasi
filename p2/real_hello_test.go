@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/wago-org/wago/src/component"
 	"github.com/wago-org/wago/src/wago"
 )
 
@@ -17,9 +16,13 @@ func TestRealHello(t *testing.T) {
 	ctx := context.Background()
 	r := wago.NewRuntime()
 	defer r.Close()
+	components, err := Enable(r)
+	if err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
 
 	var stdout, stderr bytes.Buffer
-	inst, err := component.Instantiate(ctx, r, realHelloWasm,
+	inst, err := components.Instantiate(ctx, realHelloWasm,
 		With(Config{Stdout: &stdout, Stderr: &stderr})...)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
