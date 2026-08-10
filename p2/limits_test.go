@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wago-org/wago/src/component"
+	"github.com/wago-org/component-model"
 	sys "github.com/wago-org/wasi/internal/p2sys"
 )
 

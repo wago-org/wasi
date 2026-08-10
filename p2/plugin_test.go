@@ -5,14 +5,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wago-org/wago/src/component"
-	"github.com/wago-org/wago/src/wago"
+	"github.com/wago-org/component-model"
+	"github.com/wago-org/wago"
 )
 
 func TestExtensionConsumesComponentServiceWithoutCoreAuthority(t *testing.T) {
 	ext := NewExtension(Config{})
-	if got := ext.Info().RequiresCapabilities; len(got) != 0 {
+	info := ext.Info()
+	if got := info.RequiresCapabilities; len(got) != 0 {
 		t.Fatalf("WASI P2 core capabilities = %v, want none", got)
+	}
+	if len(info.Requires) != 1 || info.Requires[0] != component.PluginID {
+		t.Fatalf("WASI P2 plugin requirements = %v, want component provider", info.Requires)
 	}
 	rt := wago.NewRuntime()
 	defer rt.Close()

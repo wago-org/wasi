@@ -2,11 +2,11 @@ package register
 
 import (
 	"errors"
+	"os/exec"
+	"strings"
 	"testing"
 
 	wago "github.com/wago-org/wago"
-	"github.com/wago-org/wago/src/component"
-	"github.com/wago-org/wasi/p2"
 )
 
 func TestWASIPluginRequiresScopedHostGrants(t *testing.T) {
@@ -34,19 +34,12 @@ func TestWASIPluginRequiresScopedHostGrants(t *testing.T) {
 	}
 }
 
-func TestWASIP2ServiceOrdersComponentProvider(t *testing.T) {
-	rt := wago.NewRuntime()
-	defer rt.Close()
-	if err := rt.LoadPlugins([]wago.PluginConfig{
-		{Name: p2.ID},
-		{Name: component.PluginID, Capabilities: []wago.PluginCapability{wago.PluginCoreEngine}},
-	}); err != nil {
-		t.Fatalf("LoadPlugins consumer before provider: %v", err)
+func TestDefaultRegisterExcludesComponentModel(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", "github.com/wago-org/wasi/register").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list default register dependencies: %v\n%s", err, out)
 	}
-	if _, ok := rt.Extension(p2.ID); !ok {
-		t.Fatal("WASI P2 consumer was not loaded")
-	}
-	if _, ok := rt.Extension(component.PluginID); !ok {
-		t.Fatal("Component Model provider was not loaded")
+	if strings.Contains(string(out), "github.com/wago-org/component-model") {
+		t.Fatal("default Preview 1 registration unexpectedly retains component-model")
 	}
 }

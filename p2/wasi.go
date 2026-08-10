@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wago-org/wago/src/component"
+	"github.com/wago-org/component-model"
 )
 
 // This file implements a host WASI 0.2 ("wasip2") surface sufficient to run

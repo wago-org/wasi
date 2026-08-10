@@ -1,5 +1,6 @@
-// Package register wires the WASI plugins into the wago engine's global plugin
-// registry as a side effect of import. A custom wago build includes WASI by
+// Package register wires the default WASI Preview 1 plugin into the Wago
+// engine's global plugin registry as a side effect of import. A custom Wago
+// build includes WASI by
 // blank-importing it:
 //
 //	import _ "github.com/wago-org/wasi/register"
@@ -8,9 +9,9 @@
 // `register` package whose init() calls wago.RegisterExtension, so `wago plugin
 // build` only has to blank-import it — no engine-side special-casing.
 //
-// It lives in its own leaf package (not the module root) because it imports the
-// p1/unstable subpackages, which import the root for their manifest metadata; a
-// root-level init() would create an import cycle.
+// Snapshot-specific registration shims live under p1/register, p2/register,
+// and unstable/register. Keeping them separate prevents a Preview 1-only build
+// from retaining the Component Model and Preview 2 implementation.
 package register
 
 import (
@@ -19,9 +20,6 @@ import (
 
 	wago "github.com/wago-org/wago"
 	"github.com/wago-org/wasi"
-	"github.com/wago-org/wasi/p1"
-	"github.com/wago-org/wasi/p2"
-	"github.com/wago-org/wasi/unstable"
 )
 
 func init() {
@@ -35,13 +33,4 @@ func init() {
 		}
 	}
 	wago.RegisterExtension("github.com/wago-org/wasi", func() wago.Extension { return wasi.Init(std()) })
-	wago.RegisterExtension("github.com/wago-org/wasi/p1", func() wago.Extension { return p1.Init(std()) })
-	wago.RegisterExtension("github.com/wago-org/wasi/p2", func() wago.Extension {
-		cfg := std()
-		return p2.NewExtension(p2.Config{
-			Stdout: cfg.Stdout, Stderr: cfg.Stderr, Stdin: cfg.Stdin,
-			Env: cfg.Env, Args: wago.GuestArgs(), WallClock: time.Now,
-		})
-	})
-	wago.RegisterExtension("github.com/wago-org/wasi/unstable", func() wago.Extension { return unstable.Init(std()) })
 }

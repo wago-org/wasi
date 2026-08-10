@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/wago-org/component-model"
+	"github.com/wago-org/wago"
 	"github.com/wago-org/wago/plugin"
-	"github.com/wago-org/wago/src/component"
-	"github.com/wago-org/wago/src/wago"
 	wasi "github.com/wago-org/wasi"
 )
 
@@ -30,7 +30,11 @@ func NewExtension(cfg Config) *Extension {
 	return &Extension{config: cfg}
 }
 
-func (*Extension) Info() wago.ExtensionInfo { return wasi.Info(ID) }
+func (*Extension) Info() wago.ExtensionInfo {
+	info := wasi.Info(ID)
+	info.Requires = []string{component.PluginID}
+	return info
+}
 
 func (e *Extension) Register(reg *wago.Registry) error {
 	if e == nil {

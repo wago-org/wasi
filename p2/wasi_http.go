@@ -46,7 +46,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wago-org/wago/src/component"
+	"github.com/wago-org/component-model"
 )
 
 // Resource type tags for wasi:http/types resources. See resource.go; tags

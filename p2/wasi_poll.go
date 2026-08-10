@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wago-org/wago/src/component"
+	"github.com/wago-org/component-model"
 )
 
 // wasiPoll is the shared wasi:io/poll + wasi:clocks host. It owns the single

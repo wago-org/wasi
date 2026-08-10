@@ -163,6 +163,21 @@ if err != nil {
 instance, err := wasi.Instantiate(ctx, componentBytes)
 ```
 
+Manifest-driven hosts select both plugins. Only the Component Model provider receives
+the privileged engine grant:
+
+```json
+{
+  "plugins": {
+    "wago-org/component-model": "^0.0.0",
+    "wago-org/wasi": "^0.0.0"
+  }
+}
+```
+
+The WASI P2 extension declares `wago-org/component-model` as a mandatory dependency,
+so a missing provider rejects the complete plugin plan before activation.
+
 ## Configuration
 
 `wasi.Config` (an alias of the shared `core.Config`) is the whole knob surface. Every
@@ -252,8 +267,10 @@ go test -run '^$' -bench '^Benchmark(Wazero)?WASI' -benchmem -count=1 -benchtime
 - **`p1/`**, **`unstable/`** - thin wrappers that bind `core` under their module name and
   identity. **`p2/`** provides the capability-scoped WASI 0.2 component worlds as a
   consumer of the Component Model runtime service.
-- **`register/`** - a blank-import shim (`import _ ".../wasi/register"`) that wires the
-  WASI plugins into Wago's global registry for `wago plugin build`.
+- **`register/`**, **`p1/register/`**, **`p2/register/`**, **`unstable/register/`** -
+  snapshot-specific blank-import shims that wire one WASI plugin into Wago's global
+  registry for `wago plugin build`. Only `p2/register` retains and registers the
+  standalone Component Model provider, keeping Preview 1 builds small and DCE-friendly.
 - **`wago.json`** - the package manifest declaring the module, its subpackages, engines,
   and platforms.
 

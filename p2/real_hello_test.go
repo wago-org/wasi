@@ -6,7 +6,7 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/wago-org/wago/src/wago"
+	"github.com/wago-org/wago"
 )
 
 //go:embed testdata/real_hello.component.wasm

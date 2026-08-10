@@ -7,7 +7,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/wago-org/wago/src/wago"
+	"github.com/wago-org/wago"
 	"github.com/wago-org/wasi/p1"
 )
 

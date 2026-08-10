@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wago-org/wago/src/component"
+	"github.com/wago-org/component-model"
 )
 
 // This file extends wasi.go/wasi_fs.go's WASI 0.2 host surface with a real
