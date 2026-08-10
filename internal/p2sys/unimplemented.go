@@ -115,7 +115,7 @@ func (UnimplementedFile) Pread([]byte, int64) (int, Errno) {
 }
 
 // Seek implements File.Seek
-func (UnimplementedFile) Seek(int64, int) (int64, Errno) {
+func (UnimplementedFile) SeekFile(int64, int) (int64, Errno) {
 	return 0, ENOSYS
 }
 

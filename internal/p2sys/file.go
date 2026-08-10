@@ -172,7 +172,7 @@ type File interface {
 	//
 	//   - This is like io.Seeker and `fseek` in POSIX, preferring semantics
 	//     of io.Seeker. See https://pubs.opengroup.org/onlinepubs/9699919799/functions/fseek.html
-	Seek(offset int64, whence int) (newOffset int64, errno Errno)
+	SeekFile(offset int64, whence int) (newOffset int64, errno Errno)
 
 	// Readdir reads the contents of the directory associated with file and
 	// returns a slice of up to n Dirent values in an arbitrary order. This is
