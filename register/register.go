@@ -20,6 +20,7 @@ import (
 	wago "github.com/wago-org/wago"
 	"github.com/wago-org/wasi"
 	"github.com/wago-org/wasi/p1"
+	"github.com/wago-org/wasi/p2"
 	"github.com/wago-org/wasi/unstable"
 )
 
@@ -35,5 +36,12 @@ func init() {
 	}
 	wago.RegisterExtension("github.com/wago-org/wasi", func() wago.Extension { return wasi.Init(std()) })
 	wago.RegisterExtension("github.com/wago-org/wasi/p1", func() wago.Extension { return p1.Init(std()) })
+	wago.RegisterExtension("github.com/wago-org/wasi/p2", func() wago.Extension {
+		cfg := std()
+		return p2.NewExtension(p2.Config{
+			Stdout: cfg.Stdout, Stderr: cfg.Stderr, Stdin: cfg.Stdin,
+			Env: cfg.Env, Args: wago.GuestArgs(), WallClock: time.Now,
+		})
+	})
 	wago.RegisterExtension("github.com/wago-org/wasi/unstable", func() wago.Extension { return unstable.Init(std()) })
 }

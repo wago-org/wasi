@@ -7,7 +7,7 @@
 //
 //	github.com/wago-org/wasi/p1        — wasi_snapshot_preview1 (same as this package)
 //	github.com/wago-org/wasi/unstable  — wasi_unstable, the pre-preview1 "snapshot 0" ABI
-//	github.com/wago-org/wasi/p2        — WASI preview 2 (component model; placeholder, not yet)
+//	github.com/wago-org/wasi/p2        — WASI 0.2 component worlds
 //
 // Usage:
 //
@@ -149,7 +149,7 @@ func Info(module string) wago.ExtensionInfo {
 	if !ok {
 		panic("wasi: no module " + module + " in wago.json")
 	}
-	return wago.ExtensionInfo{
+	info := wago.ExtensionInfo{
 		ID:          p.Module,
 		Name:        p.Name,
 		Version:     p.Version,
@@ -162,14 +162,18 @@ func Info(module string) wago.ExtensionInfo {
 		Tags:        p.Keywords,
 		Private:     p.Private,
 		Compat:      wago.Compatibility{Engines: p.Engines, Platforms: p.Platforms},
-		// WASI contributes host imports and obtains CLI argv from Wago's narrow
-		// host environment when it is loaded as a manifest plugin.
-		RequiresCapabilities: []wago.PluginCapability{
+	}
+	if module != "github.com/wago-org/wasi/p2" {
+		// Preview 1 contributes core host imports and obtains CLI argv from
+		// Wago's narrow host environment. Preview 2 instead consumes the
+		// Component Model plugin's typed service and needs no core capability.
+		info.RequiresCapabilities = []wago.PluginCapability{
 			wago.PluginHostImports,
 			wago.PluginHostEnvironment,
 			wago.PluginInstanceHooks,
-		},
+		}
 	}
+	return info
 }
 
 // Init constructs the default (wasi_snapshot_preview1) extension from cfg.

@@ -5,9 +5,10 @@
 // it is a different model entirely: the guest is a WebAssembly Component (the
 // component model) whose imports are WIT interfaces (wasi:cli, wasi:io,
 // wasi:filesystem, …) lowered through canonical ABI adapters, not flat
-// `(func (param i32 ...) (result i32))` core-wasm imports. Enable installs the
-// `wago.component-model` plugin with its explicit `runtime.core` authority; With
-// supplies capability-scoped WASI host implementations to an instantiation.
+// `(func (param i32 ...) (result i32))` core-wasm imports. The P2 plugin consumes
+// `wago-org/component-model/runtime/v1`; only that provider receives explicit
+// `runtime.core` authority. Config supplies capability-scoped WASI host
+// implementations to an instantiation.
 //
 // Filesystem, network, HTTP, clocks, random, environment, and process behavior
 // remain denied or constrained unless enabled in Config. Component execution

@@ -50,11 +50,11 @@ What you get out of the box:
 - **Complete import surface**: modules can link every Preview 1 function. Socket calls
   report `ENOTSUP`, `ENOTSOCK`, or `EBADF` because this package does not grant network
   descriptors.
-- **Snapshot-versioned**: pin `wasi_snapshot_preview1` (default) or the older
-  `wasi_unstable` ABI by import path; preview 2 has a reserved slot.
+- **Snapshot-versioned**: pin `wasi_snapshot_preview1` (default), the older
+  `wasi_unstable` ABI, or the WASI 0.2 component worlds by import path.
 
 > **Stability:** the `p1` snapshot is **stable**; `unstable` is **deprecated** (kept for
-> old toolchains); `p2` is a **placeholder**. See [Snapshots](#snapshots).
+> old toolchains); `p2` is **experimental**. See [Snapshots](#snapshots).
 
 ## Installation
 
@@ -136,21 +136,32 @@ trailing arguments as the guest's `argv`.
 
 ## Snapshots
 
-WASI has shipped under more than one wasm import module name. Each is a subpackage with
-an identical Go API (`Init` / `Imports` / `Config`); they differ only in the module name
-they bind under and their identity metadata.
+WASI has shipped under more than one execution model. Preview 1 snapshots expose core
+Wasm imports through `Init` / `Imports`; Preview 2 exposes WIT component worlds through
+`Enable` / `Runtime.Instantiate`.
 
 | Import path | Wasm module | Stability | When you need it |
 | --- | --- | --- | --- |
 | `github.com/wago-org/wasi` | `wasi_snapshot_preview1` | stable | Default. Re-exports `p1`; use this unless you have a reason not to. |
 | `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | stable | The current ABI emitted by `wasm32-wasip1` toolchains (Rust, C, TinyGo, AssemblyScript). |
 | `github.com/wago-org/wasi/unstable` | `wasi_unstable` | deprecated | "Snapshot 0", the pre-preview1 ABI of older toolchains. Function-for-function identical to `p1` over this surface. |
-| `github.com/wago-org/wasi/p2` | - | placeholder | WASI preview 2 (the component model). Reserves the slot; **not yet implemented**. |
+| `github.com/wago-org/wasi/p2` | WIT interfaces | experimental | Stable WASI 0.2 command, filesystem, clocks, random, sockets, polling, and HTTP worlds for WebAssembly Components. |
 
 Preview 2 is a different model entirely - the guest is a WebAssembly **Component** whose
 imports are WIT interfaces lowered through the canonical ABI, not flat core-wasm imports.
-It needs a component-model loader Wago does not have yet; run preview1 modules with `p1`
-until then.
+The P2 plugin consumes the versioned `wago-org/component-model/runtime/v1` service; it
+does not receive core runtime authority. Programmatic hosts can run a component with:
+
+```go
+rt := wago.NewRuntime()
+defer rt.Close()
+
+wasi, err := wasip2.Enable(rt, wasip2.Config{Stdout: os.Stdout})
+if err != nil {
+	return err
+}
+instance, err := wasi.Instantiate(ctx, componentBytes)
+```
 
 ## Configuration
 
@@ -239,7 +250,8 @@ go test -run '^$' -bench '^Benchmark(Wazero)?WASI' -benchmem -count=1 -benchtime
 - **`internal/core/`** - the shared implementation: ABI/memory helpers, descriptor and
   capability state, filesystem/path operations, polling, and command functions.
 - **`p1/`**, **`unstable/`** - thin wrappers that bind `core` under their module name and
-  identity. `p2/` marks the reserved preview-2 slot.
+  identity. **`p2/`** provides the capability-scoped WASI 0.2 component worlds as a
+  consumer of the Component Model runtime service.
 - **`register/`** - a blank-import shim (`import _ ".../wasi/register"`) that wires the
   WASI plugins into Wago's global registry for `wago plugin build`.
 - **`wago.json`** - the package manifest declaring the module, its subpackages, engines,

@@ -16,14 +16,13 @@ func TestRealHello(t *testing.T) {
 	ctx := context.Background()
 	r := wago.NewRuntime()
 	defer r.Close()
-	components, err := Enable(r)
+	var stdout, stderr bytes.Buffer
+	wasi, err := Enable(r, Config{Stdout: &stdout, Stderr: &stderr})
 	if err != nil {
 		t.Fatalf("Enable: %v", err)
 	}
 
-	var stdout, stderr bytes.Buffer
-	inst, err := components.Instantiate(ctx, realHelloWasm,
-		With(Config{Stdout: &stdout, Stderr: &stderr})...)
+	inst, err := wasi.Instantiate(ctx, realHelloWasm)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
