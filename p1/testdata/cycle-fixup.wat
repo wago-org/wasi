@@ -1,0 +1,10 @@
+(module
+  (type $fd_write (func (param i32 i32 i32 i32) (result i32)))
+  (type $env (func (param i32 i32) (result i32)))
+  (type $exit (func (param i32)))
+  (import "env" "table" (table 4 4 funcref))
+  (import "env" "fd_write" (func $fd_write (type $fd_write)))
+  (import "env" "environ_get" (func $environ_get (type $env)))
+  (import "env" "environ_sizes_get" (func $environ_sizes_get (type $env)))
+  (import "env" "proc_exit" (func $proc_exit (type $exit)))
+  (elem (i32.const 0) func $fd_write $environ_get $environ_sizes_get $proc_exit))
