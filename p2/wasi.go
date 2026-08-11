@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wago-org/component-model"
@@ -108,6 +109,52 @@ const (
 	wasiErrorResType        uint32 = 3
 	wasiDescriptorResType   uint32 = 4
 )
+
+type writePermitTable struct {
+	mu      sync.Mutex
+	permits map[uint32]uint64
+}
+
+func validateFlushableOutputStream(rep uint32, writerForRep func(uint32) (io.Writer, error), fs *wasiFS, sockets *wasiSockets, httpHost *wasiHTTP) error {
+	if _, err := writerForRep(rep); err != nil {
+		if _, found := fs.writeStreamNode(rep); !found {
+			if _, found := sockets.outStreamNode(rep); !found && !httpHost.isBodyStreamRep(rep) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func newWritePermitTable() *writePermitTable {
+	return &writePermitTable{permits: make(map[uint32]uint64)}
+}
+
+func (p *writePermitTable) set(rep uint32, allowance uint64) {
+	p.mu.Lock()
+	p.permits[rep] = allowance
+	p.mu.Unlock()
+}
+
+func (p *writePermitTable) consume(rep uint32, size uint64) error {
+	p.mu.Lock()
+	allowance, ok := p.permits[rep]
+	delete(p.permits, rep)
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("output-stream.write called without a preceding check-write")
+	}
+	if size > allowance {
+		return fmt.Errorf("output-stream.write size %d exceeds check-write permit %d", size, allowance)
+	}
+	return nil
+}
+
+func (p *writePermitTable) drop(rep uint32) {
+	p.mu.Lock()
+	delete(p.permits, rep)
+	p.mu.Unlock()
+}
 
 // wasiArgv0 is the synthetic argv[0] (program name) wasi:cli/environment.
 // get-arguments prepends ahead of WASIConfig.Args -- see getArguments's doc.
@@ -308,6 +355,18 @@ type WASIConfig struct {
 // WithWASI returns the Options that register the WASI 0.2 host implementation.
 // Filesystem, network, and HTTP authority is granted only through WASIConfig.
 func WithWASI(cfg WASIConfig) []component.Option {
+	// Snapshot mutable caller-owned configuration before deferring host-bundle
+	// construction to instantiation time.
+	cfg.Args = append([]string(nil), cfg.Args...)
+	cfg.Env = append([]string(nil), cfg.Env...)
+	return []component.Option{component.WithOptionsFactory(func() []component.Option {
+		return withWASIInstance(cfg)
+	})}
+}
+
+// withWASIInstance builds one coherent host bundle. Every closure and resource
+// destructor returned here belongs to exactly one component instance.
+func withWASIInstance(cfg WASIConfig) []component.Option {
 	const (
 		defaultMaxStdinBytes    = int64(16 << 20)
 		defaultMaxRandomBytes   = uint64(1 << 20)
@@ -664,6 +723,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		}
 		return werr
 	}
+	writePermits := newWritePermitTable()
 
 	checkWrite := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 1 {
@@ -673,22 +733,26 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]output-stream.check-write: self: expected uint32 rep, got %T", args[0])
 		}
+		allowance := uint64(1) << 40
 		if _, err := writerForRep(rep); err != nil {
 			if _, found := fs.writeStreamNode(rep); !found {
 				if _, found := sockets.outStreamNode(rep); !found {
-					if !httphost.isBodyStreamRep(rep) {
+					if found, remaining, bodyErr := httphost.bodyStreamCapacity(rep); found {
+						if bodyErr != nil {
+							return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: wasiStreamErrClosed}}}, nil
+						}
+						allowance = remaining
+					} else {
 						return nil, err
 					}
 				}
 			}
 		}
-		// A large, fixed budget: there is no real backpressure to model
-		// against a Go io.Writer, an in-memory file, or a net.Conn, so this
-		// never has to make the guest wait.
-		return []component.Value{component.ResultValue{IsErr: false, Payload: uint64(1) << 40}}, nil
+		writePermits.set(rep, allowance)
+		return []component.Value{component.ResultValue{IsErr: false, Payload: allowance}}, nil
 	}
 
-	write := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+	writeImpl := func(_ context.Context, args []component.Value, requirePermit bool) ([]component.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]output-stream.write: expected 2 args (self, contents), got %d", len(args))
 		}
@@ -700,10 +764,21 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if err != nil {
 			return nil, fmt.Errorf("[method]output-stream.write: contents: %w", err)
 		}
+		if requirePermit {
+			if err := writePermits.consume(rep, uint64(len(buf))); err != nil {
+				return nil, fmt.Errorf("[method]output-stream.write: %w", err)
+			}
+		}
 		if err := writeSink(rep, buf); err != nil {
-			return nil, fmt.Errorf("[method]output-stream.write: %w", err)
+			return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: wasiStreamErrClosed}}}, nil
 		}
 		return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
+	}
+	write := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		return writeImpl(ctx, args, true)
+	}
+	blockingWrite := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		return writeImpl(ctx, args, false)
 	}
 
 	blockingFlush := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -714,23 +789,15 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]output-stream.blocking-flush: self: expected uint32 rep, got %T", args[0])
 		}
-		if _, err := writerForRep(rep); err != nil {
-			// No internal buffering on any side (stdio writes straight
-			// through to the configured io.Writer; fs writes commit
-			// straight to the mount -- see writeStreamWrite's doc; socket
-			// writes are unbuffered net.Conn.Write syscalls -- see
-			// sockOutStream.write's doc), so flushing has nothing to do
-			// beyond confirming rep actually names a live stream.
-			if _, found := fs.writeStreamNode(rep); !found {
-				if _, found := sockets.outStreamNode(rep); !found {
-					return nil, err
-				}
-			}
+		// No backing implementation buffers outside its own sink, so flush is
+		// a validation-only operation for every live stream kind.
+		if err := validateFlushableOutputStream(rep, writerForRep, fs, sockets, httphost); err != nil {
+			return nil, err
 		}
 		return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
 	}
 
-	writeZeroes := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+	writeZeroesImpl := func(ctx context.Context, args []component.Value, requirePermit bool) ([]component.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]output-stream.write-zeroes: expected 2 args (self, len), got %d", len(args))
 		}
@@ -742,6 +809,11 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]output-stream.write-zeroes: len: expected uint64, got %T", args[1])
 		}
+		if requirePermit {
+			if err := writePermits.consume(rep, n); err != nil {
+				return nil, fmt.Errorf("[method]output-stream.write-zeroes: %w", err)
+			}
+		}
 		var zero [32 * 1024]byte
 		for n != 0 {
 			if err := ctx.Err(); err != nil {
@@ -752,11 +824,17 @@ func WithWASI(cfg WASIConfig) []component.Option {
 				chunk = n
 			}
 			if err := writeSink(rep, zero[:chunk]); err != nil {
-				return nil, fmt.Errorf("[method]output-stream.write-zeroes: %w", err)
+				return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: wasiStreamErrClosed}}}, nil
 			}
 			n -= chunk
 		}
 		return []component.Value{component.ResultValue{IsErr: false}}, nil
+	}
+	writeZeroes := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		return writeZeroesImpl(ctx, args, true)
+	}
+	blockingWriteZeroes := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		return writeZeroesImpl(ctx, args, false)
 	}
 
 	streamSkip := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -768,7 +846,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if !rok || !lok {
 			return nil, fmt.Errorf("[method]input-stream.skip: invalid args %T, %T", args[0], args[1])
 		}
-		result, err := fs.readInputStream(sockets, rep, length)
+		result, err := fs.readInputStream(sockets, rep, length, false)
 		if err != nil || len(result) != 1 {
 			return result, err
 		}
@@ -793,7 +871,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if !ook || !iok || !lok {
 			return nil, fmt.Errorf("[method]output-stream.splice: invalid args %T, %T, %T", args[0], args[1], args[2])
 		}
-		result, err := fs.readInputStream(sockets, inRep, length)
+		result, err := fs.readInputStream(sockets, inRep, length, false)
 		if err != nil || len(result) != 1 {
 			return result, err
 		}
@@ -859,11 +937,11 @@ func WithWASI(cfg WASIConfig) []component.Option {
 
 		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.check-write", checkWrite, checkWriteFD, checkWriteResolve),
 		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.write", write, writeFD, writeResolve),
-		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-write-and-flush", write, writeFD, writeResolve),
+		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-write-and-flush", blockingWrite, writeFD, writeResolve),
 		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.flush", blockingFlush, blockingFlushFD, blockingFlushResolve),
 		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-flush", blockingFlush, blockingFlushFD, blockingFlushResolve),
 		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.write-zeroes", writeZeroes, writeZeroesFD, writeZeroesResolve),
-		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-write-zeroes-and-flush", writeZeroes, writeZeroesFD, writeZeroesResolve),
+		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.blocking-write-zeroes-and-flush", blockingWriteZeroes, writeZeroesFD, writeZeroesResolve),
 		component.WithImportCustom(wasiIfaceStreams, "[method]input-stream.skip", streamSkip, inputSkipFD, inputSkipResolve),
 		component.WithImportCustom(wasiIfaceStreams, "[method]input-stream.blocking-skip", streamSkip, inputSkipFD, inputSkipResolve),
 		component.WithImportCustom(wasiIfaceStreams, "[method]output-stream.splice", splice, spliceFD, spliceResolve),
@@ -879,10 +957,10 @@ func WithWASI(cfg WASIConfig) []component.Option {
 	opts = append(opts, wasiClockPollOptions(pollHost)...)
 	opts = append(opts, wasiFilesystemOptions(fs, sockets)...)
 	if cfg.AllowTCP {
-		opts = append(opts, wasiSocketOptions(sockets)...)
+		opts = append(opts, wasiSocketOptions(sockets, pollHost)...)
 	}
 	if cfg.AllowUDP {
-		opts = append(opts, wasiUDPSocketOptions(sockets)...)
+		opts = append(opts, wasiUDPSocketOptions(sockets, pollHost)...)
 	}
 	if cfg.EnableHTTP {
 		httphost.client = cfg.HTTPClient
@@ -894,6 +972,38 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		}
 		opts = append(opts, wasiHTTPOptions(httphost)...)
 		opts = append(opts, wasiHTTPOutgoingOptions(httphost)...)
+	}
+	opts = append(opts, wasiResourceDestructorOptions(fs, sockets, pollHost, httphost, writePermits)...)
+	return opts
+}
+
+func wasiResourceDestructorOptions(fs *wasiFS, sockets *wasiSockets, poll *wasiPoll, httpHost *wasiHTTP, writePermits *writePermitTable) []component.Option {
+	tags := []uint32{
+		wasiOutputStreamResType, wasiInputStreamResType, wasiErrorResType,
+		wasiDescriptorResType, wasiTerminalInputResType, wasiTerminalOutputResType,
+		wasiDirEntryStreamResType, wasiNetworkResType, wasiTCPSocketResType,
+		wasiPollableResType, wasiUDPSocketResType, wasiIncomingDatagramStreamResType,
+		wasiOutgoingDatagramStreamResType, wasiResolveStreamResType,
+		wasiHTTPIncomingRequestResType, wasiHTTPFieldsResType, wasiHTTPOutgoingResponseResType,
+		wasiHTTPOutgoingBodyResType, wasiHTTPResponseOutparamResType, wasiHTTPOutgoingRequestResType,
+		wasiHTTPFutureResType, wasiHTTPIncomingResponseResType, wasiHTTPIncomingBodyResType,
+		wasiHTTPRequestOptionsResType, wasiHTTPFutureTrailersResType,
+	}
+	opts := make([]component.Option, 0, len(tags))
+	for _, tag := range tags {
+		tag := tag
+		opts = append(opts, component.WithHostResourceDtor(tag, func(_ context.Context, rep uint32) error {
+			if tag == wasiOutputStreamResType {
+				writePermits.drop(rep)
+			}
+			fs.dropResource(tag, rep)
+			sockets.dropResource(tag, rep)
+			if tag == wasiPollableResType {
+				poll.dropResource(rep)
+			}
+			httpHost.dropResource(tag, rep)
+			return nil
+		}))
 	}
 	return opts
 }

@@ -17,17 +17,11 @@ import (
 //
 // # Pollable model
 //
-// Socket / stream / http `subscribe` methods all return the always-ready
-// singleton wasiPollableRep: their real blocking happens inside
-// read/receive/handle, so the pollable itself is immediately ready and
-// block/poll on it is a no-op (the pre-existing model -- see wasiPollableRep's
-// doc in wasi_sockets.go). wasi:clocks timer subscribes
-// (subscribe-duration/subscribe-instant) instead mint DISTINCT reps carrying a
-// real wall-clock deadline; block/poll on those genuinely sleep until the
-// deadline. That deadline is the ONLY thing that produces a
-// std::thread::sleep's delay -- unlike a socket read there is no other blocking
-// operation to hang the delay on -- so, uniquely for clocks, the pollable must
-// really wait.
+// Socket input and UDP receive subscriptions mint distinct pollables backed by
+// readiness probes. Other immediately-ready streams may share
+// wasiPollableRep. Clock subscriptions mint distinct reps with deadlines.
+// poll checks every source and waits in short, cancellation-aware intervals
+// until at least one callback or timer is ready.
 //
 // # Monotonic vs wall time
 //
@@ -44,8 +38,16 @@ type wasiPoll struct {
 	base      time.Time
 	wallClock func() time.Time
 	deadlines map[uint32]time.Time
+	readiness map[uint32]func() bool
 	nextRep   uint32
 	timezone  *time.Location
+}
+
+func (p *wasiPoll) dropResource(rep uint32) {
+	p.mu.Lock()
+	delete(p.deadlines, rep)
+	delete(p.readiness, rep)
+	p.mu.Unlock()
 }
 
 // wasiPollTimerRepBase is wasiPoll.nextRep's start: any value but the
@@ -70,6 +72,7 @@ func newWasiPoll(wallClock func() time.Time) *wasiPoll {
 		base:      time.Now(),
 		wallClock: wallClock,
 		deadlines: make(map[uint32]time.Time),
+		readiness: make(map[uint32]func() bool),
 		nextRep:   wasiPollTimerRepBase,
 	}
 }
@@ -99,6 +102,29 @@ func (p *wasiPoll) newTimer(deadline time.Time) uint32 {
 	p.nextRep++
 	p.deadlines[rep] = deadline
 	return rep
+}
+
+func (p *wasiPoll) newReadiness(ready func() bool) uint32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	rep := p.nextRep
+	p.nextRep++
+	p.readiness[rep] = ready
+	return rep
+}
+
+func (p *wasiPoll) isReady(rep uint32, now time.Time) bool {
+	p.mu.Lock()
+	deadline, timer := p.deadlines[rep]
+	readyFn := p.readiness[rep]
+	p.mu.Unlock()
+	if timer {
+		return !now.Before(deadline)
+	}
+	if readyFn != nil {
+		return readyFn()
+	}
+	return true
 }
 
 // deadlineOf returns rep's timer deadline, or ok=false if rep is not a timer
@@ -131,7 +157,7 @@ func (p *wasiPoll) subscribeDuration(_ context.Context, args []component.Value) 
 	if err != nil {
 		return nil, err
 	}
-	return []component.Value{p.newTimer(time.Now().Add(time.Duration(when)))}, nil
+	return []component.Value{p.newTimer(addUnsignedNanos(time.Now(), when))}, nil
 }
 
 // subscribeInstant implements monotonic-clock.subscribe-instant(when: instant)
@@ -142,7 +168,14 @@ func (p *wasiPoll) subscribeInstant(_ context.Context, args []component.Value) (
 	if err != nil {
 		return nil, err
 	}
-	return []component.Value{p.newTimer(p.base.Add(time.Duration(when)))}, nil
+	return []component.Value{p.newTimer(addUnsignedNanos(p.base, when))}, nil
+}
+
+func addUnsignedNanos(base time.Time, nanos uint64) time.Time {
+	if nanos > math.MaxInt64 {
+		nanos = math.MaxInt64
+	}
+	return base.Add(time.Duration(nanos))
 }
 
 // wallNow implements wasi:clocks/wall-clock.now() -> datetime { seconds: u64,
@@ -203,16 +236,16 @@ func (p *wasiPoll) timezoneUTCOffset(_ context.Context, args []component.Value) 
 }
 
 // block implements wasi:io/poll [method]pollable.block(self: borrow<pollable>)
-// -> (): for a timer pollable it sleeps until the deadline; for an always-ready
-// pollable it returns immediately. self is a top-level borrow, already resolved
-// to a rep by liftHostArgs.
+// -> (): it waits for a timer or readiness callback; an always-ready pollable
+// returns immediately. self is a top-level borrow, already resolved to a rep by
+// liftHostArgs.
 func (p *wasiPoll) block(ctx context.Context, args []component.Value) ([]component.Value, error) {
 	rep, err := wasiPollU32Arg("[method]pollable.block", args)
 	if err != nil {
 		return nil, err
 	}
-	if deadline, ok := p.deadlineOf(rep); ok {
-		wasiSleepUntil(ctx, deadline)
+	if err := p.waitForAny(ctx, []uint32{rep}); err != nil {
+		return nil, err
 	}
 	return nil, nil
 }
@@ -222,8 +255,7 @@ func (p *wasiPoll) ready(_ context.Context, args []component.Value) ([]component
 	if err != nil {
 		return nil, err
 	}
-	deadline, timer := p.deadlineOf(rep)
-	return []component.Value{!timer || !time.Now().Before(deadline)}, nil
+	return []component.Value{p.isReady(rep, time.Now())}, nil
 }
 
 // poll implements the free wasi:io/poll.poll(in: list<borrow<pollable>>) ->
@@ -239,6 +271,12 @@ func (p *wasiPoll) poll(ctx context.Context, args []component.Value) ([]componen
 	list, ok := args[0].([]component.Value)
 	if !ok {
 		return nil, fmt.Errorf("wasi:io/poll.poll: in: expected list<borrow<pollable>> ([]component.Value), got %T", args[0])
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("wasi:io/poll.poll: input list must not be empty")
+	}
+	if uint64(len(list)) > math.MaxUint32 {
+		return nil, fmt.Errorf("wasi:io/poll.poll: input list exceeds u32 index space")
 	}
 	resources, err := p.getResources()
 	if err != nil {
@@ -260,21 +298,46 @@ func (p *wasiPoll) poll(ctx context.Context, args []component.Value) ([]componen
 	if out := p.readyIndices(reps); len(out) > 0 {
 		return []component.Value{out}, nil
 	}
-	// Nothing ready: every input is a not-yet-due timer. Sleep to the earliest.
-	if earliest, ok := p.earliestDeadline(reps); ok {
-		wasiSleepUntil(ctx, earliest)
+	if err := p.waitForAny(ctx, reps); err != nil {
+		return nil, err
 	}
 	return []component.Value{p.readyIndices(reps)}, nil
 }
 
-// readyIndices returns the indices of reps that are ready now: a non-timer
-// (always-ready) rep, or a timer whose deadline has passed.
+func (p *wasiPoll) waitForAny(ctx context.Context, reps []uint32) error {
+	for len(p.readyIndices(reps)) == 0 {
+		wait := time.Millisecond
+		if earliest, ok := p.earliestDeadline(reps); ok {
+			if until := time.Until(earliest); until < wait {
+				wait = until
+			}
+		}
+		if wait <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// readyIndices returns the indices of reps whose timer, readiness callback, or
+// always-ready singleton is ready now.
 func (p *wasiPoll) readyIndices(reps []uint32) []component.Value {
 	now := time.Now()
 	out := make([]component.Value, 0, len(reps))
 	for i, rep := range reps {
-		deadline, isTimer := p.deadlineOf(rep)
-		if !isTimer || !now.Before(deadline) {
+		if p.isReady(rep, now) {
 			out = append(out, uint32(i))
 		}
 	}

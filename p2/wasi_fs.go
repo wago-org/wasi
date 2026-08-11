@@ -464,6 +464,21 @@ func newWasiFS(mounts []fsMount) *wasiFS {
 	}
 }
 
+func (w *wasiFS) dropResource(tag, rep uint32) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	switch tag {
+	case wasiDescriptorResType:
+		delete(w.descs, rep)
+	case wasiInputStreamResType:
+		delete(w.streams, rep)
+	case wasiOutputStreamResType:
+		delete(w.writeStreams, rep)
+	case wasiDirEntryStreamResType:
+		delete(w.dirStreams, rep)
+	}
+}
+
 // fsMountsFromConfig reads cfg's mounts back out as fsMounts, in the order
 // they were configured. Guest paths are normalized to an absolute, slash-
 // prefixed form ("" / "." / "tmp" / "/tmp/" all being ways to write "/" or
@@ -850,14 +865,14 @@ func (w *wasiFS) streamNode(rep uint32) (*fsStreamNode, error) {
 	return s, nil
 }
 
-func (w *wasiFS) readInputStream(sockets *wasiSockets, rep uint32, length uint64) ([]component.Value, error) {
+func (w *wasiFS) readInputStream(sockets *wasiSockets, rep uint32, length uint64, blocking bool) ([]component.Value, error) {
 	s, err := w.streamNode(rep)
 	if err != nil {
 		if sock, found := sockets.inStreamNode(rep); found {
 			if length == 0 {
 				return []component.Value{component.ResultValue{Payload: wasiListFromBytes(nil)}}, nil
 			}
-			return sock.read(length)
+			return sock.read(length, blocking)
 		}
 		return nil, fmt.Errorf("[method]input-stream.read: %w", err)
 	}
@@ -1133,6 +1148,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !ok {
 			return nil, fmt.Errorf("[method]descriptor.open-at: self: expected uint32 rep, got %T", args[0])
 		}
+		pathFlags, ok := args[1].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.open-at: path-flags: expected uint32, got %T", args[1])
+		}
+		if pathFlags&^uint32(1) != 0 {
+			return fsErrResult(sys.EINVAL), nil
+		}
 		path, ok := args[2].(string)
 		if !ok {
 			return nil, fmt.Errorf("[method]descriptor.open-at: path: expected string, got %T", args[2])
@@ -1145,9 +1167,6 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !ok {
 			return nil, fmt.Errorf("[method]descriptor.open-at: flags: expected uint32, got %T", args[4])
 		}
-		// path-flags (args[1]) is ignored: symlink-follow is the mount's
-		// business, and sys.FS's OpenFile follows links like open(2).
-
 		node, err := fs.descNode(selfRep)
 		if err != nil {
 			return nil, fmt.Errorf("[method]descriptor.open-at: %w", err)
@@ -1215,6 +1234,9 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 			if openFlags&wasiOpenFlagTruncate != 0 && writable {
 				oflag |= sys.O_TRUNC
 			}
+		}
+		if pathFlags&1 == 0 {
+			oflag |= sys.O_NOFOLLOW
 		}
 		f, errno := node.fs.OpenFile(full, oflag, 0o644)
 		if errno != 0 {
@@ -1378,9 +1400,7 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 	// its path resolution (wasiJoinFSPath) and not-found/not-a-directory
 	// error handling with openAt, but never calls fs.fsFileSet: unlike
 	// open-at, stat-at has no create/truncate flags to act on, so a missing
-	// path is unconditionally error-code::no-entry. path-flags (args[1]) is
-	// ignored for the same reason openAt ignores it (symlink following is
-	// the mount's business).
+	// path is unconditionally error-code::no-entry.
 	statAt := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 3 {
 			return nil, fmt.Errorf("[method]descriptor.stat-at: expected 3 args (self, path-flags, path), got %d", len(args))
@@ -1388,6 +1408,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		selfRep, ok := args[0].(uint32)
 		if !ok {
 			return nil, fmt.Errorf("[method]descriptor.stat-at: self: expected uint32 rep, got %T", args[0])
+		}
+		pathFlags, ok := args[1].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.stat-at: path-flags: expected uint32, got %T", args[1])
+		}
+		if pathFlags&^uint32(1) != 0 {
+			return fsErrResult(sys.EINVAL), nil
 		}
 		path, ok := args[2].(string)
 		if !ok {
@@ -1404,7 +1431,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !ok {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
 		}
-		st, errno := node.fs.Stat(full)
+		var st sys.Stat_t
+		var errno sys.Errno
+		if pathFlags&1 != 0 {
+			st, errno = node.fs.Stat(full)
+		} else {
+			st, errno = node.fs.Lstat(full)
+		}
 		if errno != 0 {
 			return fsErrResult(errno), nil
 		}
@@ -1620,8 +1653,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !ok {
 			return nil, fmt.Errorf("[method]descriptor.link-at: self: expected uint32 rep, got %T", args[0])
 		}
-		// args[1] old-path-flags (symlink-follow flags) is not inspected: this
-		// model has no symlinks, so there is nothing to follow or not.
+		oldPathFlags, ok := args[1].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.link-at: old-path-flags: expected uint32, got %T", args[1])
+		}
+		if oldPathFlags&^uint32(1) != 0 {
+			return fsErrResult(sys.EINVAL), nil
+		}
 		oldPath, ok := args[2].(string)
 		if !ok {
 			return nil, fmt.Errorf("[method]descriptor.link-at: old-path: expected string, got %T", args[2])
@@ -1653,7 +1691,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !ok1 || !ok2 {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
 		}
-		if errno := selfNode.fs.Link(oldFull, newFull); errno != 0 {
+		var errno sys.Errno
+		if mounted, ok := selfNode.fs.(*wazeroFS); ok {
+			errno = mounted.link(oldFull, newFull, oldPathFlags&1 != 0)
+		} else {
+			errno = selfNode.fs.Link(oldFull, newFull)
+		}
+		if errno != 0 {
 			return fsErrResult(errno), nil
 		}
 		return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
@@ -1761,7 +1805,7 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 	// blocking net.Conn.Read (sockInStream.read), so the two methods differ
 	// there in name only, identically to how this package's fs path never
 	// distinguished them either.
-	streamRead := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+	streamReadImpl := func(_ context.Context, args []component.Value, blocking bool) ([]component.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]input-stream.read: expected 2 args (self, len), got %d", len(args))
 		}
@@ -1773,7 +1817,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !ok {
 			return nil, fmt.Errorf("[method]input-stream.read: len: expected uint64, got %T", args[1])
 		}
-		return fs.readInputStream(sockets, selfRep, length)
+		return fs.readInputStream(sockets, selfRep, length, blocking)
+	}
+	streamRead := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		return streamReadImpl(ctx, args, false)
+	}
+	streamBlockingRead := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		return streamReadImpl(ctx, args, true)
 	}
 
 	advise := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -2103,6 +2153,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !ok {
 			return nil, fmt.Errorf("[method]descriptor.metadata-hash-at: self: expected uint32 rep, got %T", args[0])
 		}
+		pathFlags, ok := args[1].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]descriptor.metadata-hash-at: path-flags: expected uint32, got %T", args[1])
+		}
+		if pathFlags&^uint32(1) != 0 {
+			return fsErrResult(sys.EINVAL), nil
+		}
 		path, ok := args[2].(string)
 		if !ok {
 			return nil, fmt.Errorf("[method]descriptor.metadata-hash-at: path: expected string, got %T", args[2])
@@ -2118,7 +2175,13 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		if !ok {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiErrorCodeNotPermitted}}, nil
 		}
-		st, errno := node.fs.Stat(full)
+		var st sys.Stat_t
+		var errno sys.Errno
+		if pathFlags&1 != 0 {
+			st, errno = node.fs.Stat(full)
+		} else {
+			st, errno = node.fs.Lstat(full)
+		}
 		if errno != 0 {
 			return fsErrResult(errno), nil
 		}
@@ -2223,7 +2286,7 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		component.WithImportCustom(wasiIfaceFilesystemTypes, "[method]descriptor.metadata-hash-at", metadataHashAt, metadataHashAtFD, metadataHashAtResolve),
 
 		component.WithImportCustom(wasiIfaceStreams, "[method]input-stream.read", streamRead, inReadFD, inReadResolve),
-		component.WithImportCustom(wasiIfaceStreams, "[method]input-stream.blocking-read", streamRead, inBlockingReadFD, inBlockingReadResolve),
+		component.WithImportCustom(wasiIfaceStreams, "[method]input-stream.blocking-read", streamBlockingRead, inBlockingReadFD, inBlockingReadResolve),
 
 		component.WithImportCustom(wasiIfaceTerminalStdin, "get-terminal-stdin", getTerminalStdin, termInFD, termInResolve),
 		component.WithImportCustom(wasiIfaceTerminalStdout, "get-terminal-stdout", getTerminalStdout, termOutFD, termOutResolve),

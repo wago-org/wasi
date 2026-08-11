@@ -6,6 +6,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
 	"github.com/tetratelabs/wazero/experimental/sysfs"
@@ -91,32 +92,48 @@ func (c *fsConfig) preopens() ([]sys.FS, []string) {
 type wazeroFS struct {
 	fs       experimentalsys.FS
 	hostRoot string
+	mu       sync.RWMutex
 }
 
-// checkHostPath rejects symlinked path components for directory mounts. This
-// closes the common escape where root/link points outside root. A final
-// symlink is allowed only for operations which act on the link itself.
-func (w *wazeroFS) checkHostPath(name string, allowFinalSymlink, allowMissingFinal bool) sys.Errno {
+// resolveHostPath resolves symlinks while keeping the result beneath the
+// canonical mount root. When followFinal is false, only the parent is
+// resolved, leaving the final component for an lstat-style operation. The
+// caller must hold w.mu so guest-driven renames cannot race validation.
+func (w *wazeroFS) resolveHostPath(name string, followFinal, allowMissingFinal bool) (string, sys.Errno) {
+	if errno := invalidPathErrno(name); errno != 0 {
+		return "", errno
+	}
 	if w.hostRoot == "" || name == "." {
-		return 0
+		return name, 0
 	}
-	parts := strings.Split(name, "/")
-	current := w.hostRoot
-	for i, part := range parts {
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		final := i == len(parts)-1
-		if err != nil {
-			if final && allowMissingFinal && os.IsNotExist(err) {
-				return 0
+	abs := filepath.Join(w.hostRoot, filepath.FromSlash(name))
+	var resolved string
+	var err error
+	if followFinal {
+		resolved, err = filepath.EvalSymlinks(abs)
+		if err != nil && allowMissingFinal && os.IsNotExist(err) {
+			parent, parentErr := filepath.EvalSymlinks(filepath.Dir(abs))
+			if parentErr == nil {
+				resolved, err = filepath.Join(parent, filepath.Base(abs)), nil
 			}
-			return sys.UnwrapOSError(err)
 		}
-		if info.Mode()&fs.ModeSymlink != 0 && !(final && allowFinalSymlink) {
-			return sys.EPERM
+	} else {
+		resolved, err = filepath.EvalSymlinks(filepath.Dir(abs))
+		if err == nil {
+			resolved = filepath.Join(resolved, filepath.Base(abs))
 		}
 	}
-	return 0
+	if err != nil {
+		return "", sys.UnwrapOSError(err)
+	}
+	rel, err := filepath.Rel(w.hostRoot, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", sys.EPERM
+	}
+	if rel == "." {
+		return ".", 0
+	}
+	return filepath.ToSlash(rel), 0
 }
 
 func validFSPath(name string) bool {
@@ -131,15 +148,15 @@ func invalidPathErrno(name string) sys.Errno {
 }
 
 func (w *wazeroFS) OpenFile(name string, flag sys.Oflag, perm fs.FileMode) (sys.File, sys.Errno) {
-	if errno := invalidPathErrno(name); errno != 0 {
-		return nil, errno
-	}
-	if errno := w.checkHostPath(name, false, flag&sys.O_CREAT != 0); errno != 0 {
-		return nil, errno
-	}
-	f, errno := w.fs.OpenFile(name, experimentalsys.Oflag(flag), perm)
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	resolved, errno := w.resolveHostPath(name, flag&sys.O_NOFOLLOW == 0, flag&sys.O_CREAT != 0)
 	if errno != 0 {
-		return nil, sys.Errno(errno)
+		return nil, errno
+	}
+	f, openErrno := w.fs.OpenFile(resolved, experimentalsys.Oflag(flag), perm)
+	if openErrno != 0 {
+		return nil, sys.Errno(openErrno)
 	}
 	return &wazeroFile{file: f}, 0
 }
@@ -149,121 +166,120 @@ func convertStat(st wazerosys.Stat_t) sys.Stat_t {
 }
 
 func (w *wazeroFS) Lstat(name string) (sys.Stat_t, sys.Errno) {
-	if errno := invalidPathErrno(name); errno != 0 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	resolved, errno := w.resolveHostPath(name, false, false)
+	if errno != 0 {
 		return sys.Stat_t{}, errno
 	}
-	if errno := w.checkHostPath(name, true, false); errno != 0 {
-		return sys.Stat_t{}, errno
-	}
-	st, errno := w.fs.Lstat(name)
-	return convertStat(st), sys.Errno(errno)
+	st, statErrno := w.fs.Lstat(resolved)
+	return convertStat(st), sys.Errno(statErrno)
 }
 func (w *wazeroFS) Stat(name string) (sys.Stat_t, sys.Errno) {
-	if errno := invalidPathErrno(name); errno != 0 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	resolved, errno := w.resolveHostPath(name, true, false)
+	if errno != 0 {
 		return sys.Stat_t{}, errno
 	}
-	if errno := w.checkHostPath(name, false, false); errno != 0 {
-		return sys.Stat_t{}, errno
-	}
-	st, errno := w.fs.Stat(name)
-	return convertStat(st), sys.Errno(errno)
+	st, statErrno := w.fs.Stat(resolved)
+	return convertStat(st), sys.Errno(statErrno)
 }
 func (w *wazeroFS) Mkdir(name string, perm fs.FileMode) sys.Errno {
-	if errno := invalidPathErrno(name); errno != 0 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	resolved, errno := w.resolveHostPath(name, false, true)
+	if errno != 0 {
 		return errno
 	}
-	if errno := w.checkHostPath(name, false, true); errno != 0 {
-		return errno
-	}
-	return sys.Errno(w.fs.Mkdir(name, perm))
+	return sys.Errno(w.fs.Mkdir(resolved, perm))
 }
 func (w *wazeroFS) Chmod(name string, perm fs.FileMode) sys.Errno {
-	if errno := invalidPathErrno(name); errno != 0 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	resolved, errno := w.resolveHostPath(name, true, false)
+	if errno != 0 {
 		return errno
 	}
-	if errno := w.checkHostPath(name, false, false); errno != 0 {
-		return errno
-	}
-	return sys.Errno(w.fs.Chmod(name, perm))
+	return sys.Errno(w.fs.Chmod(resolved, perm))
 }
 func (w *wazeroFS) Rename(from, to string) sys.Errno {
-	if errno := invalidPathErrno(from); errno != 0 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	resolvedFrom, errno := w.resolveHostPath(from, false, false)
+	if errno != 0 {
 		return errno
 	}
-	if errno := invalidPathErrno(to); errno != 0 {
+	resolvedTo, errno := w.resolveHostPath(to, false, true)
+	if errno != 0 {
 		return errno
 	}
-	if errno := w.checkHostPath(from, true, false); errno != 0 {
-		return errno
-	}
-	if errno := w.checkHostPath(to, true, true); errno != 0 {
-		return errno
-	}
-	return sys.Errno(w.fs.Rename(from, to))
+	return sys.Errno(w.fs.Rename(resolvedFrom, resolvedTo))
 }
 func (w *wazeroFS) Rmdir(name string) sys.Errno {
-	if errno := invalidPathErrno(name); errno != 0 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	resolved, errno := w.resolveHostPath(name, false, false)
+	if errno != 0 {
 		return errno
 	}
-	if errno := w.checkHostPath(name, false, false); errno != 0 {
-		return errno
-	}
-	return sys.Errno(w.fs.Rmdir(name))
+	return sys.Errno(w.fs.Rmdir(resolved))
 }
 func (w *wazeroFS) Unlink(name string) sys.Errno {
-	if errno := invalidPathErrno(name); errno != 0 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	resolved, errno := w.resolveHostPath(name, false, false)
+	if errno != 0 {
 		return errno
 	}
-	if errno := w.checkHostPath(name, true, false); errno != 0 {
-		return errno
-	}
-	return sys.Errno(w.fs.Unlink(name))
+	return sys.Errno(w.fs.Unlink(resolved))
 }
 func (w *wazeroFS) Link(oldName, newName string) sys.Errno {
-	if errno := invalidPathErrno(oldName); errno != 0 {
+	return w.link(oldName, newName, false)
+}
+func (w *wazeroFS) link(oldName, newName string, followOld bool) sys.Errno {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	resolvedOld, errno := w.resolveHostPath(oldName, followOld, false)
+	if errno != 0 {
 		return errno
 	}
-	if errno := invalidPathErrno(newName); errno != 0 {
+	resolvedNew, errno := w.resolveHostPath(newName, false, true)
+	if errno != 0 {
 		return errno
 	}
-	if errno := w.checkHostPath(oldName, true, false); errno != 0 {
-		return errno
-	}
-	if errno := w.checkHostPath(newName, true, true); errno != 0 {
-		return errno
-	}
-	return sys.Errno(w.fs.Link(oldName, newName))
+	return sys.Errno(w.fs.Link(resolvedOld, resolvedNew))
 }
 func (w *wazeroFS) Symlink(oldName, linkName string) sys.Errno {
 	if path.IsAbs(oldName) {
 		return sys.EPERM
 	}
-	if errno := invalidPathErrno(linkName); errno != 0 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	resolved, errno := w.resolveHostPath(linkName, false, true)
+	if errno != 0 {
 		return errno
 	}
-	if errno := w.checkHostPath(linkName, true, true); errno != 0 {
-		return errno
-	}
-	return sys.Errno(w.fs.Symlink(oldName, linkName))
+	return sys.Errno(w.fs.Symlink(oldName, resolved))
 }
 func (w *wazeroFS) Readlink(name string) (string, sys.Errno) {
-	if errno := invalidPathErrno(name); errno != 0 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	resolved, errno := w.resolveHostPath(name, false, false)
+	if errno != 0 {
 		return "", errno
 	}
-	if errno := w.checkHostPath(name, true, false); errno != 0 {
-		return "", errno
-	}
-	target, errno := w.fs.Readlink(name)
-	return target, sys.Errno(errno)
+	target, readErrno := w.fs.Readlink(resolved)
+	return target, sys.Errno(readErrno)
 }
 func (w *wazeroFS) Utimens(name string, atim, mtim int64) sys.Errno {
-	if errno := invalidPathErrno(name); errno != 0 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	resolved, errno := w.resolveHostPath(name, true, false)
+	if errno != 0 {
 		return errno
 	}
-	if errno := w.checkHostPath(name, false, false); errno != 0 {
-		return errno
-	}
-	return sys.Errno(w.fs.Utimens(name, atim, mtim))
+	return sys.Errno(w.fs.Utimens(resolved, atim, mtim))
 }
 
 type wazeroFile struct{ file experimentalsys.File }

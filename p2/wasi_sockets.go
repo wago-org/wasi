@@ -52,29 +52,23 @@ import (
 // their corresponding capabilities are enabled. No socket operation is
 // reachable unless the caller supplies the opt-in capability in WASIConfig.
 //
-// # Blocking, single-shot connect/read/write model
+// # Connect and stream readiness model
 //
 // A real WASI host's start-connect/finish-connect pair is asynchronous:
 // start-connect begins a non-blocking connect, and the guest is expected to
 // subscribe+block on a pollable, retrying finish-connect until it stops
 // reporting error-code::would-block. This package does not need that
-// complexity to be correct: start-connect itself performs the real,
+// complexity for connection establishment: start-connect performs the real,
 // blocking net.Dial synchronously (sockets.dial, injected via
 // WASIConfig.Dialer/AllowTCP) and records the outcome on the tcp-socket
 // node before returning -- by the time the guest later subscribes+blocks
 // and calls finish-connect, the outcome is already known, so
 // finish-connect never has anything to report but the final Ok/Err
 // (wasiSockErrWouldBlock, though declared, is consequently never actually
-// returned by this implementation). Every pollable this package mints
-// (tcp-socket connect-readiness, input/output-stream data-readiness) is
-// consequently always already "ready" the moment a guest can observe it --
-// [method]pollable.block and the free poll() func both have nothing to
-// wait for and return immediately -- and an input-stream's read performs a
-// real, synchronously-blocking net.Conn.Read (so a genuine wait for data
-// off the wire happens inside read itself, not a separate poll step).
-// WASIConfig.Dialer's own doc calls this out as the intentional, spec-
-// legal simplification for a single-threaded host with no real concurrent
-// task scheduler to suspend/resume against.
+// returned by this implementation). Input-stream.read and UDP receive are
+// nonblocking, while their subscribe methods create source-specific pollables
+// whose readiness probes preserve pending data. The blocking stream methods
+// alone wait in net.Conn.Read.
 //
 // # Rep numbering
 //
@@ -88,11 +82,9 @@ import (
 // both spaces through one shared resource type (wasiInputStreamResType/
 // wasiOutputStreamResType) -- see wasi_fs.go's streamRead and wasi.go's
 // writeSink, both extended by this file's sockInStreamNode/outStreamNode
-// fallback. network and pollable, by contrast, need no counter at all:
-// both are modeled as a single stateless singleton rep (wasiNetworkRep,
-// wasiPollableRep) that every mint (instance-network; every subscribe)
-// hands out again -- see their own doc comments for why no per-instance
-// state is needed.
+// fallback. The network remains a stateless singleton. Pollables for sources
+// with meaningful readiness use wasiPoll's separate rep range; only sources
+// which are unconditionally ready share wasiPollableRep.
 const (
 	wasiNetworkResType   uint32 = 8
 	wasiTCPSocketResType uint32 = 9
@@ -119,13 +111,9 @@ const (
 // startConnect's args[1]).
 const wasiNetworkRep uint32 = 1
 
-// wasiPollableRep is the one host-side rep every pollable this package
-// mints -- from tcp-socket.subscribe, input-stream.subscribe, and
-// output-stream.subscribe alike -- ever names. See this file's package doc
-// ("Blocking, single-shot connect/read/write model") for why every
-// pollable this package can mint is already ready the instant a guest can
-// observe it: there is no wait state to distinguish between two different
-// pollables, so (mirroring wasiNetworkRep) a single shared rep suffices.
+// wasiPollableRep is shared by sources which are unconditionally ready.
+// Socket input and datagram input subscriptions instead use distinct reps in
+// wasiPoll so poll can distinguish their readiness.
 const wasiPollableRep uint32 = 1
 
 // wasiSockMaxReadChunk caps a single [method]input-stream.read's
@@ -220,12 +208,13 @@ type tcpSockNode struct {
 
 // sockInStream is one live wasi:io/streams `input-stream` backed by a real
 // net.Conn -- finish-connect's own<input-stream> half. Unlike
-// wasi_fs.go's fsStreamNode (an in-memory byte slice with no real
-// blocking), read genuinely blocks in net.Conn.Read until at least one
-// byte is available or the peer closes the connection.
+// wasi_fs.go's fsStreamNode, it also retains bytes consumed by readiness
+// probes. read is nonblocking; blocking-read selects the blocking path.
 type sockInStream struct {
-	mu   sync.Mutex
-	conn net.Conn
+	mu       sync.Mutex
+	conn     net.Conn
+	pending  []byte
+	terminal bool
 }
 
 // sockOutStream is one live wasi:io/streams `output-stream` backed by the
@@ -279,9 +268,11 @@ type udpSockNode struct {
 // see udp.wit's `stream` doc), discarding anything else, mirroring a real
 // connected UDP socket's kernel-side filtering.
 type incomingDatagramStream struct {
-	mu     sync.Mutex
-	pconn  net.PacketConn
-	remote *net.UDPAddr
+	mu       sync.Mutex
+	pconn    net.PacketConn
+	remote   *net.UDPAddr
+	pending  []component.Value
+	terminal bool
 }
 
 // outgoingDatagramStream is incomingDatagramStream's send half, sharing the
@@ -290,9 +281,31 @@ type incomingDatagramStream struct {
 // mirrors incomingDatagramStream's own remote field, and udp.wit's own
 // `stream` doc for the "connected" mode's send-side restriction.
 type outgoingDatagramStream struct {
-	mu     sync.Mutex
-	pconn  net.PacketConn
-	remote *net.UDPAddr
+	mu        sync.Mutex
+	pconn     net.PacketConn
+	remote    *net.UDPAddr
+	permit    uint64
+	hasPermit bool
+}
+
+func (s *outgoingDatagramStream) setPermit(n uint64) {
+	s.mu.Lock()
+	s.permit, s.hasPermit = n, true
+	s.mu.Unlock()
+}
+
+func (s *outgoingDatagramStream) consumePermit(n uint64) error {
+	s.mu.Lock()
+	permit, ok := s.permit, s.hasPermit
+	s.hasPermit = false
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("send called without a preceding check-send")
+	}
+	if n > permit {
+		return fmt.Errorf("send count %d exceeds check-send permit %d", n, permit)
+	}
+	return nil
 }
 
 // wasiSockets holds the mutable state this file's host funcs close over:
@@ -381,6 +394,58 @@ func (s *wasiSockets) allocRep() uint32 {
 	return r
 }
 
+func (s *wasiSockets) dropResource(tag, rep uint32) {
+	s.mu.Lock()
+	var tcp *tcpSockNode
+	var udp *udpSockNode
+	var in *sockInStream
+	var out *sockOutStream
+	switch tag {
+	case wasiTCPSocketResType:
+		tcp = s.tcpSocks[rep]
+		delete(s.tcpSocks, rep)
+	case wasiInputStreamResType:
+		in = s.inStreams[rep]
+		delete(s.inStreams, rep)
+	case wasiOutputStreamResType:
+		out = s.outStreams[rep]
+		delete(s.outStreams, rep)
+	case wasiResolveStreamResType:
+		delete(s.resolveStream, rep)
+	case wasiUDPSocketResType:
+		udp = s.udpSocks[rep]
+		delete(s.udpSocks, rep)
+	case wasiIncomingDatagramStreamResType:
+		delete(s.inDgrams, rep)
+	case wasiOutgoingDatagramStreamResType:
+		delete(s.outDgrams, rep)
+	}
+	s.mu.Unlock()
+	if tcp != nil {
+		tcp.mu.Lock()
+		if tcp.conn != nil {
+			_ = tcp.conn.Close()
+		}
+		if tcp.listener != nil {
+			_ = tcp.listener.Close()
+		}
+		tcp.mu.Unlock()
+	}
+	if udp != nil && udp.pconn != nil {
+		_ = udp.pconn.Close()
+	}
+	if in != nil {
+		if closer, ok := in.conn.(interface{ CloseRead() error }); ok {
+			_ = closer.CloseRead()
+		}
+	}
+	if out != nil {
+		if closer, ok := out.conn.(interface{ CloseWrite() error }); ok {
+			_ = closer.CloseWrite()
+		}
+	}
+}
+
 func (s *wasiSockets) tcpSockNode(rep uint32) (*tcpSockNode, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -441,9 +506,9 @@ func (s *wasiSockets) outDatagramStreamNode(rep uint32) (*outgoingDatagramStream
 	return n, ok
 }
 
-// read performs a real, blocking net.Conn.Read against s's connection, up
-// to wasiSockMaxReadChunk bytes even if length requests more (see its own
-// doc), and shapes the result as [method]input-stream.read's
+// read performs one bounded net.Conn.Read against s's connection. The
+// blocking argument distinguishes read from blocking-read. It shapes the
+// result as [method]input-stream.read's
 // result<list<u8>,stream-error>: a non-empty read (even alongside a
 // simultaneous io.EOF -- io.Reader's contract allows n>0 with err==io.EOF
 // in the same call) is reported Ok this call, with EOF surfacing as
@@ -456,21 +521,70 @@ func (s *wasiSockets) outDatagramStreamNode(rep uint32) (*outgoingDatagramStream
 // "closed" rather than fabricating a bogus error-code payload -- a real
 // guest observes "the stream ended" either way and does not distinguish
 // further.
-func (s *sockInStream) read(length uint64) ([]component.Value, error) {
+func (s *sockInStream) read(length uint64, blocking bool) ([]component.Value, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if length > wasiSockMaxReadChunk {
 		length = wasiSockMaxReadChunk
 	}
+	if len(s.pending) != 0 {
+		n := int(length)
+		if n > len(s.pending) {
+			n = len(s.pending)
+		}
+		buf := append([]byte(nil), s.pending[:n]...)
+		s.pending = s.pending[n:]
+		return []component.Value{component.ResultValue{Payload: wasiListFromBytes(buf)}}, nil
+	}
+	if s.terminal {
+		return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: wasiStreamErrClosed}}}, nil
+	}
 	buf := make([]byte, length)
+	if !blocking {
+		if err := s.conn.SetReadDeadline(time.Now()); err != nil {
+			return nil, err
+		}
+		defer s.conn.SetReadDeadline(time.Time{})
+	}
 	n, err := s.conn.Read(buf)
 	if n > 0 {
 		return []component.Value{component.ResultValue{IsErr: false, Payload: wasiListFromBytes(buf[:n])}}, nil
 	}
 	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() && !blocking {
+			return []component.Value{component.ResultValue{IsErr: false, Payload: wasiListFromBytes(nil)}}, nil
+		}
+		s.terminal = true
 		return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: wasiStreamErrClosed}}}, nil
 	}
 	return []component.Value{component.ResultValue{IsErr: false, Payload: []component.Value{}}}, nil
+}
+
+func (s *sockInStream) ready() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) != 0 || s.terminal {
+		return true
+	}
+	if err := s.conn.SetReadDeadline(time.Now().Add(time.Millisecond)); err != nil {
+		s.terminal = true
+		return true
+	}
+	defer s.conn.SetReadDeadline(time.Time{})
+	buf := make([]byte, wasiSockMaxReadChunk)
+	n, err := s.conn.Read(buf)
+	if n > 0 {
+		s.pending = append(s.pending, buf[:n]...)
+		return true
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return false
+	}
+	if err != nil {
+		s.terminal = true
+		return true
+	}
+	return false
 }
 
 // write performs a real net.Conn.Write against s's connection. Per
@@ -486,23 +600,9 @@ func (s *sockOutStream) write(buf []byte) error {
 	return err
 }
 
-// receive performs a real, blocking net.PacketConn.ReadFrom against s's
-// socket -- exactly the same deliberate "block for real inside the operation
-// that has data to wait for, rather than truly implementing async wait-then-
-// retry" simplification this file's package doc documents for TCP's
-// sockInStream.read (see its "Blocking, single-shot" section), now applied
-// to UDP's own receive: udp.wit documents receive as required to never block
-// and never report would-block, an async contract this single-threaded host
-// has no task scheduler to honor faithfully -- a guest's compiled glue
-// bridges that contract onto a real recv by looping receive+subscribe+
-// [method]pollable.block (a no-op, see wasiPollableRep's doc) until data
-// shows up; blocking for real here still produces exactly the sequence that
-// loop expects to observe (immediately, once data is genuinely available),
-// just without the CPU spin its outer loop would otherwise do while polling
-// a host that could truly report "not yet" -- and a maxResults of 0 (a
-// legitimate zero-length probe, per udp.wit's own doc) is honored literally
-// as an immediate, non-blocking empty result, since there is nothing to wait
-// for in that case at all.
+// receive performs one deadline-bounded net.PacketConn.ReadFrom and returns an
+// empty successful list when no datagram is ready. Readiness probes retain the
+// datagram they observe in pending so polling never consumes guest data.
 //
 // s.remote, when set (this socket's `stream` was called with
 // some(remote-address) -- see udp.wit's own "connected" mode doc), discards
@@ -516,26 +616,82 @@ func (s *incomingDatagramStream) receive(maxResults uint64) ([]component.Value, 
 	if maxResults == 0 {
 		return []component.Value{component.ResultValue{IsErr: false, Payload: []component.Value{}}}, nil
 	}
+	if len(s.pending) != 0 {
+		n := int(maxResults)
+		if n > len(s.pending) {
+			n = len(s.pending)
+		}
+		out := append([]component.Value(nil), s.pending[:n]...)
+		s.pending = s.pending[n:]
+		return []component.Value{component.ResultValue{Payload: out}}, nil
+	}
+	if s.terminal {
+		return []component.Value{component.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
+	}
+	if err := s.pconn.SetReadDeadline(time.Now().Add(time.Millisecond)); err != nil {
+		return nil, err
+	}
+	defer s.pconn.SetReadDeadline(time.Time{})
+	datagram, ready, err := s.readOneLocked()
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return []component.Value{component.ResultValue{Payload: []component.Value{}}}, nil
+		}
+		s.terminal = true
+		return []component.Value{component.ResultValue{IsErr: true, Payload: wasiUDPErrToCode(err)}}, nil
+	}
+	if !ready {
+		return []component.Value{component.ResultValue{Payload: []component.Value{}}}, nil
+	}
+	return []component.Value{component.ResultValue{Payload: []component.Value{datagram}}}, nil
+}
+
+func (s *incomingDatagramStream) readOneLocked() (component.Value, bool, error) {
 	buf := make([]byte, wasiSockMaxReadChunk)
 	for {
 		n, raddr, err := s.pconn.ReadFrom(buf)
 		if err != nil {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiUDPErrToCode(err)}}, nil
+			return nil, false, err
 		}
 		udpAddr, ok := raddr.(*net.UDPAddr)
 		if !ok {
-			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: sender address: expected *net.UDPAddr, got %T", raddr)
+			return nil, false, fmt.Errorf("sender address: expected *net.UDPAddr, got %T", raddr)
 		}
 		if s.remote != nil && !(udpAddr.IP.Equal(s.remote.IP) && udpAddr.Port == s.remote.Port) {
 			continue // not from the connected peer -- discard and keep waiting, see doc
 		}
 		remoteVal, err := wasiIPSocketAddrFromUDPAddr(udpAddr)
 		if err != nil {
-			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: %w", err)
+			return nil, false, err
 		}
 		datagram := []component.Value{wasiListFromBytes(append([]byte(nil), buf[:n]...)), remoteVal}
-		return []component.Value{component.ResultValue{IsErr: false, Payload: []component.Value{datagram}}}, nil
+		return datagram, true, nil
 	}
+}
+
+func (s *incomingDatagramStream) ready() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) != 0 || s.terminal {
+		return true
+	}
+	if err := s.pconn.SetReadDeadline(time.Now()); err != nil {
+		s.terminal = true
+		return true
+	}
+	defer s.pconn.SetReadDeadline(time.Time{})
+	datagram, ready, err := s.readOneLocked()
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return false
+		}
+		s.terminal = true
+		return true
+	}
+	if ready {
+		s.pending = append(s.pending, datagram)
+	}
+	return ready
 }
 
 // send performs a real net.PacketConn.WriteTo per datagram in datagrams (the
@@ -803,7 +959,7 @@ func wasiTCPListenErrToCode(err error) uint32 {
 // file's package doc for the exact discovered call list. Only called by
 // WithWASI when the caller opts in (WASIConfig.AllowTCP) -- see
 // WASIConfig.AllowTCP/Dialer's doc in wasi.go.
-func wasiSocketOptions(sockets *wasiSockets) []component.Option {
+func wasiSocketOptions(sockets *wasiSockets, pollHost *wasiPoll) []component.Option {
 	instanceNetwork := func(context.Context, []component.Value) ([]component.Value, error) {
 		// Top-level own<network> result: allocHandleResult (host_import.go)
 		// auto-wraps this bare rep into a real guest handle, mirroring
@@ -1219,12 +1375,17 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 	// streamSubscribe backs both [method]input-stream.subscribe and
 	// [method]output-stream.subscribe: self is already resolved (and
 	// validated live) by liftHostArgs before this closure runs, and every
-	// pollable this package mints is the same always-ready singleton (see
-	// wasiPollableRep's doc), so there is nothing left to distinguish
-	// between the two methods' bodies.
+	// input streams get source-specific readiness; output streams are ready.
 	streamSubscribe := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("[method]stream.subscribe: expected 1 arg (self), got %d", len(args))
+		}
+		rep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("[method]stream.subscribe: self: expected uint32 rep, got %T", args[0])
+		}
+		if stream, found := sockets.inStreamNode(rep); found {
+			return []component.Value{pollHost.newReadiness(stream.ready)}, nil
 		}
 		return []component.Value{wasiPollableRep}, nil
 	}
@@ -1341,26 +1502,18 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 //   - wasi:sockets/udp [method]outgoing-datagram-stream.{check-send,send,
 //     subscribe}
 //   - wasi:sockets/udp [method]incoming-datagram-stream.{receive,subscribe}
-//   - wasi:io/poll [method]pollable.block (already registered by
-//     wasiSocketOptions -- UDP's pollable is the exact same always-ready
-//     singleton, see wasiPollableRep's doc, so no separate registration is
-//     needed for it here)
+//   - wasi:io/poll [method]pollable.block (registered centrally), with a
+//     source-specific readiness pollable for each incoming datagram stream
 //
-// # Blocking, single-shot bind/send/receive model
+// # Bind/send/receive model
 //
 // Mirrors TCP's own documented simplification (see this file's package
-// doc's "Blocking, single-shot connect/read/write model" section) applied
+// doc's connection-establishment section) applied
 // to UDP's own async shape: start-bind performs the real, blocking
 // net.ListenPacket synchronously and records the outcome on the udp-socket
-// node before returning, so finish-bind never has anything to report but
-// the already-settled Ok/Err; every pollable this half mints is the same
-// always-ready singleton wasiSocketOptions' TCP half already registers
-// [method]pollable.block for. The one place this genuinely differs from
-// TCP: udp.wit's own receive is documented to never block and never report
-// would-block (an explicitly non-blocking, poll-then-retry contract) --
-// incomingDatagramStream.receive's own doc explains why blocking for real
-// inside receive is still the correct choice for this single-threaded host.
-func wasiUDPSocketOptions(sockets *wasiSockets) []component.Option {
+// node before returning, so finish-bind reports the settled result. receive is
+// nonblocking and incoming subscriptions use real readiness callbacks.
+func wasiUDPSocketOptions(sockets *wasiSockets, pollHost *wasiPoll) []component.Option {
 	// instance-network is registered here too, not just by wasiSocketOptions'
 	// TCP half: WASIConfig.AllowUDP may be set independently of AllowTCP
 	// (see its own doc), and [method]udp-socket.start-bind takes a
@@ -1582,10 +1735,11 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]incoming-datagram-stream.subscribe: self: expected uint32 rep, got %T", args[0])
 		}
-		if _, ok := sockets.inDatagramStreamNode(selfRep); !ok {
+		node, ok := sockets.inDatagramStreamNode(selfRep)
+		if !ok {
 			return nil, fmt.Errorf("[method]incoming-datagram-stream.subscribe: incoming-datagram-stream rep %d does not name a live stream", selfRep)
 		}
-		return []component.Value{wasiPollableRep}, nil
+		return []component.Value{pollHost.newReadiness(node.ready)}, nil
 	}
 
 	outgoingCheckSend := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -1596,13 +1750,16 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]outgoing-datagram-stream.check-send: self: expected uint32 rep, got %T", args[0])
 		}
-		if _, ok := sockets.outDatagramStreamNode(selfRep); !ok {
+		node, ok := sockets.outDatagramStreamNode(selfRep)
+		if !ok {
 			return nil, fmt.Errorf("[method]outgoing-datagram-stream.check-send: outgoing-datagram-stream rep %d does not name a live stream", selfRep)
 		}
 		// A large, fixed budget: there is no real backpressure to model
 		// against a net.PacketConn -- mirrors wasi.go's checkWrite doc for
 		// the identical reasoning on the TCP/stdio output-stream side.
-		return []component.Value{component.ResultValue{IsErr: false, Payload: uint64(1) << 20}}, nil
+		const allowance = uint64(1) << 20
+		node.setPermit(allowance)
+		return []component.Value{component.ResultValue{IsErr: false, Payload: allowance}}, nil
 	}
 
 	outgoingSend := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -1620,6 +1777,9 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []component.Option {
 		node, ok := sockets.outDatagramStreamNode(selfRep)
 		if !ok {
 			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: outgoing-datagram-stream rep %d does not name a live stream", selfRep)
+		}
+		if err := node.consumePermit(uint64(len(datagrams))); err != nil {
+			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: %w", err)
 		}
 		return node.send(datagrams)
 	}

@@ -49,20 +49,20 @@ import (
 	"github.com/wago-org/component-model"
 )
 
-// Resource type tags for wasi:http/types resources. See resource.go; tags
-// 1-13 are already taken by streams/fs/sockets, so http starts at 14.
+// HTTP uses a disjoint resource-tag range. Tags below 32 are reserved by
+// streams, filesystem, poll, sockets, and DNS.
 const (
-	wasiHTTPIncomingRequestResType  uint32 = 14
-	wasiHTTPFieldsResType           uint32 = 15
-	wasiHTTPOutgoingResponseResType uint32 = 16
-	wasiHTTPOutgoingBodyResType     uint32 = 17
-	wasiHTTPResponseOutparamResType uint32 = 18
-	wasiHTTPOutgoingRequestResType  uint32 = 19
-	wasiHTTPFutureResType           uint32 = 20
-	wasiHTTPIncomingResponseResType uint32 = 21
-	wasiHTTPIncomingBodyResType     uint32 = 22
-	wasiHTTPRequestOptionsResType   uint32 = 23
-	wasiHTTPFutureTrailersResType   uint32 = 24
+	wasiHTTPIncomingRequestResType  uint32 = 32
+	wasiHTTPFieldsResType           uint32 = 33
+	wasiHTTPOutgoingResponseResType uint32 = 34
+	wasiHTTPOutgoingBodyResType     uint32 = 35
+	wasiHTTPResponseOutparamResType uint32 = 36
+	wasiHTTPOutgoingRequestResType  uint32 = 37
+	wasiHTTPFutureResType           uint32 = 38
+	wasiHTTPIncomingResponseResType uint32 = 39
+	wasiHTTPIncomingBodyResType     uint32 = 40
+	wasiHTTPRequestOptionsResType   uint32 = 41
+	wasiHTTPFutureTrailersResType   uint32 = 42
 )
 
 // Interface names are registered version-tolerantly (mkImportKey strips the
@@ -142,7 +142,8 @@ type httpCapture struct {
 // from being confused, so reps need not be globally unique across kinds), plus
 // bodyStreams which MUST be globally unique among output-stream reps.
 type wasiHTTP struct {
-	mu sync.Mutex
+	mu     sync.Mutex
+	callMu sync.Mutex
 
 	// getResources yields the owning Instance's handle table, set by the
 	// resource hook (see withResourcesHook): host funcs that mint a nested
@@ -323,8 +324,27 @@ func (h *wasiHTTP) bodyStreamWrite(rep uint32, buf []byte) (found bool, err erro
 	if b.finished {
 		return true, fmt.Errorf("wasi:http/types: outgoing-body written after finish")
 	}
+	if h.maxBodyBytes < 0 || int64(b.buf.Len()) > h.maxBodyBytes || int64(len(buf)) > h.maxBodyBytes-int64(b.buf.Len()) {
+		return true, fmt.Errorf("wasi:http/types: outgoing body exceeds MaxHTTPBodyBytes")
+	}
 	b.buf.Write(buf)
 	return true, nil
+}
+
+func (h *wasiHTTP) bodyStreamCapacity(rep uint32) (found bool, remaining uint64, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	b, ok := h.bodyStreams[rep]
+	if !ok {
+		return false, 0, nil
+	}
+	if b.finished {
+		return true, 0, fmt.Errorf("wasi:http/types: outgoing-body written after finish")
+	}
+	if h.maxBodyBytes < 0 || int64(b.buf.Len()) >= h.maxBodyBytes {
+		return true, 0, fmt.Errorf("wasi:http/types: outgoing body has no remaining capacity")
+	}
+	return true, uint64(h.maxBodyBytes - int64(b.buf.Len())), nil
 }
 
 // isBodyStreamRep reports whether rep names an http outgoing-body output-stream
@@ -334,6 +354,44 @@ func (h *wasiHTTP) isBodyStreamRep(rep uint32) bool {
 	defer h.mu.Unlock()
 	_, ok := h.bodyStreams[rep]
 	return ok
+}
+
+func (h *wasiHTTP) dropResource(tag, rep uint32) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch tag {
+	case wasiOutputStreamResType:
+		delete(h.bodyStreams, rep)
+	case wasiHTTPIncomingRequestResType:
+		delete(h.incoming, rep)
+	case wasiHTTPFieldsResType:
+		delete(h.fields, rep)
+	case wasiHTTPOutgoingResponseResType:
+		delete(h.responses, rep)
+	case wasiHTTPOutgoingBodyResType:
+		if body := h.bodies[rep]; body != nil {
+			for streamRep, streamBody := range h.bodyStreams {
+				if streamBody == body {
+					delete(h.bodyStreams, streamRep)
+				}
+			}
+		}
+		delete(h.bodies, rep)
+	case wasiHTTPResponseOutparamResType:
+		delete(h.outparams, rep)
+	case wasiHTTPOutgoingRequestResType:
+		delete(h.outRequests, rep)
+	case wasiHTTPFutureResType:
+		delete(h.futures, rep)
+	case wasiHTTPIncomingResponseResType:
+		delete(h.inResponses, rep)
+	case wasiHTTPIncomingBodyResType:
+		delete(h.inBodies, rep)
+	case wasiHTTPRequestOptionsResType:
+		delete(h.reqOptions, rep)
+	case wasiHTTPFutureTrailersResType:
+		delete(h.futureTrailers, rep)
+	}
 }
 
 // ---- host func implementations (wasi:http/types) ----
@@ -2688,7 +2746,21 @@ func httpHostOf(in *component.Instance) *wasiHTTP {
 // handler synthesizes each inbound request into the guest's WASI types and
 // writes back what it produces.
 func Handler(in *component.Instance) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	callMu := new(sync.Mutex)
+	if host := httpHostOf(in); host != nil {
+		callMu = &host.callMu
+	}
+	return serializedHTTPHandler(callMu, func(w http.ResponseWriter, r *http.Request) {
 		serveHTTPRequest(in, w, r)
+	})
+}
+
+// serializedHTTPHandler protects component.Instance's single-store execution
+// invariant when net/http dispatches overlapping requests to one handler.
+func serializedHTTPHandler(callMu *sync.Mutex, serve func(http.ResponseWriter, *http.Request)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callMu.Lock()
+		defer callMu.Unlock()
+		serve(w, r)
 	})
 }
