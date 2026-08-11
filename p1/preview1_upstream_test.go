@@ -177,12 +177,16 @@ const (
 	errnoNotsock    = uint32(57)
 	errnoNotcapable = uint32(76)
 
-	rightFDRead        = uint64(1 << 1)
-	rightFDSeek        = uint64(1 << 2)
-	rightFDTell        = uint64(1 << 5)
-	rightFDWrite       = uint64(1 << 6)
-	rightFDReadDir     = uint64(1 << 14)
-	rightPollReadWrite = uint64(1 << 27)
+	rightFDRead             = uint64(1 << 1)
+	rightFDSeek             = uint64(1 << 2)
+	rightFDTell             = uint64(1 << 5)
+	rightFDWrite            = uint64(1 << 6)
+	rightFDStatSetFlags     = uint64(1 << 3)
+	rightFDReadDir          = uint64(1 << 14)
+	rightFDFilestatGet      = uint64(1 << 21)
+	rightFDFilestatSetSize  = uint64(1 << 22)
+	rightFDFilestatSetTimes = uint64(1 << 23)
+	rightPollReadWrite      = uint64(1 << 27)
 )
 
 func requireErrno(t *testing.T, want, got uint32) {
@@ -190,6 +194,42 @@ func requireErrno(t *testing.T, want, got uint32) {
 	if got != want {
 		t.Fatalf("errno = %d, want %d", got, want)
 	}
+}
+
+// Ported from Wazero's args_get/environ_get and sizes tests, including the
+// exact pointer-vector and NUL-terminated string layout mandated by Preview 1.
+func TestPreview1WazeroArgsAndEnvironmentLayout(t *testing.T) {
+	h := newPreview1Harness(t, p1.Config{Args: []string{"a", "bc"}, Env: []string{"A=b", "B=cd"}},
+		preview1Func{"args_sizes_get", []byte{wasmI32, wasmI32}},
+		preview1Func{"args_get", []byte{wasmI32, wasmI32}},
+		preview1Func{"environ_sizes_get", []byte{wasmI32, wasmI32}},
+		preview1Func{"environ_get", []byte{wasmI32, wasmI32}},
+	)
+	requireErrno(t, errnoSuccess, h.call(t, "args_sizes_get", 16, 20))
+	if count, size := binary.LittleEndian.Uint32(h.memory()[16:]), binary.LittleEndian.Uint32(h.memory()[20:]); count != 2 || size != 5 {
+		t.Fatalf("args sizes = (%d, %d), want (2, 5)", count, size)
+	}
+	requireErrno(t, errnoSuccess, h.call(t, "args_get", 32, 64))
+	if p0, p1 := binary.LittleEndian.Uint32(h.memory()[32:]), binary.LittleEndian.Uint32(h.memory()[36:]); p0 != 64 || p1 != 66 {
+		t.Fatalf("argv pointers = (%d, %d), want (64, 66)", p0, p1)
+	}
+	if got := h.memory()[64:69]; !bytes.Equal(got, []byte{'a', 0, 'b', 'c', 0}) {
+		t.Fatalf("argv buffer = %v", got)
+	}
+
+	requireErrno(t, errnoSuccess, h.call(t, "environ_sizes_get", 24, 28))
+	if count, size := binary.LittleEndian.Uint32(h.memory()[24:]), binary.LittleEndian.Uint32(h.memory()[28:]); count != 2 || size != 9 {
+		t.Fatalf("environment sizes = (%d, %d), want (2, 9)", count, size)
+	}
+	requireErrno(t, errnoSuccess, h.call(t, "environ_get", 96, 128))
+	if p0, p1 := binary.LittleEndian.Uint32(h.memory()[96:]), binary.LittleEndian.Uint32(h.memory()[100:]); p0 != 128 || p1 != 132 {
+		t.Fatalf("environment pointers = (%d, %d), want (128, 132)", p0, p1)
+	}
+	if got := h.memory()[128:137]; !bytes.Equal(got, []byte("A=b\x00B=cd\x00")) {
+		t.Fatalf("environment buffer = %v", got)
+	}
+	requireErrno(t, errnoFault, h.call(t, "args_get", 65536, 0))
+	requireErrno(t, errnoFault, h.call(t, "environ_get", 0, 65536))
 }
 
 // Ported from Wazero's args, clock, poll, random and fdstat error tables.
@@ -309,6 +349,78 @@ func TestPreview1UpstreamDescriptorRightsAndIO(t *testing.T) {
 	requireErrno(t, errnoBadf, h.call(t, "fd_close", fd))
 }
 
+// Ported from Wazero's fd_pread/fd_pwrite offset and filestat tests. Positioned
+// I/O must scatter/gather correctly without changing the descriptor cursor.
+func TestPreview1WazeroPositionedIOAndFilestat(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/file", []byte("wazero"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rights := rightFDRead | rightFDWrite | rightFDSeek | rightFDTell |
+		rightFDFilestatGet | rightFDFilestatSetSize | rightFDFilestatSetTimes | rightFDStatSetFlags
+	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
+		preview1Func{"fd_pread", []byte{wasmI32, wasmI32, wasmI32, wasmI64, wasmI32}},
+		preview1Func{"fd_pwrite", []byte{wasmI32, wasmI32, wasmI32, wasmI64, wasmI32}},
+		preview1Func{"fd_read", []byte{wasmI32, wasmI32, wasmI32, wasmI32}},
+		preview1Func{"fd_tell", []byte{wasmI32, wasmI32}},
+		preview1Func{"fd_filestat_get", []byte{wasmI32, wasmI32}},
+		preview1Func{"fd_filestat_set_size", []byte{wasmI32, wasmI64}},
+		preview1Func{"fd_filestat_set_times", []byte{wasmI32, wasmI64, wasmI64, wasmI32}},
+	)
+	copy(h.memory()[32:], "file")
+	requireErrno(t, errnoSuccess, h.call(t, "path_open", 3, 0, 32, 4, 0, rights, 0, 0, 16))
+	fd := uint64(binary.LittleEndian.Uint32(h.memory()[16:]))
+
+	// Two iovecs gather "zero" from file offset 2 into non-contiguous memory.
+	binary.LittleEndian.PutUint32(h.memory()[64:], 128)
+	binary.LittleEndian.PutUint32(h.memory()[68:], 2)
+	binary.LittleEndian.PutUint32(h.memory()[72:], 132)
+	binary.LittleEndian.PutUint32(h.memory()[76:], 2)
+	requireErrno(t, errnoSuccess, h.call(t, "fd_pread", fd, 64, 2, 2, 24))
+	if got := string(append(append([]byte(nil), h.memory()[128:130]...), h.memory()[132:134]...)); got != "zero" {
+		t.Fatalf("fd_pread = %q, want zero", got)
+	}
+	if got := binary.LittleEndian.Uint32(h.memory()[24:]); got != 4 {
+		t.Fatalf("fd_pread nread = %d, want 4", got)
+	}
+
+	copy(h.memory()[160:], "XY")
+	binary.LittleEndian.PutUint32(h.memory()[80:], 160)
+	binary.LittleEndian.PutUint32(h.memory()[84:], 2)
+	requireErrno(t, errnoSuccess, h.call(t, "fd_pwrite", fd, 80, 1, 1, 28))
+	requireErrno(t, errnoSuccess, h.call(t, "fd_tell", fd, 40))
+	if got := binary.LittleEndian.Uint64(h.memory()[40:]); got != 0 {
+		t.Fatalf("descriptor cursor after positioned I/O = %d, want 0", got)
+	}
+
+	// A normal read still begins at offset zero and observes the positioned write.
+	binary.LittleEndian.PutUint32(h.memory()[88:], 192)
+	binary.LittleEndian.PutUint32(h.memory()[92:], 6)
+	requireErrno(t, errnoSuccess, h.call(t, "fd_read", fd, 88, 1, 30))
+	if got := string(h.memory()[192:198]); got != "wXYero" {
+		t.Fatalf("file after fd_pwrite = %q, want wXYero", got)
+	}
+
+	requireErrno(t, errnoSuccess, h.call(t, "fd_filestat_set_size", fd, 3))
+	requireErrno(t, errnoSuccess, h.call(t, "fd_filestat_get", fd, 224))
+	if got := binary.LittleEndian.Uint64(h.memory()[256:]); got != 3 {
+		t.Fatalf("filestat size = %d, want 3", got)
+	}
+	const unixSecond = uint64(1_600_000_000_000_000_000)
+	requireErrno(t, errnoSuccess, h.call(t, "fd_filestat_set_times", fd, unixSecond, unixSecond, 5))
+	st, err := os.Stat(root + "/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.ModTime().Unix(); got != int64(unixSecond/1_000_000_000) {
+		t.Fatalf("mtime = %d, want %d", got, unixSecond/1_000_000_000)
+	}
+
+	requireErrno(t, errnoFault, h.call(t, "fd_pread", fd, 65532, 1, 0, 24))
+	requireErrno(t, errnoBadf, h.call(t, "fd_pwrite", 42, 80, 1, 0, 28))
+}
+
 // Ported from Wazero's path_open error table and Wasmtime's interesting-paths,
 // nofollow-errors and dangling-symlink programs.
 func TestPreview1UpstreamPathConfinementAndSymlinks(t *testing.T) {
@@ -344,6 +456,60 @@ func TestPreview1UpstreamPathConfinementAndSymlinks(t *testing.T) {
 	requireErrno(t, errnoSuccess, h.call(t, "fd_close", uint64(binary.LittleEndian.Uint32(h.memory()[16:]))))
 	requireErrno(t, errnoInval, h.call(t, "path_open", 3, 0, 128, 11, 16, rightFDRead, 0, 0, 16))
 	requireErrno(t, errnoInval, h.call(t, "path_open", 3, 0, 128, 11, 0, rightFDRead, 0, 32, 16))
+}
+
+// Ported from Wazero's path filestat, hard-link, rename, unlink, and directory
+// mutation suites. Every operation remains relative to the preopen capability.
+func TestPreview1WazeroPathMutations(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/source", []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+		preview1Func{"path_filestat_get", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32}},
+		preview1Func{"path_link", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32}},
+		preview1Func{"path_rename", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32}},
+		preview1Func{"path_unlink_file", []byte{wasmI32, wasmI32, wasmI32}},
+		preview1Func{"path_create_directory", []byte{wasmI32, wasmI32, wasmI32}},
+		preview1Func{"path_remove_directory", []byte{wasmI32, wasmI32, wasmI32}},
+	)
+	for offset, name := range map[uint32]string{
+		32: "source", 64: "linked", 96: "renamed", 128: "directory",
+	} {
+		copy(h.memory()[offset:], name)
+	}
+
+	requireErrno(t, errnoSuccess, h.call(t, "path_filestat_get", 3, 0, 32, 6, 192))
+	if got := h.memory()[208]; got != 4 { // __wasi_filetype_t::regular_file
+		t.Fatalf("source filetype = %d, want regular file (4)", got)
+	}
+	if got := binary.LittleEndian.Uint64(h.memory()[224:]); got != 7 {
+		t.Fatalf("source size = %d, want 7", got)
+	}
+
+	requireErrno(t, errnoSuccess, h.call(t, "path_link", 3, 0, 32, 6, 3, 64, 6))
+	if a, err := os.ReadFile(root + "/linked"); err != nil || string(a) != "payload" {
+		t.Fatalf("hard link contents = %q, %v", a, err)
+	}
+	requireErrno(t, errnoSuccess, h.call(t, "path_rename", 3, 64, 6, 3, 96, 7))
+	if _, err := os.Stat(root + "/linked"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old hard-link name remains after rename: %v", err)
+	}
+	if a, err := os.ReadFile(root + "/renamed"); err != nil || string(a) != "payload" {
+		t.Fatalf("renamed contents = %q, %v", a, err)
+	}
+	requireErrno(t, errnoSuccess, h.call(t, "path_unlink_file", 3, 96, 7))
+	if _, err := os.Stat(root + "/renamed"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unlinked path remains: %v", err)
+	}
+
+	requireErrno(t, errnoSuccess, h.call(t, "path_create_directory", 3, 128, 9))
+	if st, err := os.Stat(root + "/directory"); err != nil || !st.IsDir() {
+		t.Fatalf("created directory = %v, %v", st, err)
+	}
+	requireErrno(t, errnoSuccess, h.call(t, "path_remove_directory", 3, 128, 9))
+	requireErrno(t, errnoNoent, h.call(t, "path_filestat_get", 3, 0, 128, 9, 192))
+	requireErrno(t, errnoFault, h.call(t, "path_unlink_file", 3, 65536, 1))
 }
 
 // Ported from Wazero's readdir rewind/dot-inode tests.

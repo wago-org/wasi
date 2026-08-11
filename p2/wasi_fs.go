@@ -470,19 +470,13 @@ func newWasiFS(mounts []fsMount) *wasiFS {
 // "/tmp"), since that is what get-directories must report for a guest's own
 // longest-prefix match against an absolute path to work.
 //
-// The mounts are read through a Preopens() type assertion rather than an
-// FSConfig method: FSConfig is wazy's public configuration surface, and the
-// index-correlated (sys.FS, guestPath) pair behind it is an implementation
-// detail no embedder should be building against. A cfg that is not wazy's
-// own implementation (there is none -- see FSConfig's doc) preopens nothing.
+// The index-correlated (sys.FS, guestPath) pair remains an implementation
+// detail behind FSConfig's sealed interface.
 func fsMountsFromConfig(cfg FSConfig) []fsMount {
-	preopener, ok := cfg.(interface {
-		Preopens() ([]sys.FS, []string)
-	})
-	if !ok {
+	if cfg == nil {
 		return nil
 	}
-	fss, guestPaths := preopener.Preopens()
+	fss, guestPaths := cfg.preopens()
 	mounts := make([]fsMount, 0, len(fss))
 	for i, f := range fss {
 		mounts = append(mounts, fsMount{fs: f, guestPath: "/" + stripPrefixesAndTrailingSlash(guestPaths[i])})
