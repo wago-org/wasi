@@ -10,7 +10,7 @@ import (
 // pollOneoff implements the Preview 1 subscription/event ABI. Regular files
 // and configured streams are always ready; relative clock subscriptions wait
 // only when no descriptor event is ready.
-func (e *Extension) pollOneoff(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 	in, out, n, result := uint32(p[0]), uint32(p[1]), uint32(p[2]), uint32(p[3])
 	mem := m.Memory()
 	if n == 0 {

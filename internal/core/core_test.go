@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/binary"
 	"os"
 	"reflect"
@@ -13,30 +14,46 @@ type testModule struct{ mem []byte }
 
 func (m testModule) Memory() []byte { return m.mem }
 
-func TestRegisterUsesHostEnvironmentArgsUnlessConfigured(t *testing.T) {
-	wago.SetGuestArgs([]string{"guest", "one"})
-	t.Cleanup(func() { wago.SetGuestArgs(nil) })
+func TestPluginUsesRuntimeScopedArguments(t *testing.T) {
+	const id = "example.com/test/wasi"
+	definition := Definition(id, "Test WASI", "test provider", wago.Experimental, "test.wasi")
+	instance := &Plugin{module: "test.wasi"}
+	provider := Provider(definition, "test.wasi")
+	provider.New = func() wago.Plugin { return instance }
+	digest, err := wago.DefinitionDigest(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants := make([]wago.AuthorityGrant, len(definition.Authorities))
+	for i, request := range definition.Authorities {
+		grants[i] = wago.AuthorityGrant{Name: request.Name, Scope: request.Scope}
+	}
+	rt := wago.NewRuntime(wago.WithGuestArguments([]string{"guest", "one"}))
+	defer rt.Close()
+	if err := rt.LoadPlugins(context.Background(), wago.PluginSet{
+		Providers:  []wago.PluginProvider{provider},
+		Selections: []wago.PluginSelection{{ID: id, DefinitionDigest: digest, Direct: true, Dependencies: map[string]string{}, Grants: grants}},
+	}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	if got, want := instance.cfg.Args, []string{"guest", "one"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runtime argv = %v, want %v", got, want)
+	}
+}
 
-	e := New("test.wasi", wago.ExtensionInfo{ID: "test.wasi"}, Config{})
-	if err := wago.NewRuntime().Use(e); err != nil {
-		t.Fatalf("Use: %v", err)
+func newTestPlugin(t *testing.T, cfg Config) *Plugin {
+	t.Helper()
+	e := &Plugin{module: "wasi_snapshot_preview1", cfg: cloneConfig(cfg)}
+	e.resetFS()
+	if err := e.initFS(false); err != nil {
+		t.Fatalf("initFS: %v", err)
 	}
-	if got, want := e.cfg.Args, []string{"guest", "one"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("host argv = %v, want %v", got, want)
-	}
-
-	explicit := New("test.wasi.explicit", wago.ExtensionInfo{ID: "test.wasi.explicit"}, Config{Args: []string{"fixed"}})
-	if err := wago.NewRuntime().Use(explicit); err != nil {
-		t.Fatalf("Use explicit config: %v", err)
-	}
-	if got, want := explicit.cfg.Args, []string{"fixed"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("explicit argv = %v, want %v", got, want)
-	}
+	return e
 }
 
 func TestPreview1PreopenAndFileLifecycle(t *testing.T) {
 	root := t.TempDir()
-	e := New("wasi_snapshot_preview1", wago.ExtensionInfo{}, Config{Preopens: map[string]string{"/": root}})
+	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
 	m := testModule{mem: make([]byte, 512)}
 	result := make([]uint64, 1)
 
@@ -98,7 +115,7 @@ func TestPreview1RejectsCapabilityEscape(t *testing.T) {
 	if err := os.Symlink("../outside", root+"/escape"); err != nil {
 		t.Fatal(err)
 	}
-	e := New("wasi_snapshot_preview1", wago.ExtensionInfo{}, Config{Preopens: map[string]string{"/": root}})
+	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
 	m := testModule{mem: make([]byte, 128)}
 	copy(m.mem[32:], "../outside")
 	result := make([]uint64, 1)

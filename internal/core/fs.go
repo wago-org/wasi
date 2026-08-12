@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -28,9 +29,9 @@ type fsState struct {
 type fsGuard struct {
 	mu       sync.Mutex
 	resolver *wago.CallerResolver
-	states   map[*wago.Instance]*fsState
-	raw      map[wago.HostModule]*fsState
+	states   map[wago.InstanceIdentity]*fsState
 	claimed  bool
+	closed   bool
 }
 
 type fdEntry struct {
@@ -43,12 +44,24 @@ type fdEntry struct {
 	dirCookies map[uint64]bool
 }
 
-func (e *Extension) initFS() {
-	e.guard = &fsGuard{states: make(map[*wago.Instance]*fsState), raw: make(map[wago.HostModule]*fsState)}
-	e.fs = e.makeFS()
+func (e *Plugin) resetFS() {
+	e.guard = &fsGuard{states: make(map[wago.InstanceIdentity]*fsState)}
 }
 
-func (e *Extension) makeFS() *fsState {
+func (e *Plugin) initFS(strict bool) error {
+	state, err := e.makeFS(strict)
+	if err != nil {
+		return err
+	}
+	e.guard.mu.Lock()
+	e.fs = state
+	e.guard.closed = false
+	e.guard.claimed = false
+	e.guard.mu.Unlock()
+	return nil
+}
+
+func (e *Plugin) makeFS(strict bool) (*fsState, error) {
 	maxFDs := e.cfg.MaxOpenFiles
 	if maxFDs == 0 {
 		maxFDs = 1024
@@ -73,56 +86,86 @@ func (e *Extension) makeFS() *fsState {
 	sort.Strings(names)
 	for _, name := range names {
 		if uint32(len(s.fds)) >= maxFDs {
+			if strict {
+				closeFS(s)
+				return nil, fmt.Errorf("wasi: preopens exceed maxOpenFiles %d", maxFDs)
+			}
 			break
 		}
 		host, err := filepath.Abs(e.cfg.Preopens[name])
 		if err != nil {
+			if strict {
+				closeFS(s)
+				return nil, fmt.Errorf("wasi: resolve preopen %q: %w", name, err)
+			}
 			continue
 		}
 		f, err := os.Open(host)
 		if err != nil {
+			if strict {
+				closeFS(s)
+				return nil, fmt.Errorf("wasi: open preopen %q (%s): %w", name, host, err)
+			}
+			continue
+		}
+		info, err := f.Stat()
+		if err != nil || !info.IsDir() {
+			_ = f.Close()
+			if strict {
+				closeFS(s)
+				if err != nil {
+					return nil, fmt.Errorf("wasi: stat preopen %q (%s): %w", name, host, err)
+				}
+				return nil, fmt.Errorf("wasi: preopen %q (%s) is not a directory", name, host)
+			}
 			continue
 		}
 		fd := s.nextFD
 		s.nextFD++
 		s.fds[fd] = &fdEntry{file: f, mount: host, preopen: name, rights: directoryRights, inheriting: allRights, dirCookies: map[uint64]bool{0: true}}
 	}
-	return s
+	return s, nil
 }
 
-func (e *Extension) withFS(m wago.HostModule, call func()) {
+func (e *Plugin) withFS(m wago.HostModule, results []uint64, call func()) {
 	e.guard.mu.Lock()
 	defer e.guard.mu.Unlock()
+	if e.guard.closed || e.fs == nil {
+		setStateError(results, wasiEBadf)
+		return
+	}
 	state := e.fs
 	if e.guard.resolver != nil {
-		if in, err := e.guard.resolver.Resolve(m); err == nil {
-			state = e.guard.states[in]
-			if state == nil {
-				if !e.guard.claimed {
-					state = e.fs
-					e.guard.claimed = true
-				} else {
-					state = e.makeFS()
-				}
-				e.guard.states[in] = state
-			}
+		identity, err := e.guard.resolver.Resolve(m)
+		if err != nil {
+			setStateError(results, wasiEPerm)
+			return
 		}
-	} else if m != nil {
-		state = e.guard.raw[m]
+		state = e.guard.states[identity]
 		if state == nil {
 			if !e.guard.claimed {
 				state = e.fs
 				e.guard.claimed = true
 			} else {
-				state = e.makeFS()
+				state, err = e.makeFS(true)
+				if err != nil {
+					setStateError(results, wasiEIo)
+					return
+				}
 			}
-			e.guard.raw[m] = state
+			e.guard.states[identity] = state
 		}
 	}
 	previous := e.fs
 	e.fs = state
 	defer func() { e.fs = previous }()
 	call()
+}
+
+func setStateError(results []uint64, errno uint64) {
+	if len(results) != 0 {
+		results[0] = errno
+	}
 }
 
 func closeFS(state *fsState) {
@@ -137,15 +180,36 @@ func closeFS(state *fsState) {
 	clear(state.fds)
 }
 
-func (e *Extension) closeInstance(in *wago.Instance) {
+func (e *Plugin) closeInstance(identity wago.InstanceIdentity) {
 	e.guard.mu.Lock()
 	defer e.guard.mu.Unlock()
-	state := e.guard.states[in]
-	delete(e.guard.states, in)
+	state := e.guard.states[identity]
+	delete(e.guard.states, identity)
 	closeFS(state)
 }
 
-func (e *Extension) entry(fd uint32) (*fdEntry, uint64) {
+func (e *Plugin) closeAll() {
+	if e.guard == nil {
+		return
+	}
+	e.guard.mu.Lock()
+	defer e.guard.mu.Unlock()
+	unique := make(map[*fsState]struct{}, len(e.guard.states)+1)
+	if e.fs != nil {
+		unique[e.fs] = struct{}{}
+	}
+	for _, state := range e.guard.states {
+		unique[state] = struct{}{}
+	}
+	for state := range unique {
+		closeFS(state)
+	}
+	clear(e.guard.states)
+	e.fs = nil
+	e.guard.closed = true
+}
+
+func (e *Plugin) entry(fd uint32) (*fdEntry, uint64) {
 	f := e.fs.fds[fd]
 	if f == nil {
 		return nil, wasiEBadf
@@ -174,7 +238,7 @@ func guestBytes(mem []byte, ptr, n uint32) (string, uint64) {
 // resolve validates a guest path and returns its directory capability. Kernel
 // operations below additionally enforce RESOLVE_BENEATH so validation and use
 // cannot be separated by a symlink race.
-func (e *Extension) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
+func (e *Plugin) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
 	d, code := e.entry(fd)
 	if code != 0 {
 		return nil, "", code
@@ -240,7 +304,7 @@ func openParent(d *fdEntry, name string) (*os.File, string, uint64) {
 	return f, leaf, code
 }
 
-func (e *Extension) alloc(entry *fdEntry) (uint32, uint64) {
+func (e *Plugin) alloc(entry *fdEntry) (uint32, uint64) {
 	if uint32(len(e.fs.fds)) >= e.fs.maxFDs {
 		return 0, wasiEMfile
 	}
@@ -293,7 +357,7 @@ func writeFilestat(mem []byte, ptr uint32, info os.FileInfo) uint64 {
 	return wasiOK
 }
 
-func (e *Extension) fdAdvise(_ wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdAdvise(_ wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
 		code = require(f, rightFDAdvise)
@@ -304,7 +368,7 @@ func (e *Extension) fdAdvise(_ wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdAllocate(_ wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdAllocate(_ wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
 		code = require(f, rightFDAllocate)
@@ -327,11 +391,11 @@ func (e *Extension) fdAllocate(_ wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdDatasync(_ wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdDatasync(_ wago.HostModule, p, r []uint64) {
 	e.syncFD(uint32(p[0]), rightFDDataSync, r)
 }
-func (e *Extension) fdSync(_ wago.HostModule, p, r []uint64) { e.syncFD(uint32(p[0]), rightFDSync, r) }
-func (e *Extension) syncFD(fd uint32, right uint64, r []uint64) {
+func (e *Plugin) fdSync(_ wago.HostModule, p, r []uint64) { e.syncFD(uint32(p[0]), rightFDSync, r) }
+func (e *Plugin) syncFD(fd uint32, right uint64, r []uint64) {
 	f, code := e.entry(fd)
 	if code == 0 {
 		code = require(f, right)
@@ -342,7 +406,7 @@ func (e *Extension) syncFD(fd uint32, right uint64, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdFdstatSetFlags(_ wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdFdstatSetFlags(_ wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	flags := uint16(p[1])
 	if code == 0 {
@@ -375,7 +439,7 @@ func (e *Extension) fdFdstatSetFlags(_ wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdFdstatSetRights(_ wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdFdstatSetRights(_ wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	base, inheriting := p[1], p[2]
 	if code == 0 && (base&^f.rights != 0 || inheriting&^f.inheriting != 0) {
@@ -387,7 +451,7 @@ func (e *Extension) fdFdstatSetRights(_ wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdFilestatGet(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdFilestatGet(m wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
 		code = require(f, rightFDFilestatGet)
@@ -406,7 +470,7 @@ func (e *Extension) fdFilestatGet(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdFilestatSetSize(_ wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdFilestatSetSize(_ wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
 		code = require(f, rightFDFilestatSetSize)
@@ -454,7 +518,7 @@ func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64) ([]unix.Timespe
 	return []unix.Timespec{unix.NsecToTimespec(a.UnixNano()), unix.NsecToTimespec(mt.UnixNano())}, wasiOK
 }
 
-func (e *Extension) fdFilestatSetTimes(_ wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdFilestatSetTimes(_ wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
 		code = require(f, rightFDFilestatSetTimes)
@@ -477,10 +541,10 @@ func (e *Extension) fdFilestatSetTimes(_ wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdPread(m wago.HostModule, p, r []uint64)  { e.readAt(m, p, r) }
-func (e *Extension) fdPwrite(m wago.HostModule, p, r []uint64) { e.writeAt(m, p, r) }
+func (e *Plugin) fdPread(m wago.HostModule, p, r []uint64)  { e.readAt(m, p, r) }
+func (e *Plugin) fdPwrite(m wago.HostModule, p, r []uint64) { e.writeAt(m, p, r) }
 
-func (e *Extension) readAt(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) readAt(m wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
 		code = require(f, rightFDRead|rightFDSeek)
@@ -517,7 +581,7 @@ func (e *Extension) readAt(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) writeAt(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) writeAt(m wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
 		code = require(f, rightFDWrite|rightFDSeek)
@@ -557,7 +621,7 @@ func (e *Extension) writeAt(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdReaddir(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
 		code = require(f, rightFDReadDir)
@@ -642,7 +706,7 @@ func (e *Extension) fdReaddir(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdRenumber(_ wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdRenumber(_ wago.HostModule, p, r []uint64) {
 	from, to := uint32(p[0]), uint32(p[1])
 	f, code := e.entry(from)
 	if code == 0 && to > uint32(^uint32(0)>>1) {
@@ -665,7 +729,7 @@ func (e *Extension) fdRenumber(_ wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) fdTell(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) fdTell(m wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
 		code = require(f, rightFDTell)
@@ -684,11 +748,11 @@ func (e *Extension) fdTell(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) pathCreateDirectory(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathCreateDirectory(m wago.HostModule, p, r []uint64) {
 	e.pathUnary(m, p, r, rightPathCreateDirectory, func(fd int, name string) error { return unix.Mkdirat(fd, name, 0o777) })
 }
 
-func (e *Extension) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op func(int, string) error) {
+func (e *Plugin) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op func(int, string) error) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
@@ -708,7 +772,7 @@ func (e *Extension) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op
 	r[0] = code
 }
 
-func (e *Extension) pathFilestatGet(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
@@ -743,7 +807,7 @@ func (e *Extension) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
@@ -799,7 +863,7 @@ func (e *Extension) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) pathLink(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathLink(m wago.HostModule, p, r []uint64) {
 	oldName, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
 	newName, code2 := guestBytes(m.Memory(), uint32(p[5]), uint32(p[6]))
 	oldTrailing, newTrailing := strings.HasSuffix(oldName, "/"), strings.HasSuffix(newName, "/")
@@ -854,7 +918,7 @@ func (e *Extension) pathLink(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) pathOpen(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
 	trailingSlash := strings.HasSuffix(name, "/")
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
@@ -947,7 +1011,7 @@ func (e *Extension) pathOpen(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) pathReadlink(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathReadlink(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
@@ -990,13 +1054,13 @@ func (e *Extension) pathReadlink(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) pathRemoveDirectory(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathRemoveDirectory(m wago.HostModule, p, r []uint64) {
 	e.pathUnary(m, p, r, rightPathRemoveDirectory, func(fd int, name string) error {
 		return unix.Unlinkat(fd, name, unix.AT_REMOVEDIR)
 	})
 }
 
-func (e *Extension) pathUnlinkFile(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathUnlinkFile(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
 	if code == 0 && strings.HasSuffix(name, "/") {
 		d, clean, pathCode := e.resolve(uint32(p[0]), name)
@@ -1023,7 +1087,7 @@ func (e *Extension) pathUnlinkFile(m wago.HostModule, p, r []uint64) {
 	})
 }
 
-func (e *Extension) pathRename(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathRename(m wago.HostModule, p, r []uint64) {
 	oldName, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
 	newName, code2 := guestBytes(m.Memory(), uint32(p[4]), uint32(p[5]))
 	od, oldName, c1 := e.resolve(uint32(p[0]), oldName)
@@ -1058,7 +1122,7 @@ func (e *Extension) pathRename(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) pathSymlink(m wago.HostModule, p, r []uint64) {
+func (e *Plugin) pathSymlink(m wago.HostModule, p, r []uint64) {
 	target, code := guestBytes(m.Memory(), uint32(p[0]), uint32(p[1]))
 	name, code2 := guestBytes(m.Memory(), uint32(p[3]), uint32(p[4]))
 	trailingSlash := strings.HasSuffix(name, "/")
@@ -1088,14 +1152,14 @@ func (e *Extension) pathSymlink(m wago.HostModule, p, r []uint64) {
 	r[0] = code
 }
 
-func (e *Extension) schedYield(_ wago.HostModule, _, r []uint64) { r[0] = wasiOK }
-func (e *Extension) procRaise(_ wago.HostModule, _, r []uint64)  { r[0] = wasiENotsup }
+func (e *Plugin) schedYield(_ wago.HostModule, _, r []uint64) { r[0] = wasiOK }
+func (e *Plugin) procRaise(_ wago.HostModule, _, r []uint64)  { r[0] = wasiENotsup }
 
-func (e *Extension) sockAccept(_ wago.HostModule, _, r []uint64)   { r[0] = wasiENotsup }
-func (e *Extension) sockRecv(_ wago.HostModule, p, r []uint64)     { e.unsupportedSocket(p, r) }
-func (e *Extension) sockSend(_ wago.HostModule, p, r []uint64)     { e.unsupportedSocket(p, r) }
-func (e *Extension) sockShutdown(_ wago.HostModule, p, r []uint64) { e.unsupportedSocket(p, r) }
-func (e *Extension) unsupportedSocket(p, r []uint64) {
+func (e *Plugin) sockAccept(_ wago.HostModule, _, r []uint64)   { r[0] = wasiENotsup }
+func (e *Plugin) sockRecv(_ wago.HostModule, p, r []uint64)     { e.unsupportedSocket(p, r) }
+func (e *Plugin) sockSend(_ wago.HostModule, p, r []uint64)     { e.unsupportedSocket(p, r) }
+func (e *Plugin) sockShutdown(_ wago.HostModule, p, r []uint64) { e.unsupportedSocket(p, r) }
+func (e *Plugin) unsupportedSocket(p, r []uint64) {
 	if _, code := e.entry(uint32(p[0])); code != 0 {
 		r[0] = code
 	} else {

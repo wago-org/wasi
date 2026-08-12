@@ -2,14 +2,9 @@ module github.com/wago-org/wasi
 
 go 1.22.0
 
-require github.com/wago-org/wago v0.1.0
+require github.com/wago-org/wago v0.0.0-20260812144524-1c58c9862d25
 
 require (
 	github.com/tetratelabs/wazero v1.9.0
 	golang.org/x/sys v0.30.0
 )
-
-// The wago engine is not yet published with a version tag, so build against the
-// sibling checkout. Remove this replace once github.com/wago-org/wago has a
-// tagged release and bump the require above to it.
-replace github.com/wago-org/wago => ../wago

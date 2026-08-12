@@ -22,26 +22,15 @@ jobs:
     name: Test & coverage
     runs-on: ubuntu-latest
     steps:
-      # wasi builds against the sibling engine checkout: go.mod has
-      # `replace github.com/wago-org/wago => ../wago`, so the two repos must sit
-      # side by side. Lay them out as ./wasi and ./wago under the workspace.
       - name: Checkout wasi
         uses: actions/checkout@v4
-        with:
-          path: wasi
-      - name: Checkout wago (sibling for the replace directive)
-        uses: actions/checkout@v4
-        with:
-          repository: wago-org/wago
-          path: wago
 
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: wasi/go.sum
+          cache-dependency-path: go.sum
 
       - name: Format
-        working-directory: wasi
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
@@ -50,15 +39,12 @@ jobs:
           fi
 
       - name: Vet
-        working-directory: wasi
         run: go vet ./...
 
       - name: Build
-        working-directory: wasi
         run: go build ./...
 
       - name: Test (race + coverage)
-        working-directory: wasi
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
 
       # Upload to Codecov for the coverage badge. fail_ci_if_error stays false so a
@@ -67,7 +53,7 @@ jobs:
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
-          files: wasi/coverage.out
+          files: coverage.out
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
