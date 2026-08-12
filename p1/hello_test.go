@@ -2,7 +2,10 @@ package p1_test
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	wago "github.com/wago-org/wago"
@@ -69,6 +72,55 @@ func TestWASIProcExitCode(t *testing.T) {
 		var ex *wago.ExitError
 		if !errors.As(err, &ex) {
 			t.Fatalf("invoke: %v", err)
+		}
+	}
+}
+
+func TestProviderExecutesWithFineGrainedGuestPolicy(t *testing.T) {
+	provider := p1.Provider()
+	digest, err := wago.DefinitionDigest(provider.Definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants := make([]wago.AuthorityGrant, len(provider.Definition.Authorities))
+	for i, request := range provider.Definition.Authorities {
+		grants[i] = wago.AuthorityGrant{Name: request.Name, Scope: request.Scope}
+	}
+	rt := wago.NewRuntime()
+	defer rt.Close()
+	if err := rt.LoadPlugins(context.Background(), wago.PluginSet{
+		Providers: []wago.PluginProvider{provider},
+		Selections: []wago.PluginSelection{{
+			ID: provider.Definition.ID, DefinitionDigest: digest, Direct: true, Dependencies: map[string]string{}, Grants: grants,
+			Config: json.RawMessage(`{"stdout":"discard"}`),
+		}},
+	}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	module, err := rt.Compile(wasiHelloWasm)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	defer module.Close()
+	if got, want := module.RequiredCapabilities(), []wago.Capability{p1.CapFDWrite, p1.CapProcessExit}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("RequiredCapabilities = %v, want %v", got, want)
+	}
+	if _, err := rt.Instantiate(context.Background(), module, wago.WithPolicy(wago.Policy{
+		AllowedCapabilities: []wago.Capability{p1.CapFDWrite},
+	})); !errors.Is(err, wago.ErrPermissionDenied) {
+		t.Fatalf("Instantiate without process-exit capability = %v, want permission denial", err)
+	}
+	instance, err := rt.Instantiate(context.Background(), module, wago.WithPolicy(wago.Policy{
+		AllowedCapabilities: []wago.Capability{p1.CapFDWrite, p1.CapProcessExit},
+	}))
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer instance.Close()
+	if _, err := instance.Invoke("_start"); err != nil {
+		var exit *wago.ExitError
+		if !errors.As(err, &exit) || exit.Code != 0 {
+			t.Fatalf("Invoke: %v", err)
 		}
 	}
 }

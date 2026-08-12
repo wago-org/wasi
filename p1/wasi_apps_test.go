@@ -14,7 +14,7 @@ import (
 )
 
 // TestWASIApps runs the real Rust/WASI application corpus (bench/corpus/rust-wasi,
-// built to wasm32-wasip1) end to end through wago.WASI and checks each program's
+// built to wasm32-wasip1) end to end through this WASI host bundle and checks each program's
 // deterministic output. Unlike the emscripten/Go real-large tier (which only
 // decode/validate/compile), these actually execute — a guard that wago runs real
 // third-party libraries correctly. Skips a binary that isn't checked in.

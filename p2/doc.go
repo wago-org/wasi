@@ -8,7 +8,7 @@
 // a component-model loader (WIT worlds, resources, the canonical ABI), which wago
 // does not have yet.
 //
-// This package intentionally exposes no API; it marks the slot in the version
-// layout (unstable → p1 → p2) so the eventual implementation has an obvious home.
-// Until then, run preview1 modules with plugins/wasi/p1.
+// This package intentionally exposes no Provider. It marks the slot in the
+// version layout (unstable -> p1 -> p2) so the eventual implementation has an
+// obvious home. Until then, run Preview 1 modules with package p1.
 package p2

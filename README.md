@@ -1,270 +1,205 @@
 <div align="center">
-    <h1><code>wasi</code></h1>
-    <p>A WASI Preview 1 host interface for the <a href="https://github.com/wago-org/wago">Wago</a> WebAssembly runtime, including capability-scoped filesystems, polling, stdio, args/env, clocks, random, and process exit.</p>
+  <h1><code>wasi</code></h1>
+  <p>WASI Preview 1 for Wago, with explicit host access and guest permissions.</p>
 </div>
 
-<p align="center">
-    <a href="https://github.com/wago-org/wasi/actions/workflows/ci.yml"><img src="https://github.com/wago-org/wasi/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-    <a href="https://codecov.io/gh/wago-org/wasi"><img src="https://codecov.io/gh/wago-org/wasi/branch/main/graph/badge.svg" alt="Coverage"></a>
-    <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-%3E%3D1.22-00ADD8.svg" alt="Go >= 1.22"></a>
-    <a href="https://github.com/wago-org/wago"><img src="https://img.shields.io/badge/wago-%3E%3D0.1.0-6E56CF.svg" alt="Wago >= 0.1.0"></a>
-</p>
+`github.com/wago-org/wasi` implements the `wasi_snapshot_preview1` command ABI:
+stdio, argv and environment, clocks, random, polling, process exit, and a
+capability-scoped filesystem. The deprecated `wasi_unstable` module is available
+for old toolchains. Preview 2 is reserved but not implemented.
 
-<details>
-<summary>Table of Contents</summary>
+The plugin has no import-time side effects. Generated Wago runtimes call
+`register.Providers()` and activate only the exact providers recorded in
+`wago-lock.json`.
 
-- [Overview](#overview)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [On a Runtime](#on-a-runtime)
-  - [As a raw import bundle](#as-a-raw-import-bundle)
-  - [From the command line](#from-the-command-line)
-- [Snapshots](#snapshots)
-- [Configuration](#configuration)
-- [Syscall support](#syscall-support)
-- [Compatibility](#compatibility)
-- [Testing](#testing)
-- [Architecture](#architecture)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
-
-</details>
-
-## Overview
-
-`wasi` is the default WASI host interface for [Wago](https://github.com/wago-org/wago).
-It implements the [`wasi_snapshot_preview1`](https://github.com/WebAssembly/WASI)
-command ABI used by Rust, C, TinyGo, and AssemblyScript `wasm32-wasip1` programs.
-
-What you get out of the box:
-
-- **Capability-scoped filesystems**: preopened host directories, descriptor rights,
-  path operations, metadata, links, directory iteration, seeking, allocation, and
-  positional I/O.
-- **The command surface**: stdio, `args_*`, `environ_*`, clocks, polling,
-  `random_get`, and `proc_exit`, wired to ordinary Go values.
-- **Bounds-checked by construction**: every guest pointer is validated against linear
-  memory; a malformed pointer returns `EFAULT`, never a host-side panic that would
-  abort the instance.
-- **Complete import surface**: modules can link every Preview 1 function. Socket calls
-  report `ENOTSUP`, `ENOTSOCK`, or `EBADF` because this package does not grant network
-  descriptors.
-- **Snapshot-versioned**: pin `wasi_snapshot_preview1` (default) or the older
-  `wasi_unstable` ABI by import path; preview 2 has a reserved slot.
-
-> **Stability:** the `p1` snapshot is **stable**; `unstable` is **deprecated** (kept for
-> old toolchains); `p2` is a **placeholder**. See [Snapshots](#snapshots).
-
-## Installation
-
-If you have the [`wago`](https://github.com/wago-org/wago) CLI installed:
+## Install
 
 ```sh
-wago pkg add github.com/wago-org/wasi
+wago add github.com/wago-org/wasi
 ```
 
-or use [`go get`](https://pkg.go.dev/cmd/go#hdr-Get_packages_and_dependencies):
+`wago add` reviews the immutable definition, its exact authority requests, and
+the resolved lock graph before changing the project. For non-interactive setup:
 
 ```sh
-go get github.com/wago-org/wasi
+wago plugin grant github.com/wago-org/wasi \
+  --allow host.import.define,host.caller.identify,host.arguments.read,instance.close.observe
 ```
 
-The plugin is also compiled into the `wago` binary, so the CLI needs no separate
-install.
-
-The whole WASI surface is guarded by one capability, `wago.CapWASI`. With no policy it
-is permitted; under a policy (strict mode) allow it explicitly to let a guest reach any
-WASI import.
-
-## Usage
-
-### On a Runtime
-
-Wire the extension onto a `Runtime` - capability-gated and inspectable:
-
-```go
-package main
-
-import (
-	"os"
-
-	"github.com/wago-org/wago"
-	"github.com/wago-org/wasi"
-)
-
-func main() {
-	rt := wago.NewRuntime()
-	rt.Use(wasi.Init(wasi.Config{
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
-		Args:   os.Args[1:],
-		Env:    os.Environ(),
-		Preopens: map[string]string{"/": "/srv/guest-data"},
-	}))
-	defer rt.Close()
-
-	c, _ := wago.Compile(nil, moduleBytes)
-	in, _ := rt.Instantiate(ctx, c)
-	in.Invoke("_start")
-}
-```
-
-`wasi.Init` binds `wasi_snapshot_preview1` - the common case. To pin a specific snapshot,
-construct it from the versioned subpackage instead (see [Snapshots](#snapshots)).
-
-### As a raw import bundle
-
-On the low-level `wago.Instantiate(c, imports)` path, `Imports` returns the host bundle
-directly, keyed `"<module>.<name>"`:
-
-```go
-in, _ := wago.Instantiate(c, wago.InstantiateOptions{
-	Imports: wasi.Imports(wasi.Config{Stdout: os.Stdout}),
-})
-in.Invoke("_start")
-```
-
-### From the command line
+Configure a bounded preopen and keep stdout/stderr attached to the process:
 
 ```sh
-wago run --plugin github.com/wago-org/wasi program.wasm arg1 arg2
+wago plugin config github.com/wago-org/wasi \
+  '{"preopens":{"/data":"/srv/guest-data"},"maxOpenFiles":256,"maxPollDurationMillis":1000}'
 ```
 
-The CLI feeds the process's own stdio and environment to the guest and forwards the
-trailing arguments as the guest's `argv`.
+Then run a command module. The module path becomes `argv[0]`; trailing values are
+the remaining guest arguments.
+
+```sh
+wago run command.wasm first second
+```
 
 ## Snapshots
 
-WASI has shipped under more than one wasm import module name. Each is a subpackage with
-an identical Go API (`Init` / `Imports` / `Config`); they differ only in the module name
-they bind under and their identity metadata.
+| Plugin ID | Wasm import module | Status |
+| --- | --- | --- |
+| `github.com/wago-org/wasi` | `wasi_snapshot_preview1` | Stable default |
+| `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | Stable, version-pinned package |
+| `github.com/wago-org/wasi/unstable` | `wasi_unstable` | Deprecated compatibility package |
 
-| Import path | Wasm module | Stability | When you need it |
-| --- | --- | --- | --- |
-| `github.com/wago-org/wasi` | `wasi_snapshot_preview1` | stable | Default. Re-exports `p1`; use this unless you have a reason not to. |
-| `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | stable | The current ABI emitted by `wasm32-wasip1` toolchains (Rust, C, TinyGo, AssemblyScript). |
-| `github.com/wago-org/wasi/unstable` | `wasi_unstable` | deprecated | "Snapshot 0", the pre-preview1 ABI of older toolchains. Function-for-function identical to `p1` over this surface. |
-| `github.com/wago-org/wasi/p2` | - | placeholder | WASI preview 2 (the component model). Reserves the slot; **not yet implemented**. |
+The Go package `github.com/wago-org/wasi/p2` remains a source placeholder, not
+a plugin package. It is deliberately absent from `wago.json` and cannot be
+published or resolved until it has a real provider.
 
-Preview 2 is a different model entirely - the guest is a WebAssembly **Component** whose
-imports are WIT interfaces lowered through the canonical ABI, not flat core-wasm imports.
-It needs a component-model loader Wago does not have yet; run preview1 modules with `p1`
-until then.
+The root and `/p1` providers expose the same Wasm module. Select one of them.
+Wago rejects a lock graph that selects both before either plugin starts.
+
+## Host authorities
+
+Every provider requests four required, non-inheriting Wago authorities:
+
+| Authority | Scope | Why |
+| --- | --- | --- |
+| `host.import.define` | exactly `wasi_snapshot_preview1` or `wasi_unstable` | Define that snapshot's host functions |
+| `host.caller.identify` | identity only | Keep descriptor tables separate without instance control |
+| `host.arguments.read` | this runtime's immutable argv | Implement `args_*` without process-global state |
+| `instance.close.observe` | opaque close events | Close the departed guest's files |
+
+There is no runtime, module, invocation, compiler, or managed-instance authority.
+Narrowing the import-module grant to an empty or different scope fails closed.
+
+WASI is a leaf plugin: it declares no plugin dependency and provides or consumes
+no typed cross-plugin contract. It can still share a runtime with contract-based
+plugins because Wago validates the complete dependency and contract graph before
+registration. Its provider does not retain another plugin's values or call across
+plugin lifetimes.
+
+## Guest capabilities
+
+Host authorities govern what the Go plugin may do to Wago. Guest capabilities
+govern which imported functions a WebAssembly module may exercise. WASI labels
+every import with one of these narrower capabilities:
+
+| Capability | Surface |
+| --- | --- |
+| `wasi.fd.read` | Stream and descriptor reads |
+| `wasi.fd.write` | Stream and descriptor writes |
+| `wasi.fd.manage` | Descriptor close, seek, stat, rights, and renumbering |
+| `wasi.path.read` | Path metadata and symlink reads below preopens |
+| `wasi.path.write` | Path open/create/mutation below preopens |
+| `wasi.arguments.read` | Guest argv |
+| `wasi.environment.read` | Guest environment |
+| `wasi.clock.read` | Clock resolution and time |
+| `wasi.random.read` | Cryptographic randomness |
+| `wasi.process.exit` | `proc_exit` |
+| `wasi.poll` | `poll_oneoff` |
+| `wasi.scheduler.yield` | `sched_yield` |
+| `wasi.unsupported` | Compatibility stubs for signals and sockets |
+
+For programmatic instantiation, allow only what the module needs:
+
+```go
+instance, err := runtime.Instantiate(ctx, module, wago.WithPolicy(wago.Policy{
+    AllowedCapabilities: []wago.Capability{
+        wasi.CapFDWrite,
+        wasi.CapArgumentsRead,
+        wasi.CapProcessExit,
+    },
+}))
+```
+
+Preview 1 multiplexes stdout and files through the same descriptor syscalls, so
+`wasi.fd.read` and `wasi.fd.write` intentionally describe descriptor operations,
+not a misleading per-resource distinction. Filesystem reach is independently
+bounded by the configured preopens and WASI descriptor rights.
 
 ## Configuration
 
-`wasi.Config` (an alias of the shared `core.Config`) is the whole knob surface. Every
-field is optional and has a sensible zero behavior.
+Plugin configuration is strict JSON. Unknown fields, `null`, relative host paths,
+unclean guest paths, malformed environment entries, trailing JSON, and limits
+outside the documented ranges are rejected before the provider factory runs.
 
-| Field | Type | Zero value behaves as |
+| Field | Values | Default |
 | --- | --- | --- |
-| `Stdout`, `Stderr` | `io.Writer` | discards writes (reports them as written) |
-| `Stdin` | `io.Reader` | clean EOF on `fd_read` |
-| `Args` | `[]string` | empty `argv` (`Args[0]` is conventionally the program name) |
-| `Env` | `[]string` | empty environment (`"KEY=VALUE"` entries) |
-| `Now` | `func() int64` | a fixed clock - deterministic, handy for tests |
-| `Rand` | `io.Reader` | `crypto/rand.Reader` |
-| `Preopens` | `map[string]string` | no host filesystem access; maps guest directory names to host directories starting at fd 3 |
+| `stdin` | `"inherit"` or `"eof"` | `"inherit"` |
+| `stdout`, `stderr` | `"inherit"` or `"discard"` | `"inherit"` |
+| `env` | Up to 4096 `KEY=VALUE` strings | Host process environment |
+| `preopens` | Up to 64 clean absolute guest paths mapped to clean absolute host directories | None |
+| `maxOpenFiles` | 3 to 65536, including stdio and preopens | 1024 |
+| `maxPollDurationMillis` | 1 to 60000 | 1000 |
 
-## Syscall support
+Configured preopens are opened during plugin startup. A missing path, a regular
+file in place of a directory, or an exhausted descriptor bound fails startup and
+rolls the entire plugin transaction back. Instance-close events release that
+guest's descriptors; runtime shutdown closes every remaining descriptor.
 
-**Implemented**:
+## Go API
 
-| Group | Functions |
-| --- | --- |
-| Descriptors | `fd_advise`, `fd_allocate`, `fd_close`, `fd_datasync`, `fd_fdstat_*`, `fd_filestat_*`, `fd_pread`, `fd_prestat_*`, `fd_pwrite`, `fd_read`, `fd_readdir`, `fd_renumber`, `fd_seek`, `fd_sync`, `fd_tell`, `fd_write` |
-| Paths | `path_create_directory`, `path_filestat_get`, `path_filestat_set_times`, `path_link`, `path_open`, `path_readlink`, `path_remove_directory`, `path_rename`, `path_symlink`, `path_unlink_file` |
-| Process | `proc_exit` |
-| Args / env | `args_sizes_get`, `args_get`, `environ_sizes_get`, `environ_get` |
-| Clock | `clock_time_get`, `clock_res_get` |
-| Random | `random_get` |
-| Events | `poll_oneoff`, `sched_yield` |
+The explicit provider is ordinary data:
 
-`sock_accept`, `sock_recv`, `sock_send`, `sock_shutdown`, and `proc_raise` are present
-but do not receive ambient host authority; they return the corresponding unsupported,
-not-a-socket, or bad-descriptor errno.
+```go
+provider := wasi.Provider()
+digest, err := wago.DefinitionDigest(provider.Definition)
+if err != nil {
+    return err
+}
 
-## Compatibility
+grants := make([]wago.AuthorityGrant, len(provider.Definition.Authorities))
+for i, request := range provider.Definition.Authorities {
+    grants[i] = wago.AuthorityGrant{Name: request.Name, Scope: request.Scope}
+}
 
-| Axis | Support |
-| --- | --- |
-| Wago engine | `>= 0.1.0` |
-| Go toolchain | `>= 1.22` |
-| TinyGo | compatible (the library builds under TinyGo; the test harnesses are `!tinygo`) |
-| Platforms | `linux/amd64` (the tier the corpus/suite tests run on) |
+runtime := wago.NewRuntime(wago.WithGuestArguments([]string{"command.wasm", "first"}))
+defer runtime.Close()
+err = runtime.LoadPlugins(ctx, wago.PluginSet{
+    Providers: []wago.PluginProvider{provider},
+    Selections: []wago.PluginSelection{{
+        ID: provider.Definition.ID,
+        DefinitionDigest: digest,
+        Grants: grants,
+    }},
+})
+```
 
-Identity, engine constraints, and platform tags live in one place - `wago.json` at the
-module root - and are loaded at runtime via `wasi.Info`, keyed by module path. The same
-file doubles as the manifest a registry reads, so runtime identity and the catalog never
-drift.
+Embedders that deliberately bypass plugin review can keep using the raw import
+bundle:
 
-## Testing
+```go
+imports := wasi.Imports(wasi.Config{Stdout: os.Stdout, Args: []string{"command.wasm"}})
+instance, err := wago.Instantiate(compiled, wago.InstantiateOptions{Imports: imports})
+```
+
+The same APIs are available from `p1` and `unstable`; only the imported Wasm
+module name changes.
+
+## Syscall coverage
+
+Implemented groups include stdio, args/environment, clocks, random, descriptor
+I/O and metadata, preopens, path operations, polling, scheduling, and process
+exit. Socket calls and `proc_raise` are linked for ABI compatibility but return
+the appropriate unsupported, not-a-socket, or bad-descriptor errno; they do not
+receive ambient network or signal access.
+
+Every guest pointer is bounds checked. Preopen path traversal is confined below
+the opened directory using Linux `openat2` resolution rules.
+
+## Compatibility and testing
+
+The secure filesystem implementation currently supports `linux/amd64`, Go 1.22
+or newer, and Wago 0.1.0 or newer.
 
 ```sh
 go test ./...
+go test -race ./...
+go vet ./...
 ```
 
-The default suite is self-contained: `TestWASIHelloWorld` runs a hand-assembled
-`wasi_snapshot_preview1` module end to end (no external toolchain), and the `unstable`
-package mirrors it for the older ABI. Hermetic syscall tests adapted from Wazero and
-Wasmtime exercise the public import boundary: memory faults, preopens, descriptor
-rights and I/O, opaque directory cookies, path confinement, symlinks, file polling,
-socket errors, and descriptor-table stress.
-
-Two larger tiers are gated so a plain `go test` stays fast and hermetic:
-
-- **Real application corpus** (`TestWASIApps`, `linux && amd64`) executes the checked-in
-  Rust/WASI binaries under `../wago/bench/corpus` - pulldown-cmark, blake3, serde_json,
-  the rhai scripting engine, `regex`, `num-bigint` - and asserts each program's
-  deterministic output. It skips any binary that isn't present.
-- **Conformance oracle** (`TestWASISuite`) runs the
-  [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) preview1
-  corpus when `WAGO_WASITEST_DIR` points at a checkout. The harness runs all 72
-  wasm32-wasip1 binaries with isolated copies of their filesystem fixtures; no P1 test
-  is skipped.
-
-The preview 1 corpus benchmarks compare Wago with Wazero's compiler runtime on
-the same application binaries. Run them on Darwin or Linux `amd64`/`arm64` with:
-
-```sh
-go test -run '^$' -bench '^Benchmark(Wazero)?WASI' -benchmem -count=1 -benchtime=2000ms ./p1
-```
-
-## Architecture
-
-- **`wasi.go`** - the module root: the default (`wasi_snapshot_preview1`) `Init` /
-  `Imports`, plus `Info`, which resolves extension identity from `wago.json` (self-similar
-  manifest, subpackages inherit parent metadata).
-- **`internal/core/`** - the shared implementation: ABI/memory helpers, descriptor and
-  capability state, filesystem/path operations, polling, and command functions.
-- **`p1/`**, **`unstable/`** - thin wrappers that bind `core` under their module name and
-  identity. `p2/` marks the reserved preview-2 slot.
-- **`register/`** - a blank-import shim (`import _ ".../wasi/register"`) that wires the
-  WASI plugins into Wago's global registry for `wago plugin build`.
-- **`wago.json`** - the package manifest declaring the module, its subpackages, engines,
-  and platforms.
-
-## Contributing
-
-Contributions are welcome! Please:
-
-- Run `go test ./...` and `go vet ./...` before opening a pull request.
-- Turn a stubbed syscall into a real one where it makes sense - each `ENOSYS` in
-  `internal/core` is a labeled growth target.
-- Follow standard Go formatting (`gofmt`) and conventional commit messages.
+The hermetic suite covers the host boundary, descriptor rights and lifecycle,
+path confinement, malformed memory, polling, strict plugin configuration, exact
+authority grants, atomic provider conflicts, and the explicit catalog. Optional
+corpus and wasi-testsuite harnesses remain documented in the test source.
 
 ## License
 
-This project is distributed under the [Apache License 2.0](./LICENSE). Work on this
-project is done out of passion - if you want to support it financially, you can donate
-through [GitHub Sponsors](https://github.com/sponsors/JairusSW).
-
-## Contact
-
-Please file issues at [GitHub Issues](https://github.com/wago-org/wasi/issues). To chat,
-join the [Wago Discord](https://wago.sh/discord).
-
-- **GitHub:** [https://github.com/wago-org/](https://github.com/wago-org/)
-- **Website:** [https://wago.sh/](https://wago.sh/)
-- **Discord:** [https://wago.sh/discord](https://wago.sh/discord)
+Apache-2.0. See [LICENSE](./LICENSE).

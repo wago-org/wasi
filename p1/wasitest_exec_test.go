@@ -33,7 +33,7 @@ type wasiManifest struct {
 }
 
 // TestWASISuite runs the WebAssembly/wasi-testsuite preview1 tests (the submodule
-// at tests/wasi) through wago.WASI as a conformance oracle for the sync host-call
+// at tests/wasi) through this WASI host bundle as a conformance oracle for the sync host-call
 // path. Gated on WAGO_WASITEST_DIR (a checked-out wasi-testsuite). Every P1 test
 // must run; a manifest root is preopened as fd 3 by runOneWASITest.
 func TestWASISuite(t *testing.T) {
