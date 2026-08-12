@@ -30,7 +30,6 @@ type fsGuard struct {
 	mu       sync.Mutex
 	resolver *wago.CallerResolver
 	states   map[wago.InstanceIdentity]*fsState
-	raw      map[wago.HostModule]*fsState
 	claimed  bool
 	closed   bool
 }
@@ -46,7 +45,7 @@ type fdEntry struct {
 }
 
 func (e *Plugin) resetFS() {
-	e.guard = &fsGuard{states: make(map[wago.InstanceIdentity]*fsState), raw: make(map[wago.HostModule]*fsState)}
+	e.guard = &fsGuard{states: make(map[wago.InstanceIdentity]*fsState)}
 }
 
 func (e *Plugin) initFS(strict bool) error {
@@ -156,21 +155,6 @@ func (e *Plugin) withFS(m wago.HostModule, results []uint64, call func()) {
 			}
 			e.guard.states[identity] = state
 		}
-	} else if m != nil {
-		state = e.guard.raw[m]
-		if state == nil {
-			if !e.guard.claimed {
-				state = e.fs
-				e.guard.claimed = true
-			} else {
-				state, _ = e.makeFS(false)
-				if state == nil {
-					setStateError(results, wasiEIo)
-					return
-				}
-			}
-			e.guard.raw[m] = state
-		}
 	}
 	previous := e.fs
 	e.fs = state
@@ -210,21 +194,17 @@ func (e *Plugin) closeAll() {
 	}
 	e.guard.mu.Lock()
 	defer e.guard.mu.Unlock()
-	unique := make(map[*fsState]struct{}, len(e.guard.states)+len(e.guard.raw)+1)
+	unique := make(map[*fsState]struct{}, len(e.guard.states)+1)
 	if e.fs != nil {
 		unique[e.fs] = struct{}{}
 	}
 	for _, state := range e.guard.states {
 		unique[state] = struct{}{}
 	}
-	for _, state := range e.guard.raw {
-		unique[state] = struct{}{}
-	}
 	for state := range unique {
 		closeFS(state)
 	}
 	clear(e.guard.states)
-	clear(e.guard.raw)
 	e.fs = nil
 	e.guard.closed = true
 }

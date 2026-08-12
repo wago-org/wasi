@@ -204,7 +204,8 @@ func (e *Plugin) stop(context.Context) error {
 	return nil
 }
 
-// Imports returns a raw low-level host bundle. This API intentionally remains
+// Imports returns one stateful raw low-level host bundle for one instance. Call
+// Imports again for each additional instance. This API intentionally remains
 // available for embedders that do not use Runtime.LoadPlugins. Plugin policy,
 // lifecycle cleanup, and runtime-scoped argv apply only to Provider.
 func Imports(module string, cfg Config) wago.Imports {
