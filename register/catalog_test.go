@@ -13,6 +13,7 @@ import (
 	wagoplugin "github.com/wago-org/wago/plugin"
 	"github.com/wago-org/wasi"
 	"github.com/wago-org/wasi/p1"
+	"github.com/wago-org/wasi/p2"
 	"github.com/wago-org/wasi/unstable"
 )
 
@@ -49,7 +50,7 @@ func selection(t *testing.T, provider wago.PluginProvider, config json.RawMessag
 
 func TestProvidersAreExplicitFreshAndCanonical(t *testing.T) {
 	first, second := Providers(), Providers()
-	want := []string{wasi.ID, p1.ID, unstable.ID}
+	want := []string{wasi.ID, p1.ID, p2.ID, unstable.ID}
 	if len(first) != len(want) || len(second) != len(want) {
 		t.Fatalf("provider counts = %d, %d; want %d", len(first), len(second), len(want))
 	}
@@ -68,6 +69,9 @@ func TestEachSnapshotLoadsWithExactAuthorities(t *testing.T) {
 	for _, provider := range Providers() {
 		provider := provider
 		t.Run(provider.Definition.ID, func(t *testing.T) {
+			if provider.Definition.ID == p2.ID {
+				t.Skip("covered with its required Component Model provider in p2 tests")
+			}
 			rt := wago.NewRuntime(wago.WithGuestArguments([]string{"guest", "one"}))
 			defer rt.Close()
 			set := wago.PluginSet{

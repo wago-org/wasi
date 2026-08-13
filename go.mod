@@ -8,3 +8,5 @@ require (
 	github.com/tetratelabs/wazero v1.9.0
 	golang.org/x/sys v0.30.0
 )
+
+require github.com/wago-org/component-model v0.1.1-0.20260813181057-8fcf897b5fcc

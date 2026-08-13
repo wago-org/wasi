@@ -10,7 +10,7 @@
     "homepage": "https://github.com/wago-org/wasi",
     "repository": "https://github.com/wago-org/wasi",
     "category": "wasi",
-    "tags": ["wasi", "wasi-preview1", "syscall", "filesystem", "stdio"],
+    "tags": ["wasi", "wasi-preview1", "wasi-preview2", "component-model", "filesystem", "stdio"],
     "authors": [{ "name": "The Wago authors", "github": "wago-org" }],
     "engines": {
       "wago": ">=0.1.0",
@@ -27,6 +27,14 @@
         "platforms": ["linux/amd64"]
       },
       {
+        "module": "github.com/wago-org/wasi/p2",
+        "name": "WASI Preview 2",
+        "description": "WASI Preview 2 command-world execution with capability-scoped filesystems and fail-closed sockets.",
+        "stability": "experimental",
+        "tags": ["wasi", "wasi-preview2", "component-model", "filesystem", "sockets", "stdio", "clocks", "random"],
+        "platforms": ["darwin/arm64", "linux/amd64"]
+      },
+      {
         "module": "github.com/wago-org/wasi/unstable",
         "name": "WASI unstable",
         "description": "The deprecated pre-Preview 1 wasi_unstable command ABI for older core WebAssembly modules.",
@@ -35,5 +43,8 @@
         "platforms": ["linux/amd64"]
       }
     ]
+  },
+  "plugins": {
+    "github.com/wago-org/component-model": "^0.1.0"
   }
 }

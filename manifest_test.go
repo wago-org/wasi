@@ -6,9 +6,11 @@ import (
 	"reflect"
 	"testing"
 
+	component "github.com/wago-org/component-model"
 	"github.com/wago-org/wago"
 	"github.com/wago-org/wasi"
 	"github.com/wago-org/wasi/p1"
+	"github.com/wago-org/wasi/p2"
 	wasiregister "github.com/wago-org/wasi/register"
 	"github.com/wago-org/wasi/unstable"
 )
@@ -48,13 +50,14 @@ func TestManifestMatchesEveryCatalogDefinition(t *testing.T) {
 	if manifest.Schema != "https://wago.sh/v1/schema.json" {
 		t.Fatalf("manifest schema = %q", manifest.Schema)
 	}
-	if len(manifest.Plugins) != 0 {
-		t.Fatalf("leaf manifest dependencies = %v", manifest.Plugins)
+	if !reflect.DeepEqual(manifest.Plugins, map[string]string{component.PluginID: "^0.1.0"}) {
+		t.Fatalf("manifest dependencies = %v", manifest.Plugins)
 	}
 
 	canonical := map[string]wago.PluginDefinition{
 		wasi.ID:     wasi.Definition(),
 		p1.ID:       p1.Definition(),
+		p2.ID:       p2.Definition(),
 		unstable.ID: unstable.Definition(),
 	}
 	providers := wasiregister.Providers()

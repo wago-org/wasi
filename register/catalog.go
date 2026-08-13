@@ -6,6 +6,7 @@ import (
 	wago "github.com/wago-org/wago"
 	"github.com/wago-org/wasi"
 	"github.com/wago-org/wasi/p1"
+	"github.com/wago-org/wasi/p2"
 	"github.com/wago-org/wasi/unstable"
 )
 
@@ -15,6 +16,7 @@ func Providers() []wago.PluginProvider {
 	return []wago.PluginProvider{
 		wasi.Provider(),
 		p1.Provider(),
+		p2.Provider(),
 		unstable.Provider(),
 	}
 }
