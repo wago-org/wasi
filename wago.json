@@ -2,7 +2,7 @@
   "$schema": "https://wago.sh/v1/schema.json",
   "package": {
     "module": "github.com/wago-org/wasi",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "name": "WASI",
     "description": "WASI Preview 1 host functions with bounded filesystems, stdio, argv, environment, clocks, random, polling, and process exit.",
     "stability": "stable",
