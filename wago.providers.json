@@ -246,6 +246,113 @@
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
+        "id": "github.com/wago-org/wasi/p2",
+        "name": "WASI Preview 2",
+        "version": "0.1.1",
+        "description": "WASI Preview 2 command-world execution with capability-scoped filesystems and fail-closed sockets.",
+        "stability": "experimental",
+        "compatibility": {
+          "engines": {
+            "go": "\u003e=1.22",
+            "wago": "\u003e=0.1.0"
+          },
+          "platforms": [
+            "darwin/arm64",
+            "linux/amd64"
+          ]
+        },
+        "provenance": {
+          "homepage": "https://github.com/wago-org/wasi",
+          "repository": "https://github.com/wago-org/wasi",
+          "license": "Apache-2.0",
+          "authors": [
+            "The Wago authors"
+          ]
+        },
+        "requires": [
+          {
+            "id": "github.com/wago-org/component-model",
+            "version": "^0.1.0"
+          }
+        ],
+        "authorities": [
+          {
+            "name": "host.arguments.read",
+            "mode": "required",
+            "reason": "expose this runtime's immutable argv through wasi:cli/environment",
+            "scope": {}
+          }
+        ],
+        "configSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "env": {
+              "items": {
+                "maxLength": 32768,
+                "minLength": 2,
+                "pattern": "^[^=\\u0000]+=[^\\u0000]*$",
+                "type": "string"
+              },
+              "maxItems": 4096,
+              "type": "array"
+            },
+            "preopens": {
+              "additionalProperties": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxProperties": 64,
+              "propertyNames": {
+                "maxLength": 4096,
+                "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "stderr": {
+              "enum": [
+                "inherit",
+                "discard"
+              ],
+              "type": "string"
+            },
+            "stdin": {
+              "enum": [
+                "inherit",
+                "eof"
+              ],
+              "type": "string"
+            },
+            "stdout": {
+              "enum": [
+                "inherit",
+                "discard"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "provides": [
+          {
+            "id": "github.com/wago-org/wasi/p2/command",
+            "major": 1
+          }
+        ],
+        "consumes": [
+          {
+            "id": "github.com/wago-org/component-model/runtime",
+            "major": 1,
+            "mode": "required"
+          }
+        ]
+      },
+      "definitionDigest": "sha256:7e1288105f5eb6191e7a00ba8213e053b719cc8a9d750d2e7bfee372e91ebc03"
+    },
+    {
+      "importPath": "github.com/wago-org/wasi/register",
+      "definition": {
         "id": "github.com/wago-org/wasi/unstable",
         "name": "WASI unstable",
         "version": "0.1.1",
