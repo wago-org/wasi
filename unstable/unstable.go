@@ -33,7 +33,7 @@ func Definition() wago.PluginDefinition {
 		ID,
 		"WASI unstable",
 		"Legacy wasi_unstable compatibility.",
-		wago.Deprecated,
+		wago.Stable,
 		Module,
 	)
 }

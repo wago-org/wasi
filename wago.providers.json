@@ -6,7 +6,7 @@
       "definition": {
         "id": "github.com/wago-org/wasi",
         "name": "WASI",
-        "version": "0.2.0",
+        "version": "0.2.1",
         "description": "Complete WASI support: Preview 1, Preview 2, and unstable compatibility.",
         "stability": "stable",
         "compatibility": {
@@ -30,26 +30,26 @@
         "requires": [
           {
             "id": "github.com/wago-org/wasi/p1",
-            "version": "^0.2.0"
+            "version": "^0.2.1"
           },
           {
             "id": "github.com/wago-org/wasi/p2",
-            "version": "^0.2.0"
+            "version": "^0.2.1"
           },
           {
             "id": "github.com/wago-org/wasi/unstable",
-            "version": "^0.2.0"
+            "version": "^0.2.1"
           }
         ]
       },
-      "definitionDigest": "sha256:ae149894d9be47864385d4cf789a4f02a1fe8784abda7d50d7fcd66678809e59"
+      "definitionDigest": "sha256:ee223ad26c7b0c8894c5a38848a7291975bcb39bc9625deebfa4ebf71bcc071f"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p1",
         "name": "WASI Preview 1",
-        "version": "0.2.0",
+        "version": "0.2.1",
         "description": "Preview 1 for core WebAssembly modules.",
         "stability": "stable",
         "compatibility": {
@@ -163,14 +163,14 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:dafdc5eda76bd255f4e4e6c269060f29cd57c5656c9348f764bcfd8e80394038"
+      "definitionDigest": "sha256:d81cb88f445427c936f3b4a18636e5fe4b45edb57c32c8288f90186141ccbf66"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p2",
         "name": "WASI Preview 2",
-        "version": "0.2.0",
+        "version": "0.2.1",
         "description": "Preview 2 for WebAssembly components.",
         "stability": "experimental",
         "compatibility": {
@@ -270,16 +270,16 @@
           }
         ]
       },
-      "definitionDigest": "sha256:f162850e6fd3f6a545b94201617ce494f0b019d36d47c6a4afcad0d2a777910d"
+      "definitionDigest": "sha256:bd029c1ce83c49c1f0b82df570afe762297a98ac6056c58105af03295023202a"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/unstable",
         "name": "WASI unstable",
-        "version": "0.2.0",
+        "version": "0.2.1",
         "description": "Legacy wasi_unstable compatibility.",
-        "stability": "deprecated",
+        "stability": "stable",
         "compatibility": {
           "engines": {
             "go": "\u003e=1.22",
@@ -391,7 +391,7 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:9c2b9ca6edd10a4511be3f40dbda3beb3f0aac4fcc33e2e3544d85db5515dc29"
+      "definitionDigest": "sha256:8f2d51e77ea38c034510d1bf205ebc7f151e5d52684985bda49364c6c280e5e9"
     }
   ]
 }

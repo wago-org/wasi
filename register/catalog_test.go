@@ -116,15 +116,18 @@ func TestNarrowedHostScopeFailsClosed(t *testing.T) {
 func TestRootBundlesEverySnapshot(t *testing.T) {
 	definition := wasi.Definition()
 	want := []wago.PluginRequirement{
-		{ID: p1.ID, Version: "^0.2.0"},
-		{ID: p2.ID, Version: "^0.2.0"},
-		{ID: unstable.ID, Version: "^0.2.0"},
+		{ID: p1.ID, Version: "^0.2.1"},
+		{ID: p2.ID, Version: "^0.2.1"},
+		{ID: unstable.ID, Version: "^0.2.1"},
 	}
 	if !reflect.DeepEqual(definition.Requires, want) {
 		t.Fatalf("root requirements = %#v, want %#v", definition.Requires, want)
 	}
 	if len(definition.Authorities) != 0 || len(definition.ConfigSchema) != 0 {
 		t.Fatalf("root owns runtime policy: authorities=%#v config=%s", definition.Authorities, definition.ConfigSchema)
+	}
+	if got := unstable.Definition().Stability; got != wago.Stable {
+		t.Fatalf("unstable compatibility provider stability = %q; bundle dependencies must remain resolvable", got)
 	}
 }
 

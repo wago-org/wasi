@@ -40,7 +40,7 @@ func Definition() wago.PluginDefinition {
 	return wago.PluginDefinition{
 		ID:          ID,
 		Name:        "WASI",
-		Version:     "0.2.0",
+		Version:     "0.2.1",
 		Description: "Complete WASI support: Preview 1, Preview 2, and unstable compatibility.",
 		Stability:   wago.Stable,
 		Compatibility: wago.Compatibility{
@@ -54,9 +54,9 @@ func Definition() wago.PluginDefinition {
 			Authors:    []string{"The Wago authors"},
 		},
 		Requires: []wago.PluginRequirement{
-			{ID: "github.com/wago-org/wasi/p1", Version: "^0.2.0"},
-			{ID: "github.com/wago-org/wasi/p2", Version: "^0.2.0"},
-			{ID: "github.com/wago-org/wasi/unstable", Version: "^0.2.0"},
+			{ID: "github.com/wago-org/wasi/p1", Version: "^0.2.1"},
+			{ID: "github.com/wago-org/wasi/p2", Version: "^0.2.1"},
+			{ID: "github.com/wago-org/wasi/unstable", Version: "^0.2.1"},
 		},
 	}
 }
