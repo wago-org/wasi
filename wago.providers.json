@@ -248,7 +248,7 @@
       "definition": {
         "id": "github.com/wago-org/wasi/p2",
         "name": "WASI Preview 2",
-        "version": "0.1.0",
+        "version": "0.1.1",
         "description": "WASI Preview 2 command-world execution with capability-scoped filesystems and fail-closed sockets.",
         "stability": "experimental",
         "compatibility": {
@@ -348,7 +348,7 @@
           }
         ]
       },
-      "definitionDigest": "sha256:17e73faa926dd06d3af13de38c567191d86ccd2714070fc5b80f945c5483aa1b"
+      "definitionDigest": "sha256:7e1288105f5eb6191e7a00ba8213e053b719cc8a9d750d2e7bfee372e91ebc03"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
