@@ -2,7 +2,7 @@
   "$schema": "https://wago.sh/v1/schema.json",
   "package": {
     "module": "github.com/wago-org/wasi",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "name": "WASI",
     "description": "Complete WASI support: Preview 1, Preview 2, and unstable compatibility.",
     "stability": "stable",
@@ -38,7 +38,7 @@
         "module": "github.com/wago-org/wasi/unstable",
         "name": "WASI unstable",
         "description": "Legacy wasi_unstable compatibility.",
-        "stability": "deprecated",
+        "stability": "stable",
         "tags": ["wasi", "wasi-unstable", "snapshot0"],
         "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64"]
       }

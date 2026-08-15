@@ -101,7 +101,7 @@ func Definition() wago.PluginDefinition {
 	return wago.PluginDefinition{
 		ID:          ID,
 		Name:        "WASI Preview 2",
-		Version:     "0.2.0",
+		Version:     "0.2.1",
 		Description: "Preview 2 for WebAssembly components.",
 		Stability:   wago.Experimental,
 		Compatibility: wago.Compatibility{

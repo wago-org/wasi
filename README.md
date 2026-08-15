@@ -53,7 +53,7 @@ wago run command.wasm first second
 | `github.com/wago-org/wasi` | All providers below | Complete package |
 | `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | Stable |
 | `github.com/wago-org/wasi/p2` | `wasi:cli/command` component world | Experimental |
-| `github.com/wago-org/wasi/unstable` | `wasi_unstable` | Deprecated compatibility package |
+| `github.com/wago-org/wasi/unstable` | `wasi_unstable` | Stable legacy compatibility |
 
 The root selects all three provider paths. Selecting only `/p2` also selects
 `github.com/wago-org/component-model`; the reviewed
