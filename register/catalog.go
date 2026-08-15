@@ -10,8 +10,8 @@ import (
 	"github.com/wago-org/wasi/unstable"
 )
 
-// Providers returns a fresh catalog. The root and p1 entries intentionally
-// target the same Wasm module, so a reviewed plugin set selects one, never both.
+// Providers returns a fresh catalog. The root entry is a bundle that selects
+// all three snapshot providers; each snapshot can also be selected directly.
 func Providers() []wago.PluginProvider {
 	return []wago.PluginProvider{
 		wasi.Provider(),
