@@ -129,3 +129,36 @@ func TestPreview1RejectsCapabilityEscape(t *testing.T) {
 		t.Fatalf("path_open symlink escape errno = %d, want %d", result[0], wasiENotcapable)
 	}
 }
+
+func TestPreview1FollowsSymlinksOnlyInsideCapability(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/target", []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", root+"/link"); err != nil {
+		t.Fatal(err)
+	}
+	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
+	m := testModule{mem: make([]byte, 256)}
+	copy(m.mem[32:], "link")
+	result := make([]uint64, 1)
+
+	e.pathOpen(m, []uint64{3, 1, 32, 4, 0, rightFDRead | rightFDFilestatGet, 0, 0, 16}, result)
+	if result[0] != wasiOK {
+		t.Fatalf("path_open internal symlink: errno %d", result[0])
+	}
+	fd := uint64(binary.LittleEndian.Uint32(m.mem[16:]))
+	e.fdClose(m, []uint64{fd}, result)
+	if result[0] != wasiOK {
+		t.Fatalf("fd_close internal symlink target: errno %d", result[0])
+	}
+
+	e.pathFilestatGet(m, []uint64{3, 0, 32, 4, 64}, result)
+	if result[0] != wasiOK || m.mem[80] != filetypeSymlink {
+		t.Fatalf("path_filestat_get nofollow = errno %d type %d", result[0], m.mem[80])
+	}
+	e.pathFilestatGet(m, []uint64{3, 1, 32, 4, 128}, result)
+	if result[0] != wasiOK || m.mem[144] != filetypeRegularFile {
+		t.Fatalf("path_filestat_get follow = errno %d type %d", result[0], m.mem[144])
+	}
+}
