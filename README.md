@@ -182,12 +182,15 @@ the appropriate unsupported, not-a-socket, or bad-descriptor errno; they do not
 receive ambient network or signal access.
 
 Every guest pointer is bounds checked. Preopen path traversal is confined below
-the opened directory using Linux `openat2` resolution rules.
+the opened directory using Linux `openat2` resolution rules or Darwin's
+`O_RESOLVE_BENEATH` open policy. Darwin rejects `path_link` when asked to follow
+the source symlink because the platform has no race-free descriptor-based link
+operation equivalent to Linux `AT_EMPTY_PATH`.
 
 ## Compatibility and testing
 
-The secure filesystem implementation currently supports `linux/amd64`, Go 1.22
-or newer, and Wago 0.1.0 or newer.
+The secure filesystem implementation currently supports `linux/amd64`,
+`darwin/amd64`, and `darwin/arm64`, Go 1.22 or newer, and Wago 0.1.0 or newer.
 
 ```sh
 go test ./...

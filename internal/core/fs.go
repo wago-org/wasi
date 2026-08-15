@@ -272,26 +272,11 @@ func (e *Plugin) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
 	return d, path.Clean(guest), wasiOK
 }
 
-const secureResolve = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS
-
 func capabilityErr(err error) uint64 {
 	if err == syscall.EXDEV {
 		return wasiENotcapable
 	}
 	return errno(err)
-}
-
-func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
-	if flags&unix.O_CREAT == 0 {
-		mode = 0
-	}
-	fd, err := unix.Openat2(int(d.file.Fd()), name, &unix.OpenHow{
-		Flags: uint64(flags | unix.O_CLOEXEC), Mode: uint64(mode), Resolve: secureResolve,
-	})
-	if err != nil {
-		return nil, capabilityErr(err)
-	}
-	return os.NewFile(uintptr(fd), name), wasiOK
 }
 
 func openParent(d *fdEntry, name string) (*os.File, string, uint64) {
@@ -339,13 +324,7 @@ func writeFilestat(mem []byte, ptr uint32, info os.FileInfo) uint64 {
 	}
 	b := mem[ptr : ptr+64]
 	clear(b)
-	var dev, ino, nlink uint64 = 1, 1, 1
-	var atim, ctim int64 = info.ModTime().UnixNano(), info.ModTime().UnixNano()
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		dev, ino, nlink = uint64(st.Dev), st.Ino, uint64(st.Nlink)
-		atim = st.Atim.Sec*1e9 + st.Atim.Nsec
-		ctim = st.Ctim.Sec*1e9 + st.Ctim.Nsec
-	}
+	dev, ino, nlink, atim, ctim := hostFileStat(info)
 	binary.LittleEndian.PutUint64(b[0:], dev)
 	binary.LittleEndian.PutUint64(b[8:], ino)
 	b[16] = filetype(info)
@@ -498,10 +477,7 @@ func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64) ([]unix.Timespe
 	if flags&1 != 0 && atim > maxInt64Value || flags&4 != 0 && mtim > maxInt64Value {
 		return nil, wasiEOverflow
 	}
-	a, mt := info.ModTime(), info.ModTime()
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		a = time.Unix(st.Atim.Sec, st.Atim.Nsec)
-	}
+	a, mt := hostAccessTime(info), info.ModTime()
 	now := time.Now()
 	if flags&1 != 0 {
 		a = time.Unix(0, int64(atim))
@@ -534,7 +510,7 @@ func (e *Plugin) fdFilestatSetTimes(_ wago.HostModule, p, r []uint64) {
 			times, timeCode := timesFor(st, p[1], p[2], p[3])
 			code = timeCode
 			if code == 0 {
-				code = errno(unix.UtimesNanoAt(int(f.file.Fd()), "", times, unix.AT_EMPTY_PATH))
+				code = errno(setFileTimes(f.file, times))
 			}
 		}
 	}
@@ -663,7 +639,7 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 			info, err = f.file.Stat()
 		} else {
 			name = entries[i-2].Name()
-			entryFile, openCode := openAt(f, name, unix.O_PATH|unix.O_NOFOLLOW, 0)
+			entryFile, openCode := openMetadataAt(f, name, false)
 			if openCode != 0 {
 				code = openCode
 				break
@@ -786,11 +762,7 @@ func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 	}
 	var st os.FileInfo
 	if code == 0 {
-		flags := unix.O_PATH
-		if uint16(p[1])&1 == 0 {
-			flags |= unix.O_NOFOLLOW
-		}
-		f, openCode := openAt(d, name, flags, 0)
+		f, openCode := openMetadataAt(d, name, uint16(p[1])&1 != 0)
 		code = openCode
 		if code == 0 {
 			var err error
@@ -822,7 +794,7 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 	if code == 0 {
 		follow := uint16(p[1])&1 != 0
 		if follow {
-			f, openCode := openAt(d, name, unix.O_PATH, 0)
+			f, openCode := openMetadataAt(d, name, true)
 			code = openCode
 			if code == 0 {
 				st, err := f.Stat()
@@ -832,7 +804,7 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 					times, timeCode := timesFor(st, p[4], p[5], p[6])
 					code = timeCode
 					if code == 0 {
-						code = errno(unix.UtimesNanoAt(int(f.Fd()), "", times, unix.AT_EMPTY_PATH))
+						code = errno(setFileTimes(f, times))
 					}
 				}
 				_ = f.Close()
@@ -841,7 +813,7 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 			parent, leaf, parentCode := openParent(d, name)
 			code = parentCode
 			if code == 0 {
-				f, openCode := openAt(d, name, unix.O_PATH|unix.O_NOFOLLOW, 0)
+				f, openCode := openMetadataAt(d, name, false)
 				code = openCode
 				if code == 0 {
 					st, err := f.Stat()
@@ -852,7 +824,7 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 						times, timeCode := timesFor(st, p[4], p[5], p[6])
 						code = timeCode
 						if code == 0 {
-							code = errno(unix.UtimesNanoAt(int(parent.Fd()), leaf, times, unix.AT_SYMLINK_NOFOLLOW))
+							code = errno(setPathTimes(parent, leaf, times, true))
 						}
 					}
 				}
@@ -898,12 +870,7 @@ func (e *Plugin) pathLink(m wago.HostModule, p, r []uint64) {
 		code = parentCode
 		if code == 0 {
 			if oldFlags&1 != 0 {
-				oldFile, openCode := openAt(od, oldName, unix.O_PATH, 0)
-				code = openCode
-				if code == 0 {
-					code = errno(unix.Linkat(int(oldFile.Fd()), "", int(newParent.Fd()), newLeaf, unix.AT_EMPTY_PATH))
-					_ = oldFile.Close()
-				}
+				code = linkAtFollow(od, oldName, newParent, newLeaf)
 			} else {
 				oldParent, oldLeaf, oldCode := openParent(od, oldName)
 				code = oldCode
@@ -1068,7 +1035,7 @@ func (e *Plugin) pathUnlinkFile(m wago.HostModule, p, r []uint64) {
 			r[0] = pathCode
 			return
 		}
-		f, openCode := openAt(d, clean, unix.O_PATH|unix.O_NOFOLLOW, 0)
+		f, openCode := openMetadataAt(d, clean, false)
 		if openCode != 0 {
 			r[0] = openCode
 			return
