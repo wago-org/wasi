@@ -3,7 +3,8 @@
   <p>WASI Preview 1 and Preview 2 for Wago, with explicit host access and guest permissions.</p>
 </div>
 
-`github.com/wago-org/wasi` implements both command ABIs. Preview 1 provides the
+`github.com/wago-org/wasi` installs the complete package: Preview 1, Preview 2,
+and the unstable compatibility provider. Preview 1 provides the
 flat `wasi_snapshot_preview1` imports, including a capability-scoped filesystem.
 Preview 2 runs `wasi:cli/command` components through Wago's Component Model
 plugin with stdio/stdin, argv and environment, clocks, random, polling, terminal
@@ -17,21 +18,24 @@ The plugin has no import-time side effects. Generated Wago runtimes call
 ## Install
 
 ```sh
-wago add github.com/wago-org/wasi
+wago add wago-org/wasi
 ```
 
-`wago add` reviews the immutable definition, its exact authority requests, and
-the resolved lock graph before changing the project. For non-interactive setup:
+For a package root, `wago add` offers to install everything or lets you choose
+individual providers. Explicit provider paths skip that choice:
 
 ```sh
-wago plugin grant github.com/wago-org/wasi \
-  --allow host.import.define,host.caller.identify,host.arguments.read,instance.close.observe
+wago add wago-org/wasi/p1
+wago add wago-org/wasi/p2
 ```
+
+Non-interactive root installs select everything. Authority grants and contract
+bindings remain explicit in the reviewed lock graph.
 
 Configure a bounded preopen and keep stdout/stderr attached to the process:
 
 ```sh
-wago plugin config github.com/wago-org/wasi \
+wago plugin config github.com/wago-org/wasi/p1 \
   '{"preopens":{"/data":"/srv/guest-data"},"maxOpenFiles":256,"maxPollDurationMillis":1000}'
 ```
 
@@ -46,17 +50,15 @@ wago run command.wasm first second
 
 | Plugin ID | Wasm import module | Status |
 | --- | --- | --- |
-| `github.com/wago-org/wasi` | `wasi_snapshot_preview1` | Stable default |
-| `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | Stable, version-pinned package |
+| `github.com/wago-org/wasi` | All providers below | Complete package |
+| `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | Stable |
 | `github.com/wago-org/wasi/p2` | `wasi:cli/command` component world | Experimental |
 | `github.com/wago-org/wasi/unstable` | `wasi_unstable` | Deprecated compatibility package |
 
-Selecting `/p2` also selects `github.com/wago-org/component-model`; the reviewed
+The root selects all three provider paths. Selecting only `/p2` also selects
+`github.com/wago-org/component-model`; the reviewed
 lock graph binds the component runtime contract to the WASI command provider.
 Core-only Preview 1 users do not load the component runtime.
-
-The root and `/p1` providers expose the same Wasm module. Select one of them.
-Wago rejects a lock graph that selects both before either plugin starts.
 
 ## Preview 2 Go API
 
@@ -101,11 +103,10 @@ Narrowing the import-module grant to an empty or different scope fails closed.
 Preview 2 requests only `host.arguments.read`; filesystem paths are supplied as
 explicit preopens in its reviewed configuration, and networking remains denied.
 
-WASI is a leaf plugin: it declares no plugin dependency and provides or consumes
-no typed cross-plugin contract. It can still share a runtime with contract-based
-plugins because Wago validates the complete dependency and contract graph before
-registration. Its provider does not retain another plugin's values or call across
-plugin lifetimes.
+The root is a policy-free bundle provider: it requests no authority and depends
+on P1, P2, and unstable. P1 and unstable are leaves. P2 depends on the Component
+Model plugin and binds its typed command service. Wago validates the complete
+dependency and contract graph before registration.
 
 ## Guest capabilities
 
@@ -171,7 +172,7 @@ guest's descriptors; runtime shutdown closes every remaining descriptor.
 The explicit provider is ordinary data:
 
 ```go
-provider := wasi.Provider()
+provider := p1.Provider()
 digest, err := wago.DefinitionDigest(provider.Definition)
 if err != nil {
     return err
@@ -202,8 +203,9 @@ imports := wasi.Imports(wasi.Config{Stdout: os.Stdout, Args: []string{"command.w
 instance, err := wago.Instantiate(compiled, wago.InstantiateOptions{Imports: imports})
 ```
 
-The same APIs are available from `p1` and `unstable`; only the imported Wasm
-module name changes.
+The root `wasi.Imports` API remains a low-level Preview 1 convenience. Equivalent
+APIs are available from `p1` and `unstable`; only the imported Wasm module name
+changes.
 
 ## Syscall coverage
 
@@ -221,9 +223,10 @@ operation equivalent to Linux `AT_EMPTY_PATH`.
 
 ## Compatibility and testing
 
-Preview 1 supports `linux/amd64`, `darwin/amd64`, and `darwin/arm64`.
-Preview 2 supports `darwin/arm64` and `linux/amd64`. Both require Go 1.22 or
-newer and Wago 0.1.0 or newer.
+Preview 1 and unstable support `linux/amd64`, `darwin/amd64`, and
+`darwin/arm64`. Preview 2, and therefore the complete root bundle, support
+`darwin/arm64` and `linux/amd64`. All require Go 1.22 or newer and Wago 0.1.0 or
+newer.
 
 ```sh
 go test ./...
@@ -239,7 +242,7 @@ seeding, clocks, and polling on Wago rather than synthetic WAT alone.
 
 The hermetic suite covers the host boundary, descriptor rights and lifecycle,
 path confinement, malformed memory, polling, strict plugin configuration, exact
-authority grants, atomic provider conflicts, and the explicit catalog. Optional
+authority grants, bundle dependencies, and the explicit catalog. Optional
 corpus and wasi-testsuite harnesses remain documented in the test source.
 
 ## License

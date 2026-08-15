@@ -6,8 +6,8 @@
       "definition": {
         "id": "github.com/wago-org/wasi",
         "name": "WASI",
-        "version": "0.1.3",
-        "description": "WASI Preview 1 host functions with bounded filesystems, stdio, argv, environment, clocks, random, polling, and process exit.",
+        "version": "0.2.0",
+        "description": "Complete WASI support: Preview 1, Preview 2, and unstable compatibility.",
         "stability": "stable",
         "compatibility": {
           "engines": {
@@ -15,7 +15,6 @@
             "wago": "\u003e=0.1.0"
           },
           "platforms": [
-            "darwin/amd64",
             "darwin/arm64",
             "linux/amd64"
           ]
@@ -28,107 +27,30 @@
             "The Wago authors"
           ]
         },
-        "authorities": [
+        "requires": [
           {
-            "name": "host.arguments.read",
-            "mode": "required",
-            "reason": "expose this runtime's immutable guest argv through Preview 1",
-            "scope": {}
+            "id": "github.com/wago-org/wasi/p1",
+            "version": "^0.2.0"
           },
           {
-            "name": "host.caller.identify",
-            "mode": "required",
-            "reason": "isolate descriptor tables by the opaque identity of the active guest",
-            "scope": {}
+            "id": "github.com/wago-org/wasi/p2",
+            "version": "^0.2.0"
           },
           {
-            "name": "host.import.define",
-            "mode": "required",
-            "reason": "define the selected WASI snapshot's host functions",
-            "scope": {
-              "modules": [
-                "wasi_snapshot_preview1"
-              ]
-            }
-          },
-          {
-            "name": "instance.close.observe",
-            "mode": "required",
-            "reason": "close the departed guest's files without receiving instance control",
-            "scope": {}
+            "id": "github.com/wago-org/wasi/unstable",
+            "version": "^0.2.0"
           }
-        ],
-        "configSchema": {
-          "additionalProperties": false,
-          "properties": {
-            "env": {
-              "items": {
-                "maxLength": 32768,
-                "minLength": 2,
-                "pattern": "^[^=\\u0000]+=[^\\u0000]*$",
-                "type": "string"
-              },
-              "maxItems": 4096,
-              "type": "array"
-            },
-            "maxOpenFiles": {
-              "maximum": 65536,
-              "minimum": 3,
-              "type": "integer"
-            },
-            "maxPollDurationMillis": {
-              "maximum": 60000,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "preopens": {
-              "additionalProperties": {
-                "maxLength": 4096,
-                "minLength": 1,
-                "type": "string"
-              },
-              "maxProperties": 64,
-              "propertyNames": {
-                "maxLength": 4096,
-                "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
-                "type": "string"
-              },
-              "type": "object"
-            },
-            "stderr": {
-              "enum": [
-                "inherit",
-                "discard"
-              ],
-              "type": "string"
-            },
-            "stdin": {
-              "enum": [
-                "inherit",
-                "eof"
-              ],
-              "type": "string"
-            },
-            "stdout": {
-              "enum": [
-                "inherit",
-                "discard"
-              ],
-              "type": "string"
-            }
-          },
-          "type": "object"
-        }
+        ]
       },
-      "definitionDigest": "sha256:31d33bde38aae88d61391956212da7e4a3c566c9d5af4517a3ce3956e73d907e"
+      "definitionDigest": "sha256:ae149894d9be47864385d4cf789a4f02a1fe8784abda7d50d7fcd66678809e59"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p1",
         "name": "WASI Preview 1",
-        "version": "0.1.3",
-        "description": "The standard wasi_snapshot_preview1 command ABI for core WebAssembly modules.",
+        "version": "0.2.0",
+        "description": "Preview 1 for core WebAssembly modules.",
         "stability": "stable",
         "compatibility": {
           "engines": {
@@ -241,15 +163,15 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:1e1b917e89787d202be5c3050b4d448ac77a0d59272c4e83f90b41906a4a6b85"
+      "definitionDigest": "sha256:dafdc5eda76bd255f4e4e6c269060f29cd57c5656c9348f764bcfd8e80394038"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p2",
         "name": "WASI Preview 2",
-        "version": "0.1.3",
-        "description": "WASI Preview 2 command-world execution with capability-scoped filesystems and fail-closed sockets.",
+        "version": "0.2.0",
+        "description": "Preview 2 for WebAssembly components.",
         "stability": "experimental",
         "compatibility": {
           "engines": {
@@ -348,15 +270,15 @@
           }
         ]
       },
-      "definitionDigest": "sha256:acc836433d90f624c903663ca4ebf10d646882a5d33d90dbd83f1d62ed95287d"
+      "definitionDigest": "sha256:f162850e6fd3f6a545b94201617ce494f0b019d36d47c6a4afcad0d2a777910d"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/unstable",
         "name": "WASI unstable",
-        "version": "0.1.3",
-        "description": "The deprecated pre-Preview 1 wasi_unstable command ABI for older core WebAssembly modules.",
+        "version": "0.2.0",
+        "description": "Legacy wasi_unstable compatibility.",
         "stability": "deprecated",
         "compatibility": {
           "engines": {
@@ -469,7 +391,7 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:21b8b43aac8909373fc4dc954da0d28814dd42a7a4a86811659f4c8af88be49e"
+      "definitionDigest": "sha256:9c2b9ca6edd10a4511be3f40dbda3beb3f0aac4fcc33e2e3544d85db5515dc29"
     }
   ]
 }

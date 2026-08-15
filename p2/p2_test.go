@@ -70,7 +70,7 @@ func componentConsumer(ref **wagoplugin.Ref[component.Service]) wago.PluginProvi
 
 func p2Consumer(ref **wagoplugin.Ref[p2.Service]) wago.PluginProvider {
 	d := testDefinition("example.com/tests/p2-consumer")
-	d.Requires = []wago.PluginRequirement{{ID: p2.ID, Version: "^0.1.0"}}
+	d.Requires = []wago.PluginRequirement{{ID: p2.ID, Version: "^0.2.0"}}
 	d.Consumes = []wago.ContractRequirement{{ID: p2.Contract.ID(), Major: p2.Contract.Major(), Mode: wago.ContractRequired}}
 	return wago.PluginProvider{Definition: d, New: func() wago.Plugin {
 		return pluginFunc(func(r *wago.Registrar) error {

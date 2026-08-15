@@ -3,12 +3,12 @@ package register
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	component "github.com/wago-org/component-model"
 	wago "github.com/wago-org/wago"
 	wagoplugin "github.com/wago-org/wago/plugin"
 	"github.com/wago-org/wasi"
@@ -69,8 +69,8 @@ func TestEachSnapshotLoadsWithExactAuthorities(t *testing.T) {
 	for _, provider := range Providers() {
 		provider := provider
 		t.Run(provider.Definition.ID, func(t *testing.T) {
-			if provider.Definition.ID == p2.ID {
-				t.Skip("covered with its required Component Model provider in p2 tests")
+			if provider.Definition.ID == wasi.ID || provider.Definition.ID == p2.ID {
+				t.Skip("bundle dependencies and Preview 2 are covered separately")
 			}
 			rt := wago.NewRuntime(wago.WithGuestArguments([]string{"guest", "one"}))
 			defer rt.Close()
@@ -98,7 +98,7 @@ func TestEachSnapshotLoadsWithExactAuthorities(t *testing.T) {
 }
 
 func TestNarrowedHostScopeFailsClosed(t *testing.T) {
-	provider := wasi.Provider()
+	provider := p1.Provider()
 	sel := selection(t, provider, nil)
 	for i := range sel.Grants {
 		if sel.Grants[i].Name == wago.AuthorityHostImportDefine {
@@ -113,25 +113,45 @@ func TestNarrowedHostScopeFailsClosed(t *testing.T) {
 	}
 }
 
-func TestRootAndP1ConflictAtomically(t *testing.T) {
-	root, versioned := wasi.Provider(), p1.Provider()
-	rt := wago.NewRuntime()
-	err := rt.LoadPlugins(context.Background(), wago.PluginSet{
-		Providers: []wago.PluginProvider{root, versioned},
-		Selections: []wago.PluginSelection{
-			selection(t, root, nil), selection(t, versioned, nil),
-		},
-	})
-	if !errors.Is(err, wago.ErrPluginConflict) {
-		t.Fatalf("LoadPlugins(root+p1) = %v, want plugin conflict", err)
+func TestRootBundlesEverySnapshot(t *testing.T) {
+	definition := wasi.Definition()
+	want := []wago.PluginRequirement{
+		{ID: p1.ID, Version: "^0.2.0"},
+		{ID: p2.ID, Version: "^0.2.0"},
+		{ID: unstable.ID, Version: "^0.2.0"},
 	}
-	if got := rt.Plugins(); len(got) != 0 {
-		t.Fatalf("failed transaction left plugins: %#v", got)
+	if !reflect.DeepEqual(definition.Requires, want) {
+		t.Fatalf("root requirements = %#v, want %#v", definition.Requires, want)
+	}
+	if len(definition.Authorities) != 0 || len(definition.ConfigSchema) != 0 {
+		t.Fatalf("root owns runtime policy: authorities=%#v config=%s", definition.Authorities, definition.ConfigSchema)
+	}
+}
+
+func TestCompleteBundleLoadsWithAllDependencies(t *testing.T) {
+	providers := append([]wago.PluginProvider{component.Provider()}, Providers()...)
+	selections := make([]wago.PluginSelection, 0, len(providers))
+	for _, provider := range providers {
+		sel := selection(t, provider, nil)
+		if provider.Definition.ID == p2.ID {
+			sel.Contracts = []wago.ContractBinding{{
+				ID: component.Contract.ID(), Major: component.Contract.Major(), Providers: []string{component.PluginID},
+			}}
+		}
+		selections = append(selections, sel)
+	}
+	rt := wago.NewRuntime(wago.WithGuestArguments([]string{"guest"}))
+	defer rt.Close()
+	if err := rt.LoadPlugins(context.Background(), wago.PluginSet{Providers: providers, Selections: selections}); err != nil {
+		t.Fatalf("LoadPlugins(complete bundle): %v", err)
+	}
+	if got := len(rt.Plugins()); got != len(providers) {
+		t.Fatalf("loaded plugins = %d, want %d", got, len(providers))
 	}
 }
 
 func TestStrictConfigValidation(t *testing.T) {
-	provider := wasi.Provider()
+	provider := p1.Provider()
 	tests := []json.RawMessage{
 		json.RawMessage(`null`),
 		json.RawMessage(`{"stdout":null}`),
@@ -156,7 +176,7 @@ func TestStrictConfigValidation(t *testing.T) {
 }
 
 func TestMissingPreopenRollsBackPluginTransaction(t *testing.T) {
-	provider := wasi.Provider()
+	provider := p1.Provider()
 	missing := filepath.Join(t.TempDir(), "missing")
 	config, err := json.Marshal(map[string]any{"preopens": map[string]string{"/data": missing}})
 	if err != nil {
@@ -180,9 +200,9 @@ func TestMissingPreopenRollsBackPluginTransaction(t *testing.T) {
 
 func TestDefinitionsDoNotShareMutableMetadata(t *testing.T) {
 	first, second := wasi.Definition(), wasi.Definition()
-	first.Authorities[0].Scope.Modules[0] = "mutated"
+	first.Requires[0].ID = "mutated.example/plugin"
 	first.Compatibility.Engines["wago"] = "never"
-	if reflect.DeepEqual(first, second) || second.Authorities[0].Scope.Modules[0] != wasi.Module || second.Compatibility.Engines["wago"] != ">=0.1.0" {
+	if reflect.DeepEqual(first, second) || second.Requires[0].ID != p1.ID || second.Compatibility.Engines["wago"] != ">=0.1.0" {
 		t.Fatal("Definition returned shared mutable metadata")
 	}
 }
@@ -226,7 +246,7 @@ func TestWASICoexistsWithPluginDependenciesAndContractCalls(t *testing.T) {
 			})
 		},
 	}
-	wasiProvider := wasi.Provider()
+	wasiProvider := p1.Provider()
 	consumerSelection := selection(t, consumer, nil)
 	consumerSelection.Contracts = []wago.ContractBinding{{
 		ID: pingContract.ID(), Major: pingContract.Major(), Providers: []string{producerID},

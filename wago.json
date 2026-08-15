@@ -2,9 +2,9 @@
   "$schema": "https://wago.sh/v1/schema.json",
   "package": {
     "module": "github.com/wago-org/wasi",
-    "version": "0.1.3",
+    "version": "0.2.0",
     "name": "WASI",
-    "description": "WASI Preview 1 host functions with bounded filesystems, stdio, argv, environment, clocks, random, polling, and process exit.",
+    "description": "Complete WASI support: Preview 1, Preview 2, and unstable compatibility.",
     "stability": "stable",
     "license": "Apache-2.0",
     "homepage": "https://github.com/wago-org/wasi",
@@ -16,12 +16,12 @@
       "wago": ">=0.1.0",
       "go": ">=1.22"
     },
-    "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64"],
+    "platforms": ["darwin/arm64", "linux/amd64"],
     "subpackages": [
       {
         "module": "github.com/wago-org/wasi/p1",
         "name": "WASI Preview 1",
-        "description": "The standard wasi_snapshot_preview1 command ABI for core WebAssembly modules.",
+        "description": "Preview 1 for core WebAssembly modules.",
         "stability": "stable",
         "tags": ["wasi", "wasi-preview1", "syscall"],
         "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64"]
@@ -29,7 +29,7 @@
       {
         "module": "github.com/wago-org/wasi/p2",
         "name": "WASI Preview 2",
-        "description": "WASI Preview 2 command-world execution with capability-scoped filesystems and fail-closed sockets.",
+        "description": "Preview 2 for WebAssembly components.",
         "stability": "experimental",
         "tags": ["wasi", "wasi-preview2", "component-model", "filesystem", "sockets", "stdio", "clocks", "random"],
         "platforms": ["darwin/arm64", "linux/amd64"]
@@ -37,7 +37,7 @@
       {
         "module": "github.com/wago-org/wasi/unstable",
         "name": "WASI unstable",
-        "description": "The deprecated pre-Preview 1 wasi_unstable command ABI for older core WebAssembly modules.",
+        "description": "Legacy wasi_unstable compatibility.",
         "stability": "deprecated",
         "tags": ["wasi", "wasi-unstable", "snapshot0"],
         "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64"]

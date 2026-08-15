@@ -32,7 +32,7 @@ func Definition() wago.PluginDefinition {
 	return core.Definition(
 		ID,
 		"WASI Preview 1",
-		"The standard wasi_snapshot_preview1 command ABI for core WebAssembly modules.",
+		"Preview 1 for core WebAssembly modules.",
 		wago.Stable,
 		Module,
 	)

@@ -32,7 +32,7 @@ func Definition() wago.PluginDefinition {
 	return core.Definition(
 		ID,
 		"WASI unstable",
-		"The deprecated pre-Preview 1 wasi_unstable command ABI for older core WebAssembly modules.",
+		"Legacy wasi_unstable compatibility.",
 		wago.Deprecated,
 		Module,
 	)
