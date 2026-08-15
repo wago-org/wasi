@@ -1,12 +1,14 @@
 <div align="center">
   <h1><code>wasi</code></h1>
-  <p>WASI Preview 1 for Wago, with explicit host access and guest permissions.</p>
+  <p>WASI Preview 1 and Preview 2 for Wago, with explicit host access and guest permissions.</p>
 </div>
 
-`github.com/wago-org/wasi` implements the `wasi_snapshot_preview1` command ABI:
-stdio, argv and environment, clocks, random, polling, process exit, and a
-capability-scoped filesystem. The deprecated `wasi_unstable` module is available
-for old toolchains. Preview 2 is reserved but not implemented.
+`github.com/wago-org/wasi` implements both command ABIs. Preview 1 provides the
+flat `wasi_snapshot_preview1` imports, including a capability-scoped filesystem.
+Preview 2 runs `wasi:cli/command` components through Wago's Component Model
+plugin with stdio/stdin, argv and environment, clocks, random, polling, terminal
+discovery, process exit, and an empty-by-default preopen list. The deprecated
+`wasi_unstable` module remains available for old toolchains.
 
 The plugin has no import-time side effects. Generated Wago runtimes call
 `register.Providers()` and activate only the exact providers recorded in
@@ -46,18 +48,45 @@ wago run command.wasm first second
 | --- | --- | --- |
 | `github.com/wago-org/wasi` | `wasi_snapshot_preview1` | Stable default |
 | `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | Stable, version-pinned package |
+| `github.com/wago-org/wasi/p2` | `wasi:cli/command` component world | Experimental |
 | `github.com/wago-org/wasi/unstable` | `wasi_unstable` | Deprecated compatibility package |
 
-The Go package `github.com/wago-org/wasi/p2` remains a source placeholder, not
-a plugin package. It is deliberately absent from `wago.json` and cannot be
-published or resolved until it has a real provider.
+Selecting `/p2` also selects `github.com/wago-org/component-model`; the reviewed
+lock graph binds the component runtime contract to the WASI command provider.
+Core-only Preview 1 users do not load the component runtime.
 
 The root and `/p1` providers expose the same Wasm module. Select one of them.
 Wago rejects a lock graph that selects both before either plugin starts.
 
+## Preview 2 Go API
+
+The Preview 2 provider publishes a typed command service. Embedders can also
+run against an already leased Component Model service directly:
+
+```go
+err := p2.Run(ctx, components, componentBytes, p2.Config{
+    Stdin:  strings.NewReader("input\n"),
+    Stdout: os.Stdout,
+    Stderr: os.Stderr,
+    Args:   []string{"first", "second"},
+    Env:    []string{"MODE=production"},
+    Preopens: map[string]string{
+        "/data": "/srv/my-component-data",
+    },
+})
+```
+
+The runner finds the component's versioned `wasi:cli/run` export, executes it,
+and closes the complete adapter graph before returning. A command error is
+reported as `*p2.ExitError`. Filesystem access is limited to configured
+preopens; descriptor-relative traversal rejects absolute paths, `..`, and
+symlinks. With no preopens, the guest sees no host filesystem. TCP, UDP, and
+name lookup are present but return WASI `access-denied` while networking is
+disabled, rather than trapping or using ambient host network access.
+
 ## Host authorities
 
-Every provider requests four required, non-inheriting Wago authorities:
+The Preview 1 providers request four required, non-inheriting Wago authorities:
 
 | Authority | Scope | Why |
 | --- | --- | --- |
@@ -68,6 +97,9 @@ Every provider requests four required, non-inheriting Wago authorities:
 
 There is no runtime, module, invocation, compiler, or managed-instance authority.
 Narrowing the import-module grant to an empty or different scope fails closed.
+
+Preview 2 requests only `host.arguments.read`; filesystem paths are supplied as
+explicit preopens in its reviewed configuration, and networking remains denied.
 
 WASI is a leaf plugin: it declares no plugin dependency and provides or consumes
 no typed cross-plugin contract. It can still share a runtime with contract-based
@@ -189,14 +221,21 @@ operation equivalent to Linux `AT_EMPTY_PATH`.
 
 ## Compatibility and testing
 
-The secure filesystem implementation currently supports `linux/amd64`,
-`darwin/amd64`, and `darwin/arm64`, Go 1.22 or newer, and Wago 0.1.0 or newer.
+Preview 1 supports `linux/amd64`, `darwin/amd64`, and `darwin/arm64`.
+Preview 2 supports `darwin/arm64` and `linux/amd64`. Both require Go 1.22 or
+newer and Wago 0.1.0 or newer.
 
 ```sh
 go test ./...
 go test -race ./...
 go vet ./...
 ```
+
+The checked-in integration fixtures are built from `p1/testdata/rust-smoke`
+and the Rust crates under `p2/testdata` with Rust's `wasm32-wasip1` and
+`wasm32-wasip2` targets. They exercise real Rust stdio, filesystem, socket
+denial, stdin, arguments, environment, random
+seeding, clocks, and polling on Wago rather than synthetic WAT alone.
 
 The hermetic suite covers the host boundary, descriptor rights and lifecycle,
 path confinement, malformed memory, polling, strict plugin configuration, exact
