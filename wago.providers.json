@@ -6,7 +6,7 @@
       "definition": {
         "id": "github.com/wago-org/wasi",
         "name": "WASI",
-        "version": "0.1.1",
+        "version": "0.1.2",
         "description": "WASI Preview 1 host functions with bounded filesystems, stdio, argv, environment, clocks, random, polling, and process exit.",
         "stability": "stable",
         "compatibility": {
@@ -120,14 +120,14 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:be710b678321ee669ac14f79d73f248fd02ef481afa091542289b9b4237d12ca"
+      "definitionDigest": "sha256:10bd92e5bb8327e89bac2fd00363c0e34f478c0d866a4ec3438651123e640978"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p1",
         "name": "WASI Preview 1",
-        "version": "0.1.1",
+        "version": "0.1.2",
         "description": "The standard wasi_snapshot_preview1 command ABI for core WebAssembly modules.",
         "stability": "stable",
         "compatibility": {
@@ -241,14 +241,14 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:3b14f1c089ceb7a0d5d1fc153f99c4dae7e5832538b4d2932e2c8de6dbe5123e"
+      "definitionDigest": "sha256:8106313ca2cb075f517b7006700ed0e79f8fc75fe009acbb73b6b597ba4d476c"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p2",
         "name": "WASI Preview 2",
-        "version": "0.1.1",
+        "version": "0.1.2",
         "description": "WASI Preview 2 command-world execution with capability-scoped filesystems and fail-closed sockets.",
         "stability": "experimental",
         "compatibility": {
@@ -348,14 +348,14 @@
           }
         ]
       },
-      "definitionDigest": "sha256:7e1288105f5eb6191e7a00ba8213e053b719cc8a9d750d2e7bfee372e91ebc03"
+      "definitionDigest": "sha256:8b85043f400b6a05b742b65534d4dcf7df349dabc9b0a8caee8e7aaad5d3bfd0"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/unstable",
         "name": "WASI unstable",
-        "version": "0.1.1",
+        "version": "0.1.2",
         "description": "The deprecated pre-Preview 1 wasi_unstable command ABI for older core WebAssembly modules.",
         "stability": "deprecated",
         "compatibility": {
@@ -469,7 +469,7 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:dcfd80c20d010e35689c21435c8691596f1ce8b1c49cdd9ef42e5d0eec951eb2"
+      "definitionDigest": "sha256:ea8a4ec637d471f4dfb0a4569b8d2c361aabf09295d150c27027be2f310f2357"
     }
   ]
 }

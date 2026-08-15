@@ -10,7 +10,7 @@ func Definition(id, name, description string, stability wago.Stability, module s
 	return wago.PluginDefinition{
 		ID:          id,
 		Name:        name,
-		Version:     "0.1.1",
+		Version:     "0.1.2",
 		Description: description,
 		Stability:   stability,
 		Compatibility: wago.Compatibility{
