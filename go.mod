@@ -9,4 +9,4 @@ require (
 	golang.org/x/sys v0.30.0
 )
 
-require github.com/wago-org/component-model v0.1.1-0.20260813181057-8fcf897b5fcc
+require github.com/wago-org/component-model v0.1.1
