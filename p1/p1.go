@@ -15,6 +15,7 @@ const (
 	CapFDWrite         = core.CapFDWrite
 	CapFDManage        = core.CapFDManage
 	CapPathRead        = core.CapPathRead
+	CapPathOpen        = core.CapPathOpen
 	CapPathWrite       = core.CapPathWrite
 	CapArgumentsRead   = core.CapArgumentsRead
 	CapEnvironmentRead = core.CapEnvironmentRead
@@ -27,13 +28,15 @@ const (
 )
 
 type Config = core.Config
+type Preopen = core.Preopen
+type ClockSource = core.ClockSource
 
 func Definition() wago.PluginDefinition {
 	return core.Definition(
 		ID,
 		"WASI Preview 1",
 		"Preview 1 for core WebAssembly modules.",
-		wago.Stable,
+		wago.Experimental,
 		Module,
 	)
 }

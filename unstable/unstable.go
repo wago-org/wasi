@@ -1,5 +1,5 @@
-// Package unstable provides the deprecated pre-Preview 1 wasi_unstable module
-// name for older toolchains. Its syscall behavior matches package p1.
+// Package unstable exposes the Preview 1 ABI under the deprecated
+// wasi_unstable import module name. It does not emulate earlier ABI snapshots.
 package unstable
 
 import (
@@ -15,6 +15,7 @@ const (
 	CapFDWrite         = core.CapFDWrite
 	CapFDManage        = core.CapFDManage
 	CapPathRead        = core.CapPathRead
+	CapPathOpen        = core.CapPathOpen
 	CapPathWrite       = core.CapPathWrite
 	CapArgumentsRead   = core.CapArgumentsRead
 	CapEnvironmentRead = core.CapEnvironmentRead
@@ -27,13 +28,15 @@ const (
 )
 
 type Config = core.Config
+type Preopen = core.Preopen
+type ClockSource = core.ClockSource
 
 func Definition() wago.PluginDefinition {
 	return core.Definition(
 		ID,
 		"WASI unstable",
-		"Legacy wasi_unstable compatibility.",
-		wago.Stable,
+		"Deprecated Preview 1 ABI alias using the wasi_unstable import module name.",
+		wago.Deprecated,
 		Module,
 	)
 }

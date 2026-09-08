@@ -15,7 +15,7 @@ func Definition(id, name, description string, stability wago.Stability, module s
 		Stability:   stability,
 		Compatibility: wago.Compatibility{
 			Engines:   map[string]string{"wago": ">=0.1.0", "go": ">=1.22"},
-			Platforms: []string{"darwin/amd64", "darwin/arm64", "linux/amd64"},
+			Platforms: []string{"darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64"},
 		},
 		Provenance: wago.PluginProvenance{
 			Homepage:   "https://github.com/wago-org/wasi",

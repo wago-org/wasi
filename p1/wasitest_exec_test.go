@@ -1,4 +1,4 @@
-//go:build linux && amd64 && !tinygo
+//go:build linux && !tinygo
 
 // This WASI-suite harness uses t.Skip/t.Fatal and os/filepath, none of which
 // behave under TinyGo, so it is excluded there (like the spec-suite harness).

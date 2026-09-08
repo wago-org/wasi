@@ -3,13 +3,18 @@
   <p>WASI Preview 1 and Preview 2 for Wago, with explicit host access and guest permissions.</p>
 </div>
 
-`github.com/wago-org/wasi` installs the complete package: Preview 1, Preview 2,
-and the unstable compatibility provider. Preview 1 provides the
+`github.com/wago-org/wasi` installs an experimental bundle containing Preview 1,
+the complete WASI 0.2 command import surface, and the unstable compatibility provider. Preview 1 provides the
 flat `wasi_snapshot_preview1` imports, including a capability-scoped filesystem.
 Preview 2 runs `wasi:cli/command` components through Wago's Component Model
-plugin with stdio/stdin, argv and environment, clocks, random, polling, terminal
-discovery, process exit, and an empty-by-default preopen list. The deprecated
-`wasi_unstable` module remains available for old toolchains.
+plugin. Networking imports are complete and fail closed with typed
+`access-denied` results. The deprecated `wasi_unstable` module is explicitly a
+Preview 1 ABI import-name alias, not a claim of compatibility with every
+historical unstable snapshot.
+
+All providers expose an empty guest environment by default. Configure `env`
+explicitly when a component needs selected values; the host process environment
+is never inherited implicitly.
 
 The plugin has no import-time side effects. Generated Wago runtimes call
 `register.Providers()` and activate only the exact providers recorded in
@@ -36,7 +41,7 @@ Configure a bounded preopen and keep stdout/stderr attached to the process:
 
 ```sh
 wago plugin config github.com/wago-org/wasi/p1 \
-  '{"preopens":{"/data":"/srv/guest-data"},"maxOpenFiles":256,"maxPollDurationMillis":1000}'
+  '{"mounts":[{"guest":"/data","host":"/srv/guest-data","read":true}],"maxOpenFiles":256}'
 ```
 
 Then run a command module. The module path becomes `argv[0]`; trailing values are
@@ -50,10 +55,10 @@ wago run command.wasm first second
 
 | Plugin ID | Wasm import module | Status |
 | --- | --- | --- |
-| `github.com/wago-org/wasi` | All providers below | Complete package |
-| `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | Stable |
-| `github.com/wago-org/wasi/p2` | `wasi:cli/command` component world | Experimental |
-| `github.com/wago-org/wasi/unstable` | `wasi_unstable` | Stable legacy compatibility |
+| `github.com/wago-org/wasi` | All providers below | Experimental bundle |
+| `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | Experimental (Beta target) |
+| `github.com/wago-org/wasi/p2` | WASI 0.2 `wasi:cli/command` imports | Experimental |
+| `github.com/wago-org/wasi/unstable` | Preview 1 ABI under `wasi_unstable` | Deprecated alias |
 
 The root selects all three provider paths. Selecting only `/p2` also selects
 `github.com/wago-org/component-model`; the reviewed
@@ -72,9 +77,10 @@ err := p2.Run(ctx, components, componentBytes, p2.Config{
     Stderr: os.Stderr,
     Args:   []string{"first", "second"},
     Env:    []string{"MODE=production"},
-    Preopens: map[string]string{
-        "/data": "/srv/my-component-data",
-    },
+    Mounts: []p2.Preopen{{
+        GuestPath: "/data", HostPath: "/srv/my-component-data",
+        Read: true, Write: true, MutateDirectory: true,
+    }},
 })
 ```
 
@@ -120,7 +126,8 @@ every import with one of these narrower capabilities:
 | `wasi.fd.write` | Stream and descriptor writes |
 | `wasi.fd.manage` | Descriptor close, seek, stat, rights, and renumbering |
 | `wasi.path.read` | Path metadata and symlink reads below preopens |
-| `wasi.path.write` | Path open/create/mutation below preopens |
+| `wasi.path.open` | Open paths with descriptor rights bounded by the configured mount |
+| `wasi.path.write` | Path creation and mutation below preopens |
 | `wasi.arguments.read` | Guest argv |
 | `wasi.environment.read` | Guest environment |
 | `wasi.clock.read` | Clock resolution and time |
@@ -157,10 +164,17 @@ outside the documented ranges are rejected before the provider factory runs.
 | --- | --- | --- |
 | `stdin` | `"inherit"` or `"eof"` | `"inherit"` |
 | `stdout`, `stderr` | `"inherit"` or `"discard"` | `"inherit"` |
-| `env` | Up to 4096 `KEY=VALUE` strings | Host process environment |
-| `preopens` | Up to 64 clean absolute guest paths mapped to clean absolute host directories | None |
+| `env` | Up to 4096 explicit `KEY=VALUE` strings | Empty |
+| `preopens` | Legacy map of guest paths to host directories with full read/write/mutation rights | None |
+| `mounts` | Up to 64 `{guest,host,read,write,mutateDirectory}` rights-aware preopens | None |
 | `maxOpenFiles` | 3 to 65536, including stdio and preopens | 1024 |
-| `maxPollDurationMillis` | 1 to 60000 | 1000 |
+| `maxIOVecs` | 1 to 65536 Preview 1 iovecs per call | 1024 |
+| `maxSubscriptionsPerPoll` | 1 to 65536 Preview 1 subscriptions per call | 1024 |
+
+Preview 2 accepts a nested `limits` object with `maxDescriptors`, `maxStreams`,
+`maxDirectoryStreams`, `maxPollables`, `maxPollInputs`,
+`maxDirectoryEntryBytes`, and `maxAggregateBufferBytes`. Defaults are 256, 256,
+64, 1024, 1024, 1 MiB, and 16 MiB respectively.
 
 Configured preopens are opened during plugin startup. A missing path, a regular
 file in place of a directory, or an exhausted descriptor bound fails startup and
@@ -223,9 +237,9 @@ operation equivalent to Linux `AT_EMPTY_PATH`.
 
 ## Compatibility and testing
 
-Preview 1 and unstable support `linux/amd64`, `darwin/amd64`, and
+Preview 1 and unstable support `linux/amd64`, `linux/arm64`, `darwin/amd64`, and
 `darwin/arm64`. Preview 2, and therefore the complete root bundle, support
-`darwin/arm64` and `linux/amd64`. All require Go 1.22 or newer and Wago 0.1.0 or
+`darwin/arm64`, `linux/amd64`, and `linux/arm64`. All require Go 1.22 or newer and Wago 0.1.0 or
 newer.
 
 ```sh
@@ -242,8 +256,8 @@ seeding, clocks, and polling on Wago rather than synthetic WAT alone.
 
 The hermetic suite covers the host boundary, descriptor rights and lifecycle,
 path confinement, malformed memory, polling, strict plugin configuration, exact
-authority grants, bundle dependencies, and the explicit catalog. Optional
-corpus and wasi-testsuite harnesses remain documented in the test source.
+authority grants, bundle dependencies, and the explicit catalog. CI additionally
+pins the official Preview 1 testsuite and WASI 0.2 WIT revision as release gates.
 
 ## License
 

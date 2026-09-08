@@ -78,3 +78,19 @@ func linkAtFollow(_ *fdEntry, _ string, _ *os.File, _ string) uint64 {
 	// descriptor. Reject rather than reintroduce a path race after validation.
 	return wasiENotsup
 }
+
+func allocateFile(file *os.File, offset, length int64) error {
+	store := &unix.Fstore_t{Flags: unix.F_ALLOCATEALL, Posmode: unix.F_PEOFPOSMODE, Offset: offset, Length: length}
+	if err := unix.FcntlFstore(file.Fd(), unix.F_PREALLOCATE, store); err != nil {
+		return err
+	}
+	end := offset + length
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() < end {
+		return file.Truncate(end)
+	}
+	return nil
+}

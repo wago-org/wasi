@@ -1,4 +1,4 @@
-// Package wasi provides the complete WASI provider bundle for Wago.
+// Package wasi provides an experimental WASI provider bundle for Wago.
 //
 // Provider selects the Preview 1, Preview 2, and unstable compatibility
 // providers. Embedders that intentionally bypass plugin policy can still use
@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	// ID is the canonical complete-package plugin ID.
+	// ID is the canonical bundle plugin ID.
 	ID = "github.com/wago-org/wasi"
 	// Module is the standard Preview 1 Wasm import module.
 	Module = "wasi_snapshot_preview1"
@@ -20,6 +20,7 @@ const (
 	CapFDWrite         = core.CapFDWrite
 	CapFDManage        = core.CapFDManage
 	CapPathRead        = core.CapPathRead
+	CapPathOpen        = core.CapPathOpen
 	CapPathWrite       = core.CapPathWrite
 	CapArgumentsRead   = core.CapArgumentsRead
 	CapEnvironmentRead = core.CapEnvironmentRead
@@ -34,6 +35,8 @@ const (
 // Config configures the raw Imports path. Plugin configuration is strict JSON
 // recorded in Wago's reviewed lock graph; see README.md for its schema.
 type Config = core.Config
+type Preopen = core.Preopen
+type ClockSource = core.ClockSource
 
 // Definition returns fresh immutable metadata for the complete WASI bundle.
 func Definition() wago.PluginDefinition {
@@ -41,11 +44,11 @@ func Definition() wago.PluginDefinition {
 		ID:          ID,
 		Name:        "WASI",
 		Version:     "0.2.1",
-		Description: "Complete WASI support: Preview 1, Preview 2, and unstable compatibility.",
-		Stability:   wago.Stable,
+		Description: "Experimental bundle of Preview 1, WASI 0.2 command imports, and a deprecated unstable alias.",
+		Stability:   wago.Experimental,
 		Compatibility: wago.Compatibility{
 			Engines:   map[string]string{"wago": ">=0.1.0", "go": ">=1.22"},
-			Platforms: []string{"darwin/arm64", "linux/amd64"},
+			Platforms: []string{"darwin/arm64", "linux/amd64", "linux/arm64"},
 		},
 		Provenance: wago.PluginProvenance{
 			Homepage:   "https://github.com/wago-org/wasi",
@@ -65,7 +68,7 @@ type bundlePlugin struct{}
 
 func (bundlePlugin) Register(*wago.Registrar) error { return nil }
 
-// Provider returns the complete package's side-effect-free catalog entry.
+// Provider returns the bundle's side-effect-free catalog entry.
 func Provider() wago.PluginProvider {
 	return wago.PluginProvider{
 		Definition: Definition(),

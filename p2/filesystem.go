@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
+	"time"
 
 	component "github.com/wago-org/component-model"
 	"golang.org/x/sys/unix"
@@ -76,26 +77,33 @@ const (
 type filesystemMount struct {
 	guest string
 	host  string
+	flags uint32
+	base  *os.File
 }
 
 type descriptorNode struct {
-	file               *os.File
-	mount              int
-	readable, writable bool
-	isDir              bool
+	file   *os.File
+	mount  int
+	flags  uint32
+	isDir  bool
+	append *appendTarget
+}
+
+type appendTarget struct {
+	mu sync.Mutex
 }
 
 type fileStream struct {
-	mu   sync.Mutex
-	file *os.File
-	pos  int64
-	read bool
+	mu     sync.Mutex
+	file   *os.File
+	pos    int64
+	read   bool
+	append *appendTarget
 }
 
 type directoryStream struct {
-	mu      sync.Mutex
-	entries []fs.DirEntry
-	pos     int
+	mu   sync.Mutex
+	file *os.File
 }
 
 type filesystemState struct {
@@ -108,9 +116,45 @@ type filesystemState struct {
 	nextDesc   uint32
 	nextStream uint32
 	nextDir    uint32
+	limits     Limits
+	wall       func() time.Time
+	ioState    *hostState
 }
 
-func newFilesystem(preopens map[string]string) *filesystemState {
+func requireDirectoryMutation(n *descriptorNode) error {
+	if n == nil || n.flags&(1<<5) == 0 {
+		return unix.EROFS
+	}
+	return nil
+}
+
+func validateChildFlags(base *descriptorNode, requested, openFlags uint32) error {
+	if requested&^uint32(0x3f) != 0 {
+		return unix.EINVAL
+	}
+	if requested&1 != 0 && base.flags&1 == 0 || requested&2 != 0 && base.flags&2 == 0 || requested&(1<<5) != 0 && base.flags&(1<<5) == 0 {
+		return unix.EROFS
+	}
+	if requested&0x1c != 0 && base.flags&2 == 0 {
+		return unix.EROFS
+	}
+	if openFlags&(1<<3) != 0 && requested&2 == 0 {
+		return unix.EINVAL
+	}
+	if openFlags&(1|1<<3) != 0 || requested&2 != 0 {
+		return requireDirectoryMutation(base)
+	}
+	return nil
+}
+
+func checkedOffset(offset uint64) (int64, error) {
+	if offset > math.MaxInt64 {
+		return 0, unix.EOVERFLOW
+	}
+	return int64(offset), nil
+}
+
+func newFilesystem(preopens map[string]string, configured []Preopen, limits Limits) *filesystemState {
 	guestPaths := make([]string, 0, len(preopens))
 	for guest := range preopens {
 		guestPaths = append(guestPaths, guest)
@@ -119,18 +163,70 @@ func newFilesystem(preopens map[string]string) *filesystemState {
 	mounts := make([]filesystemMount, 0, len(guestPaths))
 	for _, guest := range guestPaths {
 		clean := path.Clean("/" + strings.TrimPrefix(guest, "/"))
-		mounts = append(mounts, filesystemMount{guest: clean, host: preopens[guest]})
+		mounts = append(mounts, filesystemMount{guest: clean, host: preopens[guest], flags: 1 | 2 | 1<<5})
 	}
-	return &filesystemState{mounts: mounts, descs: map[uint32]*descriptorNode{}, streams: map[uint32]*fileStream{}, dirs: map[uint32]*directoryStream{}, nextDesc: 1, nextStream: fileStreamRepMin, nextDir: 1}
+	for _, mount := range configured {
+		var flags uint32
+		if mount.Read {
+			flags |= 1
+		}
+		if mount.Write {
+			flags |= 2
+		}
+		if mount.MutateDirectory {
+			flags |= 1 << 5
+		}
+		mounts = append(mounts, filesystemMount{guest: mount.GuestPath, host: mount.HostPath, flags: flags})
+	}
+	sort.Slice(mounts, func(i, j int) bool { return mounts[i].guest < mounts[j].guest })
+	return &filesystemState{mounts: mounts, descs: map[uint32]*descriptorNode{}, streams: map[uint32]*fileStream{}, dirs: map[uint32]*directoryStream{}, nextDesc: 1, nextStream: fileStreamRepMin, nextDir: 1, limits: limits.normalized(), wall: time.Now}
 }
 
-func (s *filesystemState) addDesc(n *descriptorNode) uint32 {
+func prepareFilesystem(preopens map[string]string, configured []Preopen, limits Limits) (*filesystemState, error) {
+	s := newFilesystem(preopens, configured, limits)
+	for i := range s.mounts {
+		mount := &s.mounts[i]
+		f, err := os.Open(mount.host)
+		if err != nil {
+			s.closeMounts()
+			return nil, fmt.Errorf("wasi p2: preopen %q: %w", mount.guest, err)
+		}
+		info, err := f.Stat()
+		if err != nil || !info.IsDir() {
+			f.Close()
+			s.closeMounts()
+			if err != nil {
+				return nil, fmt.Errorf("wasi p2: preopen %q: %w", mount.guest, err)
+			}
+			return nil, fmt.Errorf("wasi p2: preopen %q host path is not a directory", mount.guest)
+		}
+		mount.base = f
+	}
+	return s, nil
+}
+
+func (s *filesystemState) closeMounts() {
+	for i := range s.mounts {
+		if s.mounts[i].base != nil {
+			_ = s.mounts[i].base.Close()
+			s.mounts[i].base = nil
+		}
+	}
+}
+
+func (s *filesystemState) addDesc(n *descriptorNode) (uint32, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if uint32(len(s.descs)) >= s.limits.MaxDescriptors {
+		return 0, unix.EMFILE
+	}
+	if !n.isDir && n.append == nil {
+		n.append = &appendTarget{}
+	}
 	rep := s.nextDesc
 	s.nextDesc++
 	s.descs[rep] = n
-	return rep
+	return rep, nil
 }
 
 func (s *filesystemState) desc(rep uint32) (*descriptorNode, error) {
@@ -143,13 +239,16 @@ func (s *filesystemState) desc(rep uint32) (*descriptorNode, error) {
 	return n, nil
 }
 
-func (s *filesystemState) addStream(n *fileStream) uint32 {
+func (s *filesystemState) addStream(n *fileStream) (uint32, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if uint32(len(s.streams)) >= s.limits.MaxStreams {
+		return 0, unix.EMFILE
+	}
 	rep := s.nextStream
 	s.nextStream++
 	s.streams[rep] = n
-	return rep
+	return rep, nil
 }
 
 func (s *filesystemState) output(rep uint32) io.Writer {
@@ -162,9 +261,28 @@ func (s *filesystemState) output(rep uint32) io.Writer {
 	return stream
 }
 
+func (s *filesystemState) input(rep uint32) io.Reader {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stream := s.streams[rep]
+	if stream == nil || !stream.read {
+		return nil
+	}
+	return stream.file
+}
+
 func (s *fileStream) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.append != nil {
+		s.append.mu.Lock()
+		defer s.append.mu.Unlock()
+		info, err := s.file.Stat()
+		if err != nil {
+			return 0, err
+		}
+		return s.file.WriteAt(p, info.Size())
+	}
 	n, err := s.file.WriteAt(p, s.pos)
 	s.pos += int64(n)
 	return n, err
@@ -177,8 +295,8 @@ func (s *filesystemState) readStream(rep uint32, length uint64) ([]component.Val
 	if stream == nil || !stream.read {
 		return nil, fmt.Errorf("input-stream.read: unknown self %d", rep)
 	}
-	if length > maxIOSize {
-		length = maxIOSize
+	if length > s.limits.ioLimit() {
+		length = s.limits.ioLimit()
 	}
 	if length == 0 {
 		return []component.Value{component.ResultValue{Payload: []byte{}}}, nil
@@ -275,8 +393,28 @@ func fsError(err error) uint32 {
 		return fsErrAccess
 	}
 	switch {
+	case errors.Is(err, unix.EAGAIN):
+		return fsErrWouldBlock
+	case errors.Is(err, unix.EALREADY):
+		return fsErrAlready
+	case errors.Is(err, unix.EBADF):
+		return fsErrBadDescriptor
+	case errors.Is(err, unix.EBUSY):
+		return fsErrBusy
+	case errors.Is(err, unix.EDEADLK):
+		return fsErrDeadlock
+	case errors.Is(err, unix.EDQUOT):
+		return fsErrQuota
 	case errors.Is(err, unix.EEXIST):
 		return fsErrExist
+	case errors.Is(err, unix.EFBIG):
+		return fsErrFileTooLarge
+	case errors.Is(err, unix.EILSEQ):
+		return fsErrIllegalByteSequence
+	case errors.Is(err, unix.EINPROGRESS):
+		return fsErrInProgress
+	case errors.Is(err, unix.EINTR):
+		return fsErrInterrupted
 	case errors.Is(err, unix.EISDIR):
 		return fsErrIsDirectory
 	case errors.Is(err, unix.ENOTDIR):
@@ -287,14 +425,40 @@ func fsError(err error) uint32 {
 		return fsErrLoop
 	case errors.Is(err, unix.ENAMETOOLONG):
 		return fsErrNameTooLong
+	case errors.Is(err, unix.ENODEV):
+		return fsErrNoDevice
+	case errors.Is(err, unix.ENOLCK):
+		return fsErrNoLock
+	case errors.Is(err, unix.ENOMEM):
+		return fsErrInsufficientMemory
+	case errors.Is(err, unix.ENOSPC):
+		return fsErrInsufficientSpace
+	case errors.Is(err, unix.ENOTRECOVERABLE):
+		return fsErrNotRecoverable
+	case errors.Is(err, unix.ENOTSUP), errors.Is(err, unix.ENOSYS):
+		return fsErrUnsupported
+	case errors.Is(err, unix.ENOTTY):
+		return fsErrNoTTY
+	case errors.Is(err, unix.ENXIO):
+		return fsErrNoSuchDevice
 	case errors.Is(err, unix.EPERM):
 		return fsErrNotPermitted
 	case errors.Is(err, unix.EROFS):
 		return fsErrReadOnly
 	case errors.Is(err, unix.EXDEV):
 		return fsErrCrossDevice
+	case errors.Is(err, unix.EPIPE):
+		return fsErrPipe
+	case errors.Is(err, unix.ESPIPE):
+		return fsErrInvalidSeek
+	case errors.Is(err, unix.ETXTBSY):
+		return fsErrTextFileBusy
 	case errors.Is(err, unix.EINVAL):
 		return fsErrInvalid
+	case errors.Is(err, unix.EOVERFLOW):
+		return fsErrOverflow
+	case errors.Is(err, unix.EMFILE), errors.Is(err, unix.ENFILE):
+		return fsErrQuota
 	default:
 		return fsErrIO
 	}
@@ -328,21 +492,71 @@ func descriptorKind(info fs.FileInfo) uint32 {
 }
 
 func statValue(info fs.FileInfo) component.Value {
-	return []component.Value{descriptorKind(info), uint64(1), uint64(info.Size()), nil, nil, nil}
+	nlink, atime, mtime, ctime, _, _ := hostStat(info)
+	return []component.Value{descriptorKind(info), nlink, uint64(info.Size()), datetime(atime), datetime(mtime), datetime(ctime)}
 }
 
 func metadataHash(info fs.FileInfo) component.Value {
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		return []component.Value{uint64(st.Ino), uint64(st.Dev)}
+	_, _, _, _, dev, ino := hostStat(info)
+	if dev != 0 || ino != 0 {
+		return []component.Value{ino, dev}
 	}
 	return []component.Value{uint64(info.ModTime().UnixNano()), uint64(info.Size())}
+}
+
+func datetime(t time.Time) component.Value {
+	if t.Unix() < 0 {
+		return nil
+	}
+	return []component.Value{uint64(t.Unix()), uint32(t.Nanosecond())}
+}
+
+func requestedTimes(access, modification component.Value, info fs.FileInfo, now func() time.Time) (time.Time, time.Time, bool, error) {
+	_, currentAccess, currentModification, _, _, _ := hostStat(info)
+	parse := func(v component.Value, current time.Time) (time.Time, bool, error) {
+		x, ok := v.(component.VariantValue)
+		if !ok {
+			return time.Time{}, false, fmt.Errorf("new-timestamp is %T", v)
+		}
+		switch x.Disc {
+		case 0:
+			return current, false, nil
+		case 1:
+			return now(), true, nil
+		case 2:
+			r, ok := x.Payload.([]component.Value)
+			if !ok || len(r) != 2 {
+				return time.Time{}, false, unix.EINVAL
+			}
+			seconds, ok1 := r[0].(uint64)
+			nanos, ok2 := r[1].(uint32)
+			if !ok1 || !ok2 || seconds > math.MaxInt64 || nanos >= 1e9 {
+				return time.Time{}, false, unix.EOVERFLOW
+			}
+			return time.Unix(int64(seconds), int64(nanos)), true, nil
+		default:
+			return time.Time{}, false, unix.EINVAL
+		}
+	}
+	at, ac, e := parse(access, currentAccess)
+	if e != nil {
+		return time.Time{}, time.Time{}, false, e
+	}
+	mt, mc, e := parse(modification, currentModification)
+	return at, mt, ac || mc, e
 }
 
 func filesystemOptions(s *filesystemState) []component.Option {
 	getDirectories := func(context.Context, []component.Value) ([]component.Value, error) {
 		out := make([]component.Value, 0, len(s.mounts))
 		for i, mount := range s.mounts {
-			f, err := os.Open(mount.host)
+			var f *os.File
+			var err error
+			if mount.base != nil {
+				f, err = dupFile(mount.base)
+			} else {
+				f, err = os.Open(mount.host)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("preopen %q: %w", mount.guest, err)
 			}
@@ -351,14 +565,31 @@ func filesystemOptions(s *filesystemState) []component.Option {
 				f.Close()
 				return nil, fmt.Errorf("preopen %q is not a directory", mount.guest)
 			}
-			rep := s.addDesc(&descriptorNode{file: f, mount: i, readable: true, isDir: true})
+			rep, addErr := s.addDesc(&descriptorNode{file: f, mount: i, flags: mount.flags, isDir: true})
+			if addErr != nil {
+				f.Close()
+				return nil, addErr
+			}
 			h := s.resources.NewOwn(descriptorResource, rep)
 			out = append(out, []component.Value{h, mount.guest})
 		}
 		return []component.Value{out}, nil
 	}
-	filesystemErrorCode := func(context.Context, []component.Value) ([]component.Value, error) {
-		return []component.Value{nil}, nil
+	filesystemErrorCode := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		if len(args) != 1 || s.ioState == nil {
+			return []component.Value{nil}, nil
+		}
+		rep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("filesystem-error-code: invalid error resource")
+		}
+		s.ioState.mu.Lock()
+		value, exists := s.ioState.errors[rep]
+		s.ioState.mu.Unlock()
+		if !exists {
+			return []component.Value{nil}, nil
+		}
+		return []component.Value{fsError(value.err)}, nil
 	}
 	openAt := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		n, err := s.desc(args[0].(uint32))
@@ -369,18 +600,19 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return fsFailure(unix.ENOTDIR), nil
 		}
 		openFlags, descFlags := args[3].(uint32), args[4].(uint32)
+		if e := validateChildFlags(n, descFlags, openFlags); e != nil {
+			return fsFailure(e), nil
+		}
 		readable, writable := descFlags&1 != 0, descFlags&2 != 0
 		flags := unix.O_RDONLY
 		if readable && writable {
 			flags = unix.O_RDWR
 		} else if writable {
 			flags = unix.O_WRONLY
-		} else {
-			readable = true
 		}
 		if openFlags&(1<<1) != 0 {
 			flags = unix.O_RDONLY | unix.O_DIRECTORY
-			readable, writable = true, false
+			writable = false
 		}
 		if openFlags&1 != 0 {
 			flags |= unix.O_CREAT
@@ -400,7 +632,11 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			f.Close()
 			return fsFailure(err), nil
 		}
-		rep := s.addDesc(&descriptorNode{file: f, mount: n.mount, readable: readable, writable: writable, isDir: info.IsDir()})
+		rep, addErr := s.addDesc(&descriptorNode{file: f, mount: n.mount, flags: descFlags, isDir: info.IsDir()})
+		if addErr != nil {
+			f.Close()
+			return fsFailure(addErr), nil
+		}
 		return ok(s.resources.NewOwn(descriptorResource, rep)), nil
 	}
 	getType := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -419,17 +655,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		var f uint32
-		if n.readable {
-			f |= 1
-		}
-		if n.writable {
-			f |= 2
-		}
-		if n.isDir {
-			f |= 1 << 5
-		}
-		return ok(f), nil
+		return ok(n.flags), nil
 	}
 	stat := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		n, e := s.desc(args[0].(uint32))
@@ -490,14 +716,23 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		if !n.readable {
+		if n.flags&1 == 0 {
 			return fsFailure(unix.EBADF), nil
 		}
 		f, e := dupFile(n.file)
 		if e != nil {
 			return fsFailure(e), nil
 		}
-		rep := s.addStream(&fileStream{file: f, pos: int64(args[1].(uint64)), read: true})
+		offset, e := checkedOffset(args[1].(uint64))
+		if e != nil {
+			f.Close()
+			return fsFailure(e), nil
+		}
+		rep, addErr := s.addStream(&fileStream{file: f, pos: offset, read: true})
+		if addErr != nil {
+			f.Close()
+			return fsFailure(addErr), nil
+		}
 		return ok(s.resources.NewOwn(inputStreamResource, rep)), nil
 	}
 	writeViaStream := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -505,14 +740,23 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		if !n.writable {
+		if n.flags&2 == 0 {
 			return fsFailure(unix.EBADF), nil
 		}
 		f, e := dupFile(n.file)
 		if e != nil {
 			return fsFailure(e), nil
 		}
-		rep := s.addStream(&fileStream{file: f, pos: int64(args[1].(uint64))})
+		offset, e := checkedOffset(args[1].(uint64))
+		if e != nil {
+			f.Close()
+			return fsFailure(e), nil
+		}
+		rep, addErr := s.addStream(&fileStream{file: f, pos: offset})
+		if addErr != nil {
+			f.Close()
+			return fsFailure(addErr), nil
+		}
 		return ok(s.resources.NewOwn(outputStreamResource, rep)), nil
 	}
 	appendViaStream := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -520,18 +764,18 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		if !n.writable {
+		if n.flags&2 == 0 {
 			return fsFailure(unix.EBADF), nil
-		}
-		i, e := n.file.Stat()
-		if e != nil {
-			return fsFailure(e), nil
 		}
 		f, e := dupFile(n.file)
 		if e != nil {
 			return fsFailure(e), nil
 		}
-		rep := s.addStream(&fileStream{file: f, pos: i.Size()})
+		rep, addErr := s.addStream(&fileStream{file: f, append: n.append})
+		if addErr != nil {
+			f.Close()
+			return fsFailure(addErr), nil
+		}
 		return ok(s.resources.NewOwn(outputStreamResource, rep)), nil
 	}
 	readDirectory := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -546,15 +790,15 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return fsFailure(e), nil
 		}
-		entries, e := f.ReadDir(-1)
-		f.Close()
-		if e != nil {
-			return fsFailure(e), nil
-		}
 		s.mu.Lock()
+		if uint32(len(s.dirs)) >= s.limits.MaxDirectoryStreams {
+			s.mu.Unlock()
+			f.Close()
+			return fsFailure(unix.EMFILE), nil
+		}
 		rep := s.nextDir
 		s.nextDir++
-		s.dirs[rep] = &directoryStream{entries: entries}
+		s.dirs[rep] = &directoryStream{file: f}
 		s.mu.Unlock()
 		return ok(s.resources.NewOwn(directoryStreamResource, rep)), nil
 	}
@@ -567,11 +811,17 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		if d.pos == len(d.entries) {
+		entries, readErr := d.file.ReadDir(1)
+		if errors.Is(readErr, io.EOF) || len(entries) == 0 {
 			return ok(nil), nil
 		}
-		entry := d.entries[d.pos]
-		d.pos++
+		if readErr != nil {
+			return fsFailure(readErr), nil
+		}
+		entry := entries[0]
+		if uint64(len(entry.Name())) > s.limits.MaxDirectoryEntryBytes {
+			return fsFailure(unix.ENAMETOOLONG), nil
+		}
 		i, e := entry.Info()
 		if e != nil {
 			return fsFailure(e), nil
@@ -582,6 +832,9 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		n, e := s.desc(args[0].(uint32))
 		if e != nil {
 			return nil, e
+		}
+		if n.flags&(1<<5) == 0 {
+			return fsFailure(unix.EROFS), nil
 		}
 		p, name, e := parentUnder(n.file, args[1].(string))
 		if e != nil {
@@ -599,6 +852,9 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			n, e := s.desc(args[0].(uint32))
 			if e != nil {
 				return nil, e
+			}
+			if n.flags&(1<<5) == 0 {
+				return fsFailure(unix.EROFS), nil
 			}
 			p, name, e := parentUnder(n.file, args[1].(string))
 			if e != nil {
@@ -624,6 +880,9 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		b, e := s.desc(args[2].(uint32))
 		if e != nil {
 			return nil, e
+		}
+		if a.flags&(1<<5) == 0 || b.flags&(1<<5) == 0 {
+			return fsFailure(unix.EROFS), nil
 		}
 		if a.mount != b.mount {
 			return fsFailure(unix.EXDEV), nil
@@ -654,6 +913,229 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		}
 		return ok(nil), nil
 	}
+	syncData := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		n, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		if e = syncFileData(n.file); e != nil {
+			return fsFailure(e), nil
+		}
+		return ok(nil), nil
+	}
+	advise := func(context.Context, []component.Value) ([]component.Value, error) {
+		return fsFailure(unix.ENOTSUP), nil
+	}
+	setSize := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		n, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		if n.flags&2 == 0 {
+			return fsFailure(unix.EROFS), nil
+		}
+		size, e := checkedOffset(args[1].(uint64))
+		if e == nil {
+			e = n.file.Truncate(size)
+		}
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		return ok(nil), nil
+	}
+	directRead := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		n, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		if n.flags&1 == 0 {
+			return fsFailure(unix.EBADF), nil
+		}
+		length := args[1].(uint64)
+		if length > s.limits.ioLimit() {
+			length = s.limits.ioLimit()
+		}
+		offset, e := checkedOffset(args[2].(uint64))
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		buf := make([]byte, int(length))
+		got, readErr := n.file.ReadAt(buf, offset)
+		eof := errors.Is(readErr, io.EOF)
+		if readErr != nil && !eof {
+			return fsFailure(readErr), nil
+		}
+		return ok([]component.Value{buf[:got], eof}), nil
+	}
+	directWrite := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		n, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		if n.flags&2 == 0 {
+			return fsFailure(unix.EROFS), nil
+		}
+		buf, e := bytesValue(args[1])
+		if e != nil {
+			return nil, e
+		}
+		offset, e := checkedOffset(args[2].(uint64))
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		got, e := n.file.WriteAt(buf, offset)
+		if e == nil && got != len(buf) {
+			e = io.ErrShortWrite
+		}
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		return ok(uint64(got)), nil
+	}
+	setTimes := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		n, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		if n.flags&2 == 0 {
+			return fsFailure(unix.EROFS), nil
+		}
+		info, e := n.file.Stat()
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		at, mt, _, e := requestedTimes(args[1], args[2], info, s.wall)
+		if e == nil {
+			e = setFileTimes(n.file, at, mt)
+		}
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		return ok(nil), nil
+	}
+	setTimesAt := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		n, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		if e = requireDirectoryMutation(n); e != nil {
+			return fsFailure(e), nil
+		}
+		f, e := openUnder(n.file, args[2].(string), unix.O_RDONLY, 0)
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		defer f.Close()
+		info, e := f.Stat()
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		at, mt, _, e := requestedTimes(args[3], args[4], info, s.wall)
+		if e == nil {
+			e = setFileTimes(f, at, mt)
+		}
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		return ok(nil), nil
+	}
+	linkAt := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		a, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		b, e := s.desc(args[3].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		if e = requireDirectoryMutation(b); e != nil {
+			return fsFailure(e), nil
+		}
+		if a.mount != b.mount {
+			return fsFailure(unix.EXDEV), nil
+		}
+		if args[1].(uint32)&1 != 0 {
+			return fsFailure(unix.ENOTSUP), nil
+		}
+		ap, an, e := parentUnder(a.file, args[2].(string))
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		defer ap.Close()
+		bp, bn, e := parentUnder(b.file, args[4].(string))
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		defer bp.Close()
+		e = unix.Linkat(int(ap.Fd()), an, int(bp.Fd()), bn, 0)
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		return ok(nil), nil
+	}
+	readlinkAt := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		n, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		p, name, e := parentUnder(n.file, args[1].(string))
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		defer p.Close()
+		buf := make([]byte, 4096)
+		for {
+			got, e := unix.Readlinkat(int(p.Fd()), name, buf)
+			if e != nil {
+				return fsFailure(e), nil
+			}
+			if got < len(buf) {
+				return ok(string(buf[:got])), nil
+			}
+			if len(buf) >= maxIOSize {
+				return fsFailure(unix.ENAMETOOLONG), nil
+			}
+			buf = make([]byte, len(buf)*2)
+		}
+	}
+	symlinkAt := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		n, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		if e = requireDirectoryMutation(n); e != nil {
+			return fsFailure(e), nil
+		}
+		p, name, e := parentUnder(n.file, args[2].(string))
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		defer p.Close()
+		e = unix.Symlinkat(args[1].(string), int(p.Fd()), name)
+		if e != nil {
+			return fsFailure(e), nil
+		}
+		return ok(nil), nil
+	}
+	isSame := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		a, e := s.desc(args[0].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		b, e := s.desc(args[1].(uint32))
+		if e != nil {
+			return nil, e
+		}
+		ai, e := a.file.Stat()
+		if e != nil {
+			return nil, e
+		}
+		bi, e := b.file.Stat()
+		if e != nil {
+			return nil, e
+		}
+		return []component.Value{os.SameFile(ai, bi)}, nil
+	}
 
 	return []component.Option{
 		component.WithResourceTag(ifaceFilesystem, "descriptor", descriptorResource),
@@ -677,8 +1159,12 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		}),
 		component.WithHostResourceDtor(directoryStreamResource, func(_ context.Context, rep uint32) error {
 			s.mu.Lock()
+			d := s.dirs[rep]
 			delete(s.dirs, rep)
 			s.mu.Unlock()
+			if d != nil {
+				return d.file.Close()
+			}
 			return nil
 		}),
 		custom(ifacePreopens, "get-directories", getDirectories, func(t *component.TypeTable) component.FuncDesc {
@@ -702,7 +1188,17 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		custom(ifaceFilesystem, "[method]descriptor.remove-directory-at", removeAt(true), pathMutationDesc),
 		custom(ifaceFilesystem, "[method]descriptor.rename-at", renameAt, renameAtDesc),
 		custom(ifaceFilesystem, "[method]descriptor.sync", syncFile, syncDesc),
-		custom(ifaceFilesystem, "[method]descriptor.sync-data", syncFile, syncDesc),
+		custom(ifaceFilesystem, "[method]descriptor.sync-data", syncData, syncDesc),
+		custom(ifaceFilesystem, "[method]descriptor.advise", advise, adviseDesc),
+		custom(ifaceFilesystem, "[method]descriptor.set-size", setSize, setSizeDesc),
+		custom(ifaceFilesystem, "[method]descriptor.set-times", setTimes, setTimesDesc),
+		custom(ifaceFilesystem, "[method]descriptor.read", directRead, directReadDesc),
+		custom(ifaceFilesystem, "[method]descriptor.write", directWrite, directWriteDesc),
+		custom(ifaceFilesystem, "[method]descriptor.set-times-at", setTimesAt, setTimesAtDesc),
+		custom(ifaceFilesystem, "[method]descriptor.link-at", linkAt, linkAtDesc),
+		custom(ifaceFilesystem, "[method]descriptor.readlink-at", readlinkAt, readlinkAtDesc),
+		custom(ifaceFilesystem, "[method]descriptor.symlink-at", symlinkAt, symlinkAtDesc),
+		custom(ifaceFilesystem, "[method]descriptor.is-same-object", isSame, isSameDesc),
 	}
 }
 
@@ -711,6 +1207,12 @@ func (s *filesystemState) dropStream(rep uint32) error {
 	n := s.streams[rep]
 	delete(s.streams, rep)
 	s.mu.Unlock()
+	if s.ioState != nil {
+		s.ioState.mu.Lock()
+		delete(s.ioState.outputs, rep)
+		delete(s.ioState.permits, rep)
+		s.ioState.mu.Unlock()
+	}
 	if n != nil {
 		return n.file.Close()
 	}
@@ -781,4 +1283,44 @@ func renameAtDesc(t *component.TypeTable) component.FuncDesc {
 }
 func syncDesc(t *component.TypeTable) component.FuncDesc {
 	return t.Func([]component.TypeRef{t.Borrow(descriptorResource)}, descResult(t, component.TypeRef{}))
+}
+func adviceType(t *component.TypeTable) component.TypeRef {
+	return t.Enum("normal", "sequential", "random", "will-need", "dont-need", "no-reuse")
+}
+func adviseDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), component.Prim("u64"), component.Prim("u64"), adviceType(t)}, descResult(t, component.TypeRef{}))
+}
+func setSizeDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), component.Prim("u64")}, descResult(t, component.TypeRef{}))
+}
+func newTimestampType(t *component.TypeTable) component.TypeRef {
+	dt := t.Record("seconds", component.Prim("u64"), "nanoseconds", component.Prim("u32"))
+	return t.Variant(component.VariantCaseSpec{Name: "no-change"}, component.VariantCaseSpec{Name: "now"}, component.VariantCaseSpec{Name: "timestamp", Type: dt})
+}
+func setTimesDesc(t *component.TypeTable) component.FuncDesc {
+	nt := newTimestampType(t)
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), nt, nt}, descResult(t, component.TypeRef{}))
+}
+func directReadDesc(t *component.TypeTable) component.FuncDesc {
+	pair := t.Tuple(t.List(component.Prim("u8")), component.Prim("bool"))
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), component.Prim("u64"), component.Prim("u64")}, descResult(t, pair))
+}
+func directWriteDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), t.List(component.Prim("u8")), component.Prim("u64")}, descResult(t, component.Prim("u64")))
+}
+func setTimesAtDesc(t *component.TypeTable) component.FuncDesc {
+	nt := newTimestampType(t)
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), t.Flags("symlink-follow"), component.Prim("string"), nt, nt}, descResult(t, component.TypeRef{}))
+}
+func linkAtDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), t.Flags("symlink-follow"), component.Prim("string"), t.Borrow(descriptorResource), component.Prim("string")}, descResult(t, component.TypeRef{}))
+}
+func readlinkAtDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), component.Prim("string")}, descResult(t, component.Prim("string")))
+}
+func symlinkAtDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), component.Prim("string"), component.Prim("string")}, descResult(t, component.TypeRef{}))
+}
+func isSameDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(descriptorResource), t.Borrow(descriptorResource)}, component.Prim("bool"))
 }

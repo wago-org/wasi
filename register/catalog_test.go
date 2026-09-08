@@ -126,8 +126,8 @@ func TestRootBundlesEverySnapshot(t *testing.T) {
 	if len(definition.Authorities) != 0 || len(definition.ConfigSchema) != 0 {
 		t.Fatalf("root owns runtime policy: authorities=%#v config=%s", definition.Authorities, definition.ConfigSchema)
 	}
-	if got := unstable.Definition().Stability; got != wago.Stable {
-		t.Fatalf("unstable compatibility provider stability = %q; bundle dependencies must remain resolvable", got)
+	if got := unstable.Definition().Stability; got != wago.Deprecated {
+		t.Fatalf("unstable compatibility provider stability = %q, want deprecated", got)
 	}
 }
 
@@ -173,7 +173,7 @@ func TestStrictConfigValidation(t *testing.T) {
 			t.Fatalf("ValidateConfig(%s) succeeded", config)
 		}
 	}
-	if err := provider.ValidateConfig(json.RawMessage(`{"stdin":"eof","stdout":"discard","stderr":"discard","env":[],"maxOpenFiles":3,"maxPollDurationMillis":1}`)); err != nil {
+	if err := provider.ValidateConfig(json.RawMessage(`{"stdin":"eof","stdout":"discard","stderr":"discard","env":[],"mounts":[{"guest":"/data","host":"/tmp","read":true}],"maxOpenFiles":3}`)); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
 }

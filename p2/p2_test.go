@@ -144,6 +144,28 @@ func TestRustWASIP2CommandRunsOnWago(t *testing.T) {
 	}
 }
 
+func TestRustWASIP2DefaultEnvironmentDoesNotInheritHost(t *testing.T) {
+	t.Setenv("WAGO_FLAVOR", "must-not-leak")
+	var ref *wagoplugin.Ref[component.Service]
+	providers := []wago.PluginProvider{component.Provider(), componentConsumer(&ref)}
+	rt := wago.NewRuntime()
+	defer rt.Close()
+	if err := rt.LoadPlugins(context.Background(), pluginSet(t, providers, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	err := ref.With(func(service component.Service) error {
+		return p2.Run(context.Background(), service, rustSmoke, p2.Config{Stdout: &stdout})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), ";env=missing;") {
+		t.Fatalf("default guest environment leaked host value: %q", stdout.String())
+	}
+}
+
 func TestRustWASIP2FilesystemUsesOnlyMountedDirectory(t *testing.T) {
 	var ref *wagoplugin.Ref[component.Service]
 	providers := []wago.PluginProvider{component.Provider(), componentConsumer(&ref)}
@@ -176,6 +198,36 @@ func TestRustWASIP2FilesystemUsesOnlyMountedDirectory(t *testing.T) {
 	}
 	if want := "HELLO FILESYSTEM\n"; string(got) != want {
 		t.Fatalf("output.txt = %q, want %q", got, want)
+	}
+}
+
+func TestRustWASIP2ReadOnlyMountRejectsMutation(t *testing.T) {
+	var ref *wagoplugin.Ref[component.Service]
+	providers := []wago.PluginProvider{component.Provider(), componentConsumer(&ref)}
+	rt := wago.NewRuntime()
+	defer rt.Close()
+	if err := rt.LoadPlugins(context.Background(), pluginSet(t, providers, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/input.txt", []byte("readable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := ref.With(func(service component.Service) error {
+		return p2.Run(context.Background(), service, rustFilesystem, p2.Config{
+			Mounts: []p2.Preopen{{GuestPath: "/data", HostPath: dir, Read: true}},
+		})
+	})
+	if err == nil {
+		t.Fatal("filesystem component mutated a read-only mount")
+	}
+	if _, statErr := os.Stat(dir + "/output.txt"); !os.IsNotExist(statErr) {
+		t.Fatalf("read-only mount created output.txt: %v", statErr)
+	}
+	got, readErr := os.ReadFile(dir + "/input.txt")
+	if readErr != nil || string(got) != "readable\n" {
+		t.Fatalf("read-only input changed: %q, %v", got, readErr)
 	}
 }
 
@@ -358,5 +410,11 @@ func TestDefinitionAndConfigAreStrict(t *testing.T) {
 		if err := p2.Provider().ValidateConfig(raw); err == nil {
 			t.Fatalf("accepted invalid config %s", raw)
 		}
+	}
+	if err := p2.Provider().ValidateConfig(json.RawMessage(`{"mounts":[{"guest":"/data","host":"/tmp","read":true}]}`)); err != nil {
+		t.Fatalf("valid rights-aware mount: %v", err)
+	}
+	if err := p2.Provider().ValidateConfig(json.RawMessage(`{"mounts":[{"guest":"/data","host":"/tmp","write":true}]}`)); err != nil {
+		t.Fatalf("independent write mount flag: %v", err)
 	}
 }
