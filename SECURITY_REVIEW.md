@@ -30,7 +30,7 @@ The descriptor-relative filesystem confinement remains a strong foundation.
 - [x] Add per-instance quotas for descriptors, streams, directory streams, pollables, subscriptions, iovecs, directory buffering, and aggregate buffers.
 - [x] Make P2 append atomic across streams and reject `u64` offsets above `math.MaxInt64`.
 - [x] Replace P1's 16,384-entry directory snapshot with incremental iteration.
-- [x] Add a secure Linux `openat2` fallback, platform allocation/sync helpers, expanded errno tests, and Linux/macOS CI.
+- [x] Add secure Linux and pre-macOS 15 descriptor-walk fallbacks, platform allocation/sync helpers, expanded errno tests, and Linux/macOS CI.
 - [x] Correct stability and completeness claims: the root and P1 are experimental, P2 is an experimental limited profile, and `wasi_unstable` is deprecated.
 
 ## Additional correctness work

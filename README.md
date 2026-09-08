@@ -230,8 +230,9 @@ the appropriate unsupported, not-a-socket, or bad-descriptor errno; they do not
 receive ambient network or signal access.
 
 Every guest pointer is bounds checked. Preopen path traversal is confined below
-the opened directory using Linux `openat2` resolution rules or Darwin's
-`O_RESOLVE_BENEATH` open policy. Darwin rejects `path_link` when asked to follow
+the opened directory using Linux `openat2` resolution rules or a Darwin
+descriptor walk that opens every component with `O_NOFOLLOW`. Darwin rejects
+`path_link` when asked to follow
 the source symlink because the platform has no race-free descriptor-based link
 operation equivalent to Linux `AT_EMPTY_PATH`.
 
