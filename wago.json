@@ -2,9 +2,9 @@
   "$schema": "https://wago.sh/v1/schema.json",
   "package": {
     "module": "github.com/wago-org/wasi",
-    "version": "0.2.1",
+    "version": "0.3.0",
     "name": "WASI",
-    "description": "Experimental bundle of Preview 1, WASI 0.2 command imports, and a deprecated unstable alias.",
+    "description": "Experimental bundle of Preview 1 and WASI 0.2 command imports.",
     "stability": "experimental",
     "license": "Apache-2.0",
     "homepage": "https://github.com/wago-org/wasi",
@@ -33,14 +33,6 @@
         "stability": "experimental",
         "tags": ["wasi", "wasi-preview2", "component-model", "filesystem", "sockets", "stdio", "clocks", "random"],
         "platforms": ["darwin/arm64", "linux/amd64", "linux/arm64"]
-      },
-      {
-        "module": "github.com/wago-org/wasi/unstable",
-        "name": "WASI unstable",
-        "description": "Deprecated Preview 1 ABI alias using the wasi_unstable import module name.",
-        "stability": "deprecated",
-        "tags": ["wasi", "wasi-unstable", "snapshot0"],
-        "platforms": ["darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64"]
       }
     ]
   },

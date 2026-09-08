@@ -54,6 +54,10 @@ func newInput(r io.Reader) InputStream {
 	return &asyncInput{r: r}
 }
 
+// NewInputStream adapts a synchronous reader to the nonblocking WASI stream
+// contract. A nil reader produces an input stream that is already closed.
+func NewInputStream(r io.Reader) InputStream { return newInput(r) }
+
 func (s *asyncInput) start() {
 	if s.waiting != nil || s.result != nil || s.closed {
 		return
@@ -161,6 +165,10 @@ func newOutput(w io.Writer) OutputStream {
 	}
 	return &outputAdapter{w: w, slots: make(chan struct{}, 1)}
 }
+
+// NewOutputStream adapts a synchronous writer to the nonblocking WASI stream
+// contract. A nil writer discards output.
+func NewOutputStream(w io.Writer) OutputStream { return newOutput(w) }
 
 func (s *outputAdapter) run(request outputRequest) {
 	var err error

@@ -15,7 +15,7 @@ func (r blockingReader) Read([]byte) (int, error) { <-r.release; return 0, error
 func TestOptionsDoesNotPreconsumeStdin(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan struct{})
-	go func() { Options(Config{Stdin: blockingReader{release: release}}); close(done) }()
+	go func() { Options(Config{Stdin: NewInputStream(blockingReader{release: release})}); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):

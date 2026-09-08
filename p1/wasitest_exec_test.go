@@ -110,7 +110,7 @@ func runOneWASITest(wasmPath string, man wasiManifest) string {
 		if err = copyTree(srcRoot, tmp); err != nil {
 			return "copy root: " + err.Error()
 		}
-		cfg.Preopens = map[string]string{"/": tmp}
+		cfg.Mounts = []p1.Preopen{{GuestPath: "/", HostPath: tmp, Read: true, Write: true, MutateDirectory: true}}
 	}
 	var stdout, stderr bytes.Buffer
 	cfg.Stdout = &stdout

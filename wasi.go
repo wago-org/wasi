@@ -1,8 +1,8 @@
 // Package wasi provides an experimental WASI provider bundle for Wago.
 //
-// Provider selects the Preview 1, Preview 2, and unstable compatibility
-// providers. Embedders that intentionally bypass plugin policy can still use
-// Imports for low-level Preview 1 instantiation.
+// Provider selects the Preview 1 and Preview 2 providers. Embedders that
+// intentionally bypass plugin policy can still use Imports for low-level
+// Preview 1 instantiation.
 package wasi
 
 import (
@@ -43,8 +43,8 @@ func Definition() wago.PluginDefinition {
 	return wago.PluginDefinition{
 		ID:          ID,
 		Name:        "WASI",
-		Version:     "0.2.1",
-		Description: "Experimental bundle of Preview 1, WASI 0.2 command imports, and a deprecated unstable alias.",
+		Version:     "0.3.0",
+		Description: "Experimental bundle of Preview 1 and WASI 0.2 command imports.",
 		Stability:   wago.Experimental,
 		Compatibility: wago.Compatibility{
 			Engines:   map[string]string{"wago": ">=0.1.0", "go": ">=1.22"},
@@ -57,9 +57,8 @@ func Definition() wago.PluginDefinition {
 			Authors:    []string{"The Wago authors"},
 		},
 		Requires: []wago.PluginRequirement{
-			{ID: "github.com/wago-org/wasi/p1", Version: "^0.2.1"},
-			{ID: "github.com/wago-org/wasi/p2", Version: "^0.2.1"},
-			{ID: "github.com/wago-org/wasi/unstable", Version: "^0.2.1"},
+			{ID: "github.com/wago-org/wasi/p1", Version: "^0.3.0"},
+			{ID: "github.com/wago-org/wasi/p2", Version: "^0.3.0"},
 		},
 	}
 }

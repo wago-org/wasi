@@ -1,9 +1,5 @@
-// Package core is the shared implementation behind the versioned WASI plugins.
-// The command and filesystem surface is shared across wasi_unstable
-// (pre-preview1) and wasi_snapshot_preview1; only the wasm
-// import module name differs, so both wrap this package with their own module
-// string. It is internal: use github.com/wago-org/wasi/p1 or
-// github.com/wago-org/wasi/unstable.
+// Package core implements the shared internals of the Preview 1 provider.
+// It is internal: use github.com/wago-org/wasi/p1.
 package core
 
 import (
@@ -19,7 +15,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	wago "github.com/wago-org/wago"
@@ -57,22 +52,16 @@ const (
 
 // Config configures the WASI host bundle. A nil writer/reader discards/EOFs;
 // nil Clocks uses separate system realtime and monotonic clocks; a nil Rand
-// uses crypto/rand. Now remains a compatibility override for realtime only.
+// uses crypto/rand.
 type Config struct {
 	Stdout, Stderr io.Writer
 	Stdin          io.Reader
 	Args           []string        // argv; Args[0] is conventionally the program name
 	Env            []string        // "KEY=VALUE" entries
-	Now            func() int64    // wall-clock nanoseconds for clock_time_get
 	Clocks         ClockSource     // distinct realtime, monotonic, and optional CPU clocks
 	Context        context.Context // cancellation for blocking host operations
 	Rand           io.Reader       // random source for random_get
-	// Preopens maps guest-visible directory names (commonly "/") to host
-	// directories. Each entry is exposed as a capability-scoped preopen starting
-	// at fd 3. No host filesystem is visible when this is nil.
-	Preopens map[string]string
-	// Mounts is the rights-aware preopen configuration. Unlike the legacy
-	// Preopens map, no rights are implied.
+	// Mounts is the rights-aware preopen configuration. No rights are implied.
 	Mounts []Preopen
 	// MaxOpenFiles bounds the host descriptors owned by one guest instance,
 	// including stdio and preopens. Zero uses the secure default of 1024.
@@ -93,15 +82,14 @@ type Preopen struct {
 }
 
 type pluginConfig struct {
-	Stdin            *string            `json:"stdin,omitempty"`
-	Stdout           *string            `json:"stdout,omitempty"`
-	Stderr           *string            `json:"stderr,omitempty"`
-	Env              *[]string          `json:"env,omitempty"`
-	Preopens         *map[string]string `json:"preopens,omitempty"`
-	Mounts           *[]Preopen         `json:"mounts,omitempty"`
-	MaxOpenFiles     *uint32            `json:"maxOpenFiles,omitempty"`
-	MaxIOVecs        *uint32            `json:"maxIOVecs,omitempty"`
-	MaxSubscriptions *uint32            `json:"maxSubscriptionsPerPoll,omitempty"`
+	Stdin            *string    `json:"stdin,omitempty"`
+	Stdout           *string    `json:"stdout,omitempty"`
+	Stderr           *string    `json:"stderr,omitempty"`
+	Env              *[]string  `json:"env,omitempty"`
+	Mounts           *[]Preopen `json:"mounts,omitempty"`
+	MaxOpenFiles     *uint32    `json:"maxOpenFiles,omitempty"`
+	MaxIOVecs        *uint32    `json:"maxIOVecs,omitempty"`
+	MaxSubscriptions *uint32    `json:"maxSubscriptionsPerPoll,omitempty"`
 }
 
 var configSchema = json.RawMessage(`{
@@ -115,12 +103,6 @@ var configSchema = json.RawMessage(`{
       "type": "array",
       "maxItems": 4096,
       "items": {"type": "string", "minLength": 2, "maxLength": 32768, "pattern": "^[^=\\u0000]+=[^\\u0000]*$"}
-    },
-    "preopens": {
-      "type": "object",
-      "maxProperties": 64,
-      "propertyNames": {"type": "string", "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$", "maxLength": 4096},
-      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 4096}
     },
     "mounts": {
       "type": "array",
@@ -246,7 +228,7 @@ func (e *Plugin) stop(context.Context) error {
 func Imports(module string, cfg Config) wago.Imports {
 	e := &Plugin{module: module, cfg: cloneConfig(cfg)}
 	e.resetFS()
-	_ = e.initFS(false) // preserve the raw API's historical best-effort preopens
+	_ = e.initFS(false) // raw imports cannot report mount initialization errors
 	return e.Imports()
 }
 
@@ -505,21 +487,6 @@ func configFromPluginConfig(cfg pluginConfig) (Config, error) {
 			}
 		}
 	}
-	if cfg.Preopens != nil {
-		if len(*cfg.Preopens) > 64 {
-			return Config{}, fmt.Errorf("wasi: preopens has %d entries, max 64", len(*cfg.Preopens))
-		}
-		resolved.Preopens = make(map[string]string, len(*cfg.Preopens))
-		for guest, host := range *cfg.Preopens {
-			if len(guest) == 0 || len(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
-				return Config{}, fmt.Errorf("wasi: invalid guest preopen path %q", guest)
-			}
-			if len(host) == 0 || len(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
-				return Config{}, fmt.Errorf("wasi: preopen %q requires a clean absolute host path", guest)
-			}
-			resolved.Preopens[guest] = host
-		}
-	}
 	if cfg.Mounts != nil {
 		if len(*cfg.Mounts) > 64 {
 			return Config{}, fmt.Errorf("wasi: mounts has %d entries, max 64", len(*cfg.Mounts))
@@ -533,14 +500,6 @@ func configFromPluginConfig(cfg pluginConfig) (Config, error) {
 				return Config{}, fmt.Errorf("wasi: duplicate guest mount path %q", mount.GuestPath)
 			}
 			seen[mount.GuestPath] = struct{}{}
-			if cfg.Preopens != nil {
-				if _, exists := (*cfg.Preopens)[mount.GuestPath]; exists {
-					return Config{}, fmt.Errorf("wasi: guest path %q is configured in both preopens and mounts", mount.GuestPath)
-				}
-			}
-		}
-		if cfg.Preopens != nil && len(*cfg.Preopens)+len(*cfg.Mounts) > 64 {
-			return Config{}, fmt.Errorf("wasi: combined preopens and mounts exceed 64 entries")
 		}
 		resolved.Mounts = append([]Preopen(nil), (*cfg.Mounts)...)
 	}
@@ -590,20 +549,9 @@ func applyOutputMode(name string, dst *io.Writer, mode *string) error {
 func cloneConfig(cfg Config) Config {
 	cfg.Args = append([]string(nil), cfg.Args...)
 	cfg.Env = append([]string(nil), cfg.Env...)
-	if cfg.Preopens != nil {
-		preopens := make(map[string]string, len(cfg.Preopens))
-		for guest, host := range cfg.Preopens {
-			preopens[guest] = host
-		}
-		cfg.Preopens = preopens
-	}
 	cfg.Mounts = append([]Preopen(nil), cfg.Mounts...)
 	if cfg.Clocks == nil {
-		var realtime func() time.Time
-		if cfg.Now != nil {
-			realtime = func() time.Time { return time.Unix(0, cfg.Now()) }
-		}
-		cfg.Clocks = newSystemClock(realtime)
+		cfg.Clocks = newSystemClock(nil)
 	}
 	if cfg.Context == nil {
 		cfg.Context = context.Background()

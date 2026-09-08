@@ -6,8 +6,8 @@
       "definition": {
         "id": "github.com/wago-org/wasi",
         "name": "WASI",
-        "version": "0.2.1",
-        "description": "Experimental bundle of Preview 1, WASI 0.2 command imports, and a deprecated unstable alias.",
+        "version": "0.3.0",
+        "description": "Experimental bundle of Preview 1 and WASI 0.2 command imports.",
         "stability": "experimental",
         "compatibility": {
           "engines": {
@@ -31,26 +31,22 @@
         "requires": [
           {
             "id": "github.com/wago-org/wasi/p1",
-            "version": "^0.2.1"
+            "version": "^0.3.0"
           },
           {
             "id": "github.com/wago-org/wasi/p2",
-            "version": "^0.2.1"
-          },
-          {
-            "id": "github.com/wago-org/wasi/unstable",
-            "version": "^0.2.1"
+            "version": "^0.3.0"
           }
         ]
       },
-      "definitionDigest": "sha256:02fcbfe84bcc5b52f114e15ecb5b7877a3228957159146d3b1b93897a1432911"
+      "definitionDigest": "sha256:73d5b1dd4b7284d390cb05db9db5086d93f954cfeae05f6537cb0da54c448574"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p1",
         "name": "WASI Preview 1",
-        "version": "0.2.1",
+        "version": "0.3.0",
         "description": "Preview 1 for core WebAssembly modules.",
         "stability": "experimental",
         "compatibility": {
@@ -164,20 +160,6 @@
               "maxItems": 64,
               "type": "array"
             },
-            "preopens": {
-              "additionalProperties": {
-                "maxLength": 4096,
-                "minLength": 1,
-                "type": "string"
-              },
-              "maxProperties": 64,
-              "propertyNames": {
-                "maxLength": 4096,
-                "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
-                "type": "string"
-              },
-              "type": "object"
-            },
             "stderr": {
               "enum": [
                 "inherit",
@@ -203,14 +185,14 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:daf4aa37f16c9ca0483e622aaae43e11f6bb9c2faa6dcba6899edd6dafd51076"
+      "definitionDigest": "sha256:bcc0db7cabf72e149e8c9b51dd05a181a00af9136c5622fef1c9567420bcd7c7"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p2",
         "name": "WASI Preview 2",
-        "version": "0.2.1",
+        "version": "0.3.0",
         "description": "Experimental WASI 0.2 command host with fail-closed networking.",
         "stability": "experimental",
         "compatibility": {
@@ -333,20 +315,6 @@
               "maxItems": 64,
               "type": "array"
             },
-            "preopens": {
-              "additionalProperties": {
-                "maxLength": 4096,
-                "minLength": 1,
-                "type": "string"
-              },
-              "maxProperties": 64,
-              "propertyNames": {
-                "maxLength": 4096,
-                "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
-                "type": "string"
-              },
-              "type": "object"
-            },
             "stderr": {
               "enum": [
                 "inherit",
@@ -385,167 +353,7 @@
           }
         ]
       },
-      "definitionDigest": "sha256:75addc6447f8c070363d611bb6e5c69420a94acbba925f93648680e1f11837b9"
-    },
-    {
-      "importPath": "github.com/wago-org/wasi/register",
-      "definition": {
-        "id": "github.com/wago-org/wasi/unstable",
-        "name": "WASI unstable",
-        "version": "0.2.1",
-        "description": "Deprecated Preview 1 ABI alias using the wasi_unstable import module name.",
-        "stability": "deprecated",
-        "compatibility": {
-          "engines": {
-            "go": "\u003e=1.22",
-            "wago": "\u003e=0.1.0"
-          },
-          "platforms": [
-            "darwin/amd64",
-            "darwin/arm64",
-            "linux/amd64",
-            "linux/arm64"
-          ]
-        },
-        "provenance": {
-          "homepage": "https://github.com/wago-org/wasi",
-          "repository": "https://github.com/wago-org/wasi",
-          "license": "Apache-2.0",
-          "authors": [
-            "The Wago authors"
-          ]
-        },
-        "authorities": [
-          {
-            "name": "host.arguments.read",
-            "mode": "required",
-            "reason": "expose this runtime's immutable guest argv through Preview 1",
-            "scope": {}
-          },
-          {
-            "name": "host.caller.identify",
-            "mode": "required",
-            "reason": "isolate descriptor tables by the opaque identity of the active guest",
-            "scope": {}
-          },
-          {
-            "name": "host.import.define",
-            "mode": "required",
-            "reason": "define the selected WASI snapshot's host functions",
-            "scope": {
-              "modules": [
-                "wasi_unstable"
-              ]
-            }
-          },
-          {
-            "name": "instance.close.observe",
-            "mode": "required",
-            "reason": "close the departed guest's files without receiving instance control",
-            "scope": {}
-          }
-        ],
-        "configSchema": {
-          "additionalProperties": false,
-          "properties": {
-            "env": {
-              "items": {
-                "maxLength": 32768,
-                "minLength": 2,
-                "pattern": "^[^=\\u0000]+=[^\\u0000]*$",
-                "type": "string"
-              },
-              "maxItems": 4096,
-              "type": "array"
-            },
-            "maxIOVecs": {
-              "maximum": 65536,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "maxOpenFiles": {
-              "maximum": 65536,
-              "minimum": 3,
-              "type": "integer"
-            },
-            "maxSubscriptionsPerPoll": {
-              "maximum": 65536,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "mounts": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "guest": {
-                    "maxLength": 4096,
-                    "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
-                    "type": "string"
-                  },
-                  "host": {
-                    "maxLength": 4096,
-                    "minLength": 1,
-                    "type": "string"
-                  },
-                  "mutateDirectory": {
-                    "type": "boolean"
-                  },
-                  "read": {
-                    "type": "boolean"
-                  },
-                  "write": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "guest",
-                  "host"
-                ],
-                "type": "object"
-              },
-              "maxItems": 64,
-              "type": "array"
-            },
-            "preopens": {
-              "additionalProperties": {
-                "maxLength": 4096,
-                "minLength": 1,
-                "type": "string"
-              },
-              "maxProperties": 64,
-              "propertyNames": {
-                "maxLength": 4096,
-                "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
-                "type": "string"
-              },
-              "type": "object"
-            },
-            "stderr": {
-              "enum": [
-                "inherit",
-                "discard"
-              ],
-              "type": "string"
-            },
-            "stdin": {
-              "enum": [
-                "inherit",
-                "eof"
-              ],
-              "type": "string"
-            },
-            "stdout": {
-              "enum": [
-                "inherit",
-                "discard"
-              ],
-              "type": "string"
-            }
-          },
-          "type": "object"
-        }
-      },
-      "definitionDigest": "sha256:feb848bee5ddc649e4d8968c1dbf894e15ed32af884123cfe82ca0caf3236e7f"
+      "definitionDigest": "sha256:96dd10067d9d55720261745a55696bdee9f60d661d2cd08f60c2ecbbac1ec8ce"
     }
   ]
 }

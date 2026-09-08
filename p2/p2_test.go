@@ -70,7 +70,7 @@ func componentConsumer(ref **wagoplugin.Ref[component.Service]) wago.PluginProvi
 
 func p2Consumer(ref **wagoplugin.Ref[p2.Service]) wago.PluginProvider {
 	d := testDefinition("example.com/tests/p2-consumer")
-	d.Requires = []wago.PluginRequirement{{ID: p2.ID, Version: "^0.2.1"}}
+	d.Requires = []wago.PluginRequirement{{ID: p2.ID, Version: "^0.3.0"}}
 	d.Consumes = []wago.ContractRequirement{{ID: p2.Contract.ID(), Major: p2.Contract.Major(), Mode: wago.ContractRequired}}
 	return wago.PluginProvider{Definition: d, New: func() wago.Plugin {
 		return pluginFunc(func(r *wago.Registrar) error {
@@ -125,8 +125,8 @@ func TestRustWASIP2CommandRunsOnWago(t *testing.T) {
 	var stdout, stderr flushBuffer
 	err := ref.With(func(service component.Service) error {
 		return p2.Run(context.Background(), service, rustSmoke, p2.Config{
-			Stdin: strings.NewReader("from-rust-stdin\n"), Stdout: &stdout, Stderr: &stderr,
-			Args: []string{"alpha", "beta"}, Env: []string{"WAGO_FLAVOR=component"},
+			Stdin: p2.NewInputStream(strings.NewReader("from-rust-stdin\n")), Stdout: p2.NewOutputStream(&stdout), Stderr: p2.NewOutputStream(&stderr),
+			Args: []string{"wago", "alpha", "beta"}, Env: []string{"WAGO_FLAVOR=component"},
 			WallClock: func() time.Time { return time.Unix(1_700_000_000, 0) },
 		})
 	})
@@ -156,7 +156,7 @@ func TestRustWASIP2DefaultEnvironmentDoesNotInheritHost(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := ref.With(func(service component.Service) error {
-		return p2.Run(context.Background(), service, rustSmoke, p2.Config{Stdout: &stdout})
+		return p2.Run(context.Background(), service, rustSmoke, p2.Config{Stdout: p2.NewOutputStream(&stdout)})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -182,8 +182,8 @@ func TestRustWASIP2FilesystemUsesOnlyMountedDirectory(t *testing.T) {
 	var stdout bytes.Buffer
 	err := ref.With(func(service component.Service) error {
 		return p2.Run(context.Background(), service, rustFilesystem, p2.Config{
-			Stdout:   &stdout,
-			Preopens: map[string]string{"/data": dir},
+			Stdout: p2.NewOutputStream(&stdout),
+			Mounts: []p2.Preopen{{GuestPath: "/data", HostPath: dir, Read: true, Write: true, MutateDirectory: true}},
 		})
 	})
 	if err != nil {
@@ -249,7 +249,7 @@ func TestRustWASIP2FilesystemRejectsSymlinkEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := ref.With(func(service component.Service) error {
-		return p2.Run(context.Background(), service, rustFilesystem, p2.Config{Preopens: map[string]string{"/data": mount}})
+		return p2.Run(context.Background(), service, rustFilesystem, p2.Config{Mounts: []p2.Preopen{{GuestPath: "/data", HostPath: mount, Read: true, Write: true, MutateDirectory: true}}})
 	})
 	if err == nil {
 		t.Fatal("symlink escape unexpectedly succeeded")
@@ -267,7 +267,7 @@ func TestProviderRunsRustFilesystemWithConfiguredPreopen(t *testing.T) {
 	if err := os.WriteFile(dir+"/input.txt", []byte("provider\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := json.Marshal(map[string]any{"stdout": "discard", "preopens": map[string]string{"/data": dir}})
+	raw, err := json.Marshal(map[string]any{"stdout": "discard", "mounts": []p2.Preopen{{GuestPath: "/data", HostPath: dir, Read: true, Write: true, MutateDirectory: true}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestRustWASIP2SocketsFailClosedWithoutNetworking(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := ref.With(func(service component.Service) error {
-		return p2.Run(context.Background(), service, rustSockets, p2.Config{Stdout: &stdout})
+		return p2.Run(context.Background(), service, rustSockets, p2.Config{Stdout: p2.NewOutputStream(&stdout)})
 	})
 	if err != nil {
 		t.Fatalf("run Rust sockets component: %v\nstdout=%q", err, stdout.String())
@@ -332,8 +332,8 @@ func TestRustWASIP2RunsRepeatedlyAndConcurrently(t *testing.T) {
 	run := func(service component.Service, label string) error {
 		var stdout, stderr flushBuffer
 		err := p2.Run(context.Background(), service, rustSmoke, p2.Config{
-			Stdin: strings.NewReader(label + "\n"), Stdout: &stdout, Stderr: &stderr,
-			Args: []string{label}, Env: []string{"WAGO_FLAVOR=stress"},
+			Stdin: p2.NewInputStream(strings.NewReader(label + "\n")), Stdout: p2.NewOutputStream(&stdout), Stderr: p2.NewOutputStream(&stderr),
+			Args: []string{"wago", label}, Env: []string{"WAGO_FLAVOR=stress"},
 		})
 		if err != nil {
 			return err

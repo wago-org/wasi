@@ -14,7 +14,6 @@ import (
 	"github.com/wago-org/wasi"
 	"github.com/wago-org/wasi/p1"
 	"github.com/wago-org/wasi/p2"
-	"github.com/wago-org/wasi/unstable"
 )
 
 type pluginFunc func(*wago.Registrar) error
@@ -50,7 +49,7 @@ func selection(t *testing.T, provider wago.PluginProvider, config json.RawMessag
 
 func TestProvidersAreExplicitFreshAndCanonical(t *testing.T) {
 	first, second := Providers(), Providers()
-	want := []string{wasi.ID, p1.ID, p2.ID, unstable.ID}
+	want := []string{wasi.ID, p1.ID, p2.ID}
 	if len(first) != len(want) || len(second) != len(want) {
 		t.Fatalf("provider counts = %d, %d; want %d", len(first), len(second), len(want))
 	}
@@ -86,7 +85,7 @@ func TestEachSnapshotLoadsWithExactAuthorities(t *testing.T) {
 				t.Fatalf("ProvidedImports = %#v", imports)
 			}
 			for _, spec := range imports {
-				if spec.Module != snapshotModule(provider.Definition.ID) {
+				if spec.Module != wasi.Module {
 					t.Fatalf("import %s module = %q", spec.Name, spec.Module)
 				}
 				if !spec.HasCapability || spec.Capability == "" {
@@ -113,21 +112,17 @@ func TestNarrowedHostScopeFailsClosed(t *testing.T) {
 	}
 }
 
-func TestRootBundlesEverySnapshot(t *testing.T) {
+func TestRootBundlesBothProviders(t *testing.T) {
 	definition := wasi.Definition()
 	want := []wago.PluginRequirement{
-		{ID: p1.ID, Version: "^0.2.1"},
-		{ID: p2.ID, Version: "^0.2.1"},
-		{ID: unstable.ID, Version: "^0.2.1"},
+		{ID: p1.ID, Version: "^0.3.0"},
+		{ID: p2.ID, Version: "^0.3.0"},
 	}
 	if !reflect.DeepEqual(definition.Requires, want) {
 		t.Fatalf("root requirements = %#v, want %#v", definition.Requires, want)
 	}
 	if len(definition.Authorities) != 0 || len(definition.ConfigSchema) != 0 {
 		t.Fatalf("root owns runtime policy: authorities=%#v config=%s", definition.Authorities, definition.ConfigSchema)
-	}
-	if got := unstable.Definition().Stability; got != wago.Deprecated {
-		t.Fatalf("unstable compatibility provider stability = %q, want deprecated", got)
 	}
 }
 
@@ -161,9 +156,10 @@ func TestStrictConfigValidation(t *testing.T) {
 		json.RawMessage(`{"stdout":"file"}`),
 		json.RawMessage(`{"unknown":true}`),
 		json.RawMessage(`{"stdout":"inherit","stdout":"discard"}`),
-		json.RawMessage(`{"preopens":{"/data":"/srv/a","/data":"/srv/b"}}`),
+		json.RawMessage(`{"preopens":{"/data":"/srv/data"}}`),
+		json.RawMessage(`{"mounts":[{"guest":"/data","host":"/srv/a"},{"guest":"/data","host":"/srv/b"}]}`),
 		json.RawMessage(`{"maxOpenFiles":2}`),
-		json.RawMessage(`{"preopens":{"/":"relative"}}`),
+		json.RawMessage(`{"mounts":[{"guest":"/","host":"relative"}]}`),
 		json.RawMessage(`{"env":["NO_EQUALS"]}`),
 		json.RawMessage(`{"env":["KEY=` + strings.Repeat("x", 256<<10) + `"]}`),
 		json.RawMessage([]byte{'{', '"', 'e', 'n', 'v', '"', ':', '[', '"', 0xff, '"', ']', '}'}),
@@ -178,10 +174,10 @@ func TestStrictConfigValidation(t *testing.T) {
 	}
 }
 
-func TestMissingPreopenRollsBackPluginTransaction(t *testing.T) {
+func TestMissingMountRollsBackPluginTransaction(t *testing.T) {
 	provider := p1.Provider()
 	missing := filepath.Join(t.TempDir(), "missing")
-	config, err := json.Marshal(map[string]any{"preopens": map[string]string{"/data": missing}})
+	config, err := json.Marshal(map[string]any{"mounts": []p1.Preopen{{GuestPath: "/data", HostPath: missing, Read: true}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,11 +287,4 @@ func testDefinition(id string) wago.PluginDefinition {
 			Repository: "https://" + id, License: "Apache-2.0", Authors: []string{"WASI test"},
 		},
 	}
-}
-
-func snapshotModule(id string) string {
-	if id == unstable.ID {
-		return unstable.Module
-	}
-	return wasi.Module
 }

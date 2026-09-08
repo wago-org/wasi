@@ -70,24 +70,14 @@ const (
 // access is limited to explicitly configured preopens. Socket APIs fail with
 // access-denied until a networking capability is added.
 type Config struct {
-	Stdin          io.Reader
-	Stdout, Stderr io.Writer
-	// Input, Output, and ErrorOutput optionally provide native nonblocking WASI
-	// streams. They take precedence over the compatibility io interfaces above.
-	Input               InputStream
-	Output, ErrorOutput OutputStream
-	Args, Env           []string
-	// ProgramName is argv[0]. Direct users default to "wago" for compatibility;
-	// the plugin runner supplies the runtime's module path.
-	ProgramName string
-	WallClock   func() time.Time
-	Random      io.Reader
-	// Preopens maps absolute guest directory names to host directories. No
-	// host directory is visible unless it is explicitly listed here.
-	Preopens map[string]string
-	// Mounts is the rights-aware preopen configuration. Unlike the legacy
-	// Preopens map, rights are never implied. GuestPath and HostPath must be
-	// clean absolute paths.
+	Stdin          InputStream
+	Stdout, Stderr OutputStream
+	// Args is the complete argument vector, including argv[0].
+	Args, Env []string
+	WallClock func() time.Time
+	Random    io.Reader
+	// Mounts is the rights-aware preopen configuration. No rights are implied.
+	// GuestPath and HostPath must be clean absolute paths.
 	Mounts []Preopen
 	Limits Limits
 	// filesystem is populated transactionally by Run and remains private so
@@ -168,7 +158,7 @@ func Definition() wago.PluginDefinition {
 	return wago.PluginDefinition{
 		ID:          ID,
 		Name:        "WASI Preview 2",
-		Version:     "0.2.1",
+		Version:     "0.3.0",
 		Description: "Experimental WASI 0.2 command host with fail-closed networking.",
 		Stability:   wago.Experimental,
 		Compatibility: wago.Compatibility{
@@ -198,17 +188,16 @@ func Definition() wago.PluginDefinition {
 }
 
 type pluginConfig struct {
-	Stdin    *string            `json:"stdin,omitempty"`
-	Stdout   *string            `json:"stdout,omitempty"`
-	Stderr   *string            `json:"stderr,omitempty"`
-	Env      *[]string          `json:"env,omitempty"`
-	Preopens *map[string]string `json:"preopens,omitempty"`
-	Mounts   *[]Preopen         `json:"mounts,omitempty"`
-	Limits   *Limits            `json:"limits,omitempty"`
+	Stdin  *string    `json:"stdin,omitempty"`
+	Stdout *string    `json:"stdout,omitempty"`
+	Stderr *string    `json:"stderr,omitempty"`
+	Env    *[]string  `json:"env,omitempty"`
+	Mounts *[]Preopen `json:"mounts,omitempty"`
+	Limits *Limits    `json:"limits,omitempty"`
 }
 
 func configSchema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"stdin":{"type":"string","enum":["inherit","eof"]},"stdout":{"type":"string","enum":["inherit","discard"]},"stderr":{"type":"string","enum":["inherit","discard"]},"env":{"type":"array","maxItems":4096,"items":{"type":"string","minLength":2,"maxLength":32768,"pattern":"^[^=\\u0000]+=[^\\u0000]*$"}},"preopens":{"type":"object","maxProperties":64,"propertyNames":{"type":"string","pattern":"^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$","maxLength":4096},"additionalProperties":{"type":"string","minLength":1,"maxLength":4096}},"mounts":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["guest","host"],"properties":{"guest":{"type":"string","pattern":"^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$","maxLength":4096},"host":{"type":"string","minLength":1,"maxLength":4096},"read":{"type":"boolean"},"write":{"type":"boolean"},"mutateDirectory":{"type":"boolean"}}}},"limits":{"type":"object","additionalProperties":false,"properties":{"maxDescriptors":{"type":"integer","minimum":1,"maximum":65536},"maxStreams":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryStreams":{"type":"integer","minimum":1,"maximum":65536},"maxPollables":{"type":"integer","minimum":1,"maximum":65536},"maxPollInputs":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryEntryBytes":{"type":"integer","minimum":1,"maximum":16777216},"maxAggregateBufferBytes":{"type":"integer","minimum":1,"maximum":16777216}}}}}`)
+	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"stdin":{"type":"string","enum":["inherit","eof"]},"stdout":{"type":"string","enum":["inherit","discard"]},"stderr":{"type":"string","enum":["inherit","discard"]},"env":{"type":"array","maxItems":4096,"items":{"type":"string","minLength":2,"maxLength":32768,"pattern":"^[^=\\u0000]+=[^\\u0000]*$"}},"mounts":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["guest","host"],"properties":{"guest":{"type":"string","pattern":"^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$","maxLength":4096},"host":{"type":"string","minLength":1,"maxLength":4096},"read":{"type":"boolean"},"write":{"type":"boolean"},"mutateDirectory":{"type":"boolean"}}}},"limits":{"type":"object","additionalProperties":false,"properties":{"maxDescriptors":{"type":"integer","minimum":1,"maximum":65536},"maxStreams":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryStreams":{"type":"integer","minimum":1,"maximum":65536},"maxPollables":{"type":"integer","minimum":1,"maximum":65536},"maxPollInputs":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryEntryBytes":{"type":"integer","minimum":1,"maximum":16777216},"maxAggregateBufferBytes":{"type":"integer","minimum":1,"maximum":16777216}}}}}`)
 }
 
 type providerPlugin struct {
@@ -244,24 +233,9 @@ func validateConfig(raw json.RawMessage) error {
 		cfg.Stderr != nil && *cfg.Stderr != "inherit" && *cfg.Stderr != "discard" {
 		return fmt.Errorf("wasi p2: invalid stream configuration")
 	}
-	if cfg.Preopens != nil {
-		if err := validatePreopens(*cfg.Preopens); err != nil {
-			return err
-		}
-	}
 	if cfg.Mounts != nil {
 		if err := validateMounts(*cfg.Mounts); err != nil {
 			return err
-		}
-		if cfg.Preopens != nil {
-			for _, mount := range *cfg.Mounts {
-				if _, exists := (*cfg.Preopens)[mount.GuestPath]; exists {
-					return fmt.Errorf("wasi p2: guest path %q is configured in both preopens and mounts", mount.GuestPath)
-				}
-			}
-			if len(*cfg.Preopens)+len(*cfg.Mounts) > 64 {
-				return fmt.Errorf("wasi p2: combined preopens and mounts exceed 64 entries")
-			}
 		}
 	}
 	if cfg.Limits != nil {
@@ -289,24 +263,18 @@ func (p *providerPlugin) Register(reg *wago.Registrar) error {
 	if err != nil {
 		return err
 	}
-	p.cfg = Config{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
+	p.cfg = Config{Stdin: newInput(os.Stdin), Stdout: newOutput(os.Stdout), Stderr: newOutput(os.Stderr)}
 	if raw.Stdin != nil && *raw.Stdin == "eof" {
 		p.cfg.Stdin = nil
 	}
 	if raw.Stdout != nil && *raw.Stdout == "discard" {
-		p.cfg.Stdout = io.Discard
+		p.cfg.Stdout = newOutput(io.Discard)
 	}
 	if raw.Stderr != nil && *raw.Stderr == "discard" {
-		p.cfg.Stderr = io.Discard
+		p.cfg.Stderr = newOutput(io.Discard)
 	}
 	if raw.Env != nil {
 		p.cfg.Env = append([]string(nil), (*raw.Env)...)
-	}
-	if raw.Preopens != nil {
-		p.cfg.Preopens = make(map[string]string, len(*raw.Preopens))
-		for guest, host := range *raw.Preopens {
-			p.cfg.Preopens[guest] = host
-		}
 	}
 	if raw.Mounts != nil {
 		p.cfg.Mounts = append([]Preopen(nil), (*raw.Mounts)...)
@@ -337,10 +305,7 @@ func (p *providerPlugin) Run(ctx context.Context, wasm []byte) error {
 		return err
 	}
 	cfg := p.cfg
-	if len(args) > 0 {
-		cfg.ProgramName = args[0]
-		cfg.Args = append([]string(nil), args[1:]...)
-	}
+	cfg.Args = append([]string(nil), args...)
 	return p.components.With(func(components component.Service) error { return Run(ctx, components, wasm, cfg) })
 }
 
@@ -350,21 +315,10 @@ func Run(ctx context.Context, components component.Service, wasm []byte, cfg Con
 	if components == nil {
 		return fmt.Errorf("wasi p2: nil component service")
 	}
-	if err := validatePreopens(cfg.Preopens); err != nil {
-		return err
-	}
 	if err := validateMounts(cfg.Mounts); err != nil {
 		return err
 	}
-	for _, mount := range cfg.Mounts {
-		if _, exists := cfg.Preopens[mount.GuestPath]; exists {
-			return fmt.Errorf("wasi p2: guest path %q is configured in both preopens and mounts", mount.GuestPath)
-		}
-	}
-	if len(cfg.Preopens)+len(cfg.Mounts) > 64 {
-		return fmt.Errorf("wasi p2: combined preopens and mounts exceed 64 entries")
-	}
-	filesystem, err := prepareFilesystem(cfg.Preopens, cfg.Mounts, cfg.Limits)
+	filesystem, err := prepareFilesystem(cfg.Mounts, cfg.Limits)
 	if err != nil {
 		return err
 	}
@@ -396,29 +350,18 @@ func Run(ctx context.Context, components component.Service, wasm []byte, cfg Con
 	}, Options(cfg)...)
 }
 
-func validatePreopens(preopens map[string]string) error {
-	if len(preopens) > 64 {
-		return fmt.Errorf("wasi p2: preopens has %d entries, max 64", len(preopens))
-	}
-	for guest, host := range preopens {
-		if guest == "" || len(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
-			return fmt.Errorf("wasi p2: invalid guest preopen path %q", guest)
-		}
-		if host == "" || len(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
-			return fmt.Errorf("wasi p2: preopen %q requires a clean absolute host path", guest)
-		}
-	}
-	return nil
-}
-
 func validateMounts(mounts []Preopen) error {
 	if len(mounts) > 64 {
 		return fmt.Errorf("wasi p2: mounts has %d entries, max 64", len(mounts))
 	}
 	seen := make(map[string]struct{}, len(mounts))
 	for _, mount := range mounts {
-		if err := validatePreopens(map[string]string{mount.GuestPath: mount.HostPath}); err != nil {
-			return err
+		guest, host := mount.GuestPath, mount.HostPath
+		if guest == "" || len(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
+			return fmt.Errorf("wasi p2: invalid guest mount path %q", guest)
+		}
+		if host == "" || len(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
+			return fmt.Errorf("wasi p2: mount %q requires a clean absolute host path", guest)
 		}
 		if _, ok := seen[mount.GuestPath]; ok {
 			return fmt.Errorf("wasi p2: duplicate guest mount path %q", mount.GuestPath)
@@ -450,17 +393,17 @@ type hostState struct {
 // interfaces. Interface patch versions are matched by the component runtime.
 func Options(cfg Config) []component.Option {
 	limits := cfg.Limits.normalized()
-	stdin := cfg.Input
+	stdin := cfg.Stdin
 	if stdin == nil {
-		stdin = newInput(cfg.Stdin)
+		stdin = newInput(nil)
 	}
-	stdout := cfg.Output
+	stdout := cfg.Stdout
 	if stdout == nil {
-		stdout = newOutput(cfg.Stdout)
+		stdout = newOutput(nil)
 	}
-	stderr := cfg.ErrorOutput
+	stderr := cfg.Stderr
 	if stderr == nil {
-		stderr = newOutput(cfg.Stderr)
+		stderr = newOutput(nil)
 	}
 	wall := cfg.WallClock
 	if wall == nil {
@@ -473,7 +416,7 @@ func Options(cfg Config) []component.Option {
 	s := &hostState{stdin: stdin, stdout: stdout, stderr: stderr, base: time.Now(), wall: wall, errors: map[uint32]streamErrorValue{}, nextError: 1, pollables: map[uint32]pollableValue{}, nextPollable: 1, permits: map[uint32]uint64{}, outputs: map[uint32]OutputStream{}, limits: limits}
 	fs := cfg.filesystem
 	if fs == nil {
-		fs = newFilesystem(cfg.Preopens, cfg.Mounts, limits)
+		fs = newFilesystem(cfg.Mounts, limits)
 	}
 	fs.wall = wall
 	fs.ioState = s
@@ -487,12 +430,7 @@ func Options(cfg Config) []component.Option {
 		return []component.Value{stdinRep}, nil
 	}
 	getArgs := func(context.Context, []component.Value) ([]component.Value, error) {
-		program := cfg.ProgramName
-		if program == "" {
-			program = "wago"
-		}
-		out := make([]component.Value, 0, len(cfg.Args)+1)
-		out = append(out, program)
+		out := make([]component.Value, 0, len(cfg.Args))
 		for _, arg := range cfg.Args {
 			out = append(out, arg)
 		}

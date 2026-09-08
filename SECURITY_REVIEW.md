@@ -4,7 +4,7 @@ Review target: `main` at `bb0149491ce503341a96549a6d3ad63608a8ceef`
 Recorded: 2026-09-08
 
 This document is the remediation record for the critical review of the root,
-Preview 1, Preview 2, and legacy providers. The review compared the checkout
+Preview 1, and Preview 2 providers. The review compared the checkout
 with WASI 0.2.0 WIT, the upstream WASI testsuite, checked-in tests, and CI.
 The original reviewer could not execute the checkout because GitHub DNS was
 unavailable; defect findings were based on code and specification inspection.
@@ -31,7 +31,7 @@ The descriptor-relative filesystem confinement remains a strong foundation.
 - [x] Make P2 append atomic across streams and reject `u64` offsets above `math.MaxInt64`.
 - [x] Replace P1's 16,384-entry directory snapshot with incremental iteration.
 - [x] Add secure Linux and pre-macOS 15 descriptor-walk fallbacks, platform allocation/sync helpers, expanded errno tests, and Linux/macOS CI.
-- [x] Correct stability and completeness claims: the root and P1 are experimental, P2 is an experimental limited profile, and `wasi_unstable` is deprecated.
+- [x] Correct stability and completeness claims: the root, P1, and P2 are experimental; remove the legacy `wasi_unstable` compatibility provider.
 
 ## Additional correctness work
 
@@ -43,7 +43,7 @@ The descriptor-relative filesystem confinement remains a strong foundation.
 - [x] Require unlink rights before P1's trailing-slash type probe.
 - [x] Propagate cancellation out of P2 poll and reject timer-duration overflow.
 - [x] Distinguish P2 `sync-data` from `sync` where supported.
-- [x] Name and test the exact historical ABI implemented by `wasi_unstable`.
+- [x] Remove the historical unstable ABI alias instead of maintaining legacy compatibility.
 
 ## Required release gates
 

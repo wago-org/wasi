@@ -132,7 +132,7 @@ func newTestPlugin(t *testing.T, cfg Config) *Plugin {
 
 func TestPreview1PreopenAndFileLifecycle(t *testing.T) {
 	root := t.TempDir()
-	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
 	m := testModule{mem: make([]byte, 512)}
 	result := make([]uint64, 1)
 
@@ -194,7 +194,7 @@ func TestPreview1RejectsCapabilityEscape(t *testing.T) {
 	if err := os.Symlink("../outside", root+"/escape"); err != nil {
 		t.Fatal(err)
 	}
-	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
 	m := testModule{mem: make([]byte, 128)}
 	copy(m.mem[32:], "../outside")
 	result := make([]uint64, 1)
@@ -217,7 +217,7 @@ func TestPreview1FollowsSymlinksOnlyInsideCapability(t *testing.T) {
 	if err := os.Symlink("target", root+"/link"); err != nil {
 		t.Fatal(err)
 	}
-	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
 	m := testModule{mem: make([]byte, 256)}
 	copy(m.mem[32:], "link")
 	result := make([]uint64, 1)

@@ -238,7 +238,7 @@ func TestDirectoryIterationDoesNotTruncateLargeDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
 	mem := make([]byte, 8192)
 	result := make([]uint64, 1)
 	var cookie uint64

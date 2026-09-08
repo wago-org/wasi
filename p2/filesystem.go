@@ -154,17 +154,8 @@ func checkedOffset(offset uint64) (int64, error) {
 	return int64(offset), nil
 }
 
-func newFilesystem(preopens map[string]string, configured []Preopen, limits Limits) *filesystemState {
-	guestPaths := make([]string, 0, len(preopens))
-	for guest := range preopens {
-		guestPaths = append(guestPaths, guest)
-	}
-	sort.Strings(guestPaths)
-	mounts := make([]filesystemMount, 0, len(guestPaths))
-	for _, guest := range guestPaths {
-		clean := path.Clean("/" + strings.TrimPrefix(guest, "/"))
-		mounts = append(mounts, filesystemMount{guest: clean, host: preopens[guest], flags: 1 | 2 | 1<<5})
-	}
+func newFilesystem(configured []Preopen, limits Limits) *filesystemState {
+	mounts := make([]filesystemMount, 0, len(configured))
 	for _, mount := range configured {
 		var flags uint32
 		if mount.Read {
@@ -182,8 +173,8 @@ func newFilesystem(preopens map[string]string, configured []Preopen, limits Limi
 	return &filesystemState{mounts: mounts, descs: map[uint32]*descriptorNode{}, streams: map[uint32]*fileStream{}, dirs: map[uint32]*directoryStream{}, nextDesc: 1, nextStream: fileStreamRepMin, nextDir: 1, limits: limits.normalized(), wall: time.Now}
 }
 
-func prepareFilesystem(preopens map[string]string, configured []Preopen, limits Limits) (*filesystemState, error) {
-	s := newFilesystem(preopens, configured, limits)
+func prepareFilesystem(configured []Preopen, limits Limits) (*filesystemState, error) {
+	s := newFilesystem(configured, limits)
 	for i := range s.mounts {
 		mount := &s.mounts[i]
 		f, err := os.Open(mount.host)

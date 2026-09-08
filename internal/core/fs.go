@@ -97,10 +97,7 @@ func (e *Plugin) makeFS(strict bool) (*fsState, error) {
 		name, host        string
 		rights, inherited uint64
 	}
-	mounts := make([]mountConfig, 0, len(e.cfg.Preopens)+len(e.cfg.Mounts))
-	for name, host := range e.cfg.Preopens {
-		mounts = append(mounts, mountConfig{name: name, host: host, rights: directoryRights, inherited: allRights})
-	}
+	mounts := make([]mountConfig, 0, len(e.cfg.Mounts))
 	for _, mount := range e.cfg.Mounts {
 		var rights, inherited uint64
 		if mount.Read {

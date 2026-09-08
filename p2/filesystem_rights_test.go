@@ -11,7 +11,7 @@ import (
 )
 
 func TestConfiguredMountPreservesExactDescriptorFlags(t *testing.T) {
-	fs := newFilesystem(nil, []Preopen{{GuestPath: "/data", HostPath: t.TempDir(), Read: true}}, Limits{})
+	fs := newFilesystem([]Preopen{{GuestPath: "/data", HostPath: t.TempDir(), Read: true}}, Limits{})
 	if got, want := len(fs.mounts), 1; got != want {
 		t.Fatalf("mount count = %d, want %d", got, want)
 	}
@@ -49,7 +49,7 @@ func TestPrepareFilesystemPinsValidatedPreopen(t *testing.T) {
 	if err := os.WriteFile(original+"/inside", []byte("pinned"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fs, err := prepareFilesystem(nil, []Preopen{{GuestPath: "/data", HostPath: original, Read: true}}, Limits{})
+	fs, err := prepareFilesystem([]Preopen{{GuestPath: "/data", HostPath: original, Read: true}}, Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}

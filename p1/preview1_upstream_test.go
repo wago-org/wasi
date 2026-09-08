@@ -29,6 +29,10 @@ type preview1Harness struct {
 	in *wago.Instance
 }
 
+func readWriteMount(guest, host string) p1.Preopen {
+	return p1.Preopen{GuestPath: guest, HostPath: host, Read: true, Write: true, MutateDirectory: true}
+}
+
 func newPreview1Harness(t *testing.T, cfg p1.Config, funcs ...preview1Func) *preview1Harness {
 	t.Helper()
 	c, err := wago.Compile(nil, preview1CallModule(funcs))
@@ -150,7 +154,7 @@ func TestPreview1WazeroFdReaddirRejectsUnissuedCookie(t *testing.T) {
 	if err := os.Mkdir(root+"/dir", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", root)}},
 		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
 		preview1Func{"fd_readdir", []byte{wasmI32, wasmI32, wasmI32, wasmI64, wasmI32}},
 	)
@@ -249,7 +253,7 @@ func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
 
 // Ported from Wazero's fd_prestat tests and Wasmtime's path_open_preopen test.
 func TestPreview1UpstreamPreopenMetadataAndClose(t *testing.T) {
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": t.TempDir()}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", t.TempDir())}},
 		preview1Func{"fd_prestat_get", []byte{wasmI32, wasmI32}},
 		preview1Func{"fd_prestat_dir_name", []byte{wasmI32, wasmI32, wasmI32}},
 		preview1Func{"fd_fdstat_get", []byte{wasmI32, wasmI32}},
@@ -272,7 +276,7 @@ func TestPreview1UpstreamPreopenMetadataAndClose(t *testing.T) {
 // Ported from Wazero's descriptor I/O tests and the Wasmtime P1 file programs.
 func TestPreview1UpstreamDescriptorRightsAndIO(t *testing.T) {
 	root := t.TempDir()
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", root)}},
 		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
 		preview1Func{"fd_write", []byte{wasmI32, wasmI32, wasmI32, wasmI32}},
 		preview1Func{"fd_seek", []byte{wasmI32, wasmI64, wasmI32, wasmI32}},
@@ -329,7 +333,7 @@ func TestPreview1UpstreamPathConfinementAndSymlinks(t *testing.T) {
 	if err := os.Symlink("../outside", root+"/escape"); err != nil {
 		t.Fatal(err)
 	}
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", root)}},
 		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
 		preview1Func{"fd_close", []byte{wasmI32}},
 	)
@@ -355,7 +359,7 @@ func TestPreview1WazeroFdReaddirIssuedCookiesAndDotInode(t *testing.T) {
 	if err := os.WriteFile(root+"/dir/file", nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", root)}},
 		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
 		preview1Func{"fd_readdir", []byte{wasmI32, wasmI32, wasmI32, wasmI64, wasmI32}},
 	)
@@ -382,7 +386,7 @@ func TestPreview1WasmtimePollOneoffFiles(t *testing.T) {
 	if err := os.WriteFile(root+"/file", []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", root)}},
 		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
 		preview1Func{"poll_oneoff", []byte{wasmI32, wasmI32, wasmI32, wasmI32}},
 	)
@@ -409,7 +413,7 @@ func TestPreview1WasmtimePollOneoffFiles(t *testing.T) {
 // Ported from Wasmtime's p1_path_open_lots stress guest.
 func TestPreview1WasmtimePathOpenLots(t *testing.T) {
 	root := t.TempDir()
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", root)}},
 		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
 		preview1Func{"fd_close", []byte{wasmI32}},
 	)
@@ -426,7 +430,7 @@ func TestPreview1WasmtimePathOpenLots(t *testing.T) {
 
 // Ported from Wazero's socket error tables.
 func TestPreview1WazeroSocketDescriptorErrors(t *testing.T) {
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": t.TempDir()}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", t.TempDir())}},
 		preview1Func{"sock_shutdown", []byte{wasmI32, wasmI32}},
 	)
 	requireErrno(t, errnoBadf, h.call(t, "sock_shutdown", 42, 3))
@@ -438,7 +442,7 @@ func TestPreview1RightsAttenuationCannotBeReEscalated(t *testing.T) {
 	if err := os.Mkdir(root+"/child", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", root)}},
 		preview1Func{"fd_fdstat_get", []byte{wasmI32, wasmI32}},
 		preview1Func{"fd_fdstat_set_rights", []byte{wasmI32, wasmI64, wasmI64}},
 		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
@@ -455,7 +459,7 @@ func TestPreview1OpenFileQuota(t *testing.T) {
 	if err := os.WriteFile(root+"/file", nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}, MaxOpenFiles: 4},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", root)}, MaxOpenFiles: 4},
 		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
 	)
 	copy(h.memory()[32:], "file")
@@ -480,7 +484,7 @@ func TestPreview1SymlinkSwapCannotEscapePreopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := newPreview1Harness(t, p1.Config{Preopens: map[string]string{"/": root}},
+	h := newPreview1Harness(t, p1.Config{Mounts: []p1.Preopen{readWriteMount("/", root)}},
 		preview1Func{"path_open", []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI64, wasmI32, wasmI32}},
 		preview1Func{"fd_close", []byte{wasmI32}},
 	)
