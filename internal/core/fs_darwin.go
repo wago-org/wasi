@@ -4,31 +4,130 @@ package core
 
 import (
 	"os"
+	"path"
+	"strings"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// O_RESOLVE_BENEATH is available in the Darwin kernel and SDK but is absent
-// from the x/sys version pinned by this module.
-const (
-	oResolveBeneath      = 0x00001000
-	darwinENotcapableErr = syscall.Errno(107)
-)
-
 func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
+	return openAtDarwin(d, name, flags, mode, 0)
+}
+
+// openAtDarwin resolves every symlink from the preopen descriptor while
+// opening every component with O_NOFOLLOW. O_RESOLVE_BENEATH is unavailable
+// before macOS 15 and older kernels silently ignore its numeric flag, so a
+// descriptor walk is required to preserve confinement on macOS 14.
+func openAtDarwin(d *fdEntry, name string, flags int, mode uint32, symlinks int) (*os.File, uint64) {
+	if symlinks > 40 {
+		return nil, wasiELoop
+	}
 	if flags&unix.O_CREAT == 0 {
 		mode = 0
 	}
-	fd, err := unix.Openat(int(d.file.Fd()), name, flags|unix.O_CLOEXEC|oResolveBeneath, mode)
+	rootFD, err := unix.Dup(int(d.file.Fd()))
 	if err != nil {
-		if err == darwinENotcapableErr || err == syscall.ELOOP && flags&unix.O_NOFOLLOW == 0 {
-			return nil, wasiENotcapable
+		return nil, errno(err)
+	}
+	current := os.NewFile(uintptr(rootFD), d.file.Name())
+	defer func() {
+		if current != nil {
+			_ = current.Close()
 		}
+	}()
+	parts := strings.Split(name, "/")
+	resolved := make([]string, 0, len(parts))
+	for i, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		last := i == len(parts)-1
+		openFlags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
+		openMode := uint32(0)
+		if last {
+			openFlags = flags | unix.O_CLOEXEC
+			openMode = mode
+			if flags&unix.O_SYMLINK == 0 {
+				openFlags |= unix.O_NOFOLLOW
+			}
+		}
+		fd, openErr := unix.Openat(int(current.Fd()), part, openFlags, openMode)
+		if openErr == nil {
+			next := os.NewFile(uintptr(fd), part)
+			if last {
+				_ = current.Close()
+				current = nil
+				return next, wasiOK
+			}
+			_ = current.Close()
+			current = next
+			resolved = append(resolved, part)
+			continue
+		}
+
+		target, isSymlink, linkCode := darwinReadlink(current, part)
+		if linkCode != wasiOK {
+			return nil, linkCode
+		}
+		if !isSymlink {
+			return nil, capabilityErr(openErr)
+		}
+		if last && flags&(unix.O_NOFOLLOW|unix.O_SYMLINK) != 0 {
+			return nil, errno(openErr)
+		}
+		remaining := parts[i+1:]
+		resolvedName, code := darwinResolveLink(resolved, target, remaining)
+		if code != wasiOK {
+			return nil, code
+		}
+		return openAtDarwin(d, resolvedName, flags, mode, symlinks+1)
+	}
+	fd, err := unix.Openat(int(current.Fd()), ".", flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, mode)
+	if err != nil {
 		return nil, capabilityErr(err)
 	}
 	return os.NewFile(uintptr(fd), name), wasiOK
+}
+
+func darwinReadlink(parent *os.File, name string) (string, bool, uint64) {
+	buf := make([]byte, 4096)
+	n, err := unix.Readlinkat(int(parent.Fd()), name, buf)
+	if err != nil {
+		if err == syscall.EINVAL {
+			return "", false, wasiOK
+		}
+		return "", false, errno(err)
+	}
+	if n == len(buf) {
+		return "", false, wasiENametoolong
+	}
+	return string(buf[:n]), true, wasiOK
+}
+
+func darwinResolveLink(prefix []string, target string, remaining []string) (string, uint64) {
+	if path.IsAbs(target) {
+		return "", wasiENotcapable
+	}
+	parts := append([]string(nil), prefix...)
+	for _, part := range strings.Split(target, "/") {
+		switch part {
+		case "", ".":
+		case "..":
+			if len(parts) == 0 {
+				return "", wasiENotcapable
+			}
+			parts = parts[:len(parts)-1]
+		default:
+			parts = append(parts, part)
+		}
+	}
+	parts = append(parts, remaining...)
+	if len(parts) == 0 {
+		return ".", wasiOK
+	}
+	return strings.Join(parts, "/"), wasiOK
 }
 
 func openMetadataAt(d *fdEntry, name string, follow bool) (*os.File, uint64) {
