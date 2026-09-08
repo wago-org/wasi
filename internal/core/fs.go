@@ -46,6 +46,7 @@ type fdEntry struct {
 	inheriting uint64
 	dirIter    *os.File
 	dirCookie  uint64
+	dirIssued  uint64
 }
 
 func (e *Plugin) resetFS() {
@@ -732,6 +733,9 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 		}
 		copy(mem[buf+used:], rec[:n])
 		used += uint32(n)
+		if n >= 24 && i+1 > f.dirIssued {
+			f.dirIssued = i + 1
+		}
 		if n < len(rec) {
 			break
 		}
@@ -743,6 +747,9 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 }
 
 func positionDirectory(f *fdEntry, cookie uint64) uint64 {
+	if cookie != 0 && cookie > f.dirIssued {
+		return wasiENoent
+	}
 	if f.dirIter != nil && f.dirCookie == cookie {
 		return wasiOK
 	}
