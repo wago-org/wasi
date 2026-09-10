@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"os"
 	"reflect"
+	"strings"
+	"syscall"
 	"testing"
 
 	wago "github.com/wago-org/wago"
@@ -41,6 +43,83 @@ func TestPluginUsesRuntimeScopedArguments(t *testing.T) {
 	}
 }
 
+func TestPluginConfigEnvironmentDefaultsEmpty(t *testing.T) {
+	t.Setenv("WAGO_TEST_SECRET", "must-not-leak")
+	cfg, err := configFromPluginConfig(pluginConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Env) != 0 {
+		t.Fatalf("default environment = %q, want empty", cfg.Env)
+	}
+
+	explicit := []string{"VISIBLE=yes"}
+	cfg, err = configFromPluginConfig(pluginConfig{Env: &explicit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.Env, ","); got != "VISIBLE=yes" {
+		t.Fatalf("explicit environment = %q", got)
+	}
+}
+
+func TestReadOnlyMountPermitsReadsAndRejectsMutation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/input.txt", []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true}}})
+	m := testModule{mem: make([]byte, 256)}
+	copy(m.mem[32:], "input.txt")
+	result := make([]uint64, 1)
+
+	e.pathFilestatGet(m, []uint64{3, 0, 32, 9, 64}, result)
+	if result[0] != wasiOK {
+		t.Fatalf("stat through read-only mount: errno %d", result[0])
+	}
+	e.pathOpen(m, []uint64{3, 0, 32, 9, 0, rightFDRead, 0, 0, 16}, result)
+	if result[0] != wasiOK {
+		t.Fatalf("read open through read-only mount: errno %d", result[0])
+	}
+	fd := binary.LittleEndian.Uint32(m.mem[16:])
+	e.fdClose(m, []uint64{uint64(fd)}, result)
+
+	copy(m.mem[96:], "created")
+	e.pathOpen(m, []uint64{3, 0, 96, 7, 1, rightFDWrite, 0, 0, 24}, result)
+	if result[0] != wasiENotcapable {
+		t.Fatalf("create through read-only mount: errno %d, want %d", result[0], wasiENotcapable)
+	}
+	e.pathCreateDirectory(m, []uint64{3, 96, 7}, result)
+	if result[0] != wasiENotcapable {
+		t.Fatalf("mkdir through read-only mount: errno %d, want %d", result[0], wasiENotcapable)
+	}
+	copy(m.mem[128:], "input.txt/")
+	e.pathUnlinkFile(m, []uint64{3, 128, 10}, result)
+	if result[0] != wasiENotcapable {
+		t.Fatalf("trailing-slash unlink through read-only mount: errno %d, want %d", result[0], wasiENotcapable)
+	}
+	if _, err := os.Stat(root + "/created"); !os.IsNotExist(err) {
+		t.Fatalf("read-only mount mutated host: %v", err)
+	}
+}
+
+func TestErrnoMapsCommonHostErrors(t *testing.T) {
+	tests := map[error]uint64{
+		syscall.EPERM: wasiEPerm, syscall.EAGAIN: wasiEAgain,
+		syscall.EINTR: wasiEIntr, syscall.ENOSPC: wasiENospc,
+		syscall.EDQUOT: wasiEDquot, syscall.ENOMEM: wasiENomem,
+		syscall.EMFILE: wasiEMfile, syscall.ENFILE: wasiENfile,
+		syscall.EFBIG: wasiEFbig, syscall.EOVERFLOW: wasiEOverflow,
+		syscall.EBUSY: wasiEBusy, syscall.EPIPE: wasiEPipe,
+		syscall.EXDEV: wasiEXdev,
+	}
+	for host, want := range tests {
+		if got := errno(host); got != want {
+			t.Errorf("errno(%v) = %d, want %d", host, got, want)
+		}
+	}
+}
+
 func newTestPlugin(t *testing.T, cfg Config) *Plugin {
 	t.Helper()
 	e := &Plugin{module: "wasi_snapshot_preview1", cfg: cloneConfig(cfg)}
@@ -53,7 +132,7 @@ func newTestPlugin(t *testing.T, cfg Config) *Plugin {
 
 func TestPreview1PreopenAndFileLifecycle(t *testing.T) {
 	root := t.TempDir()
-	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
 	m := testModule{mem: make([]byte, 512)}
 	result := make([]uint64, 1)
 
@@ -115,7 +194,7 @@ func TestPreview1RejectsCapabilityEscape(t *testing.T) {
 	if err := os.Symlink("../outside", root+"/escape"); err != nil {
 		t.Fatal(err)
 	}
-	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
 	m := testModule{mem: make([]byte, 128)}
 	copy(m.mem[32:], "../outside")
 	result := make([]uint64, 1)
@@ -138,7 +217,7 @@ func TestPreview1FollowsSymlinksOnlyInsideCapability(t *testing.T) {
 	if err := os.Symlink("target", root+"/link"); err != nil {
 		t.Fatal(err)
 	}
-	e := newTestPlugin(t, Config{Preopens: map[string]string{"/": root}})
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
 	m := testModule{mem: make([]byte, 256)}
 	copy(m.mem[32:], "link")
 	result := make([]uint64, 1)

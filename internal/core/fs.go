@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,10 +18,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const maxDirectoryEntries = 16384
 const maxInt64Value = uint64(^uint64(0) >> 1)
 
 type fsState struct {
+	mu     sync.Mutex
 	fds    map[uint32]*fdEntry
 	nextFD uint32
 	maxFDs uint32
@@ -36,12 +37,16 @@ type fsGuard struct {
 
 type fdEntry struct {
 	file       *os.File
+	reader     io.Reader
+	writer     io.Writer
 	mount      string
 	preopen    string
 	flags      uint16
 	rights     uint64
 	inheriting uint64
-	dirCookies map[uint64]bool
+	dirIter    *os.File
+	dirCookie  uint64
+	dirIssued  uint64
 }
 
 func (e *Plugin) resetFS() {
@@ -77,14 +82,41 @@ func (e *Plugin) makeFS(strict bool) (*fsState, error) {
 		} else {
 			rights |= rightFDWrite
 		}
-		s.fds[fd] = &fdEntry{rights: rights}
+		entry := &fdEntry{rights: rights}
+		switch fd {
+		case 0:
+			entry.reader = e.cfg.Stdin
+		case 1:
+			entry.writer = e.cfg.Stdout
+		case 2:
+			entry.writer = e.cfg.Stderr
+		}
+		s.fds[fd] = entry
 	}
-	names := make([]string, 0, len(e.cfg.Preopens))
-	for name := range e.cfg.Preopens {
-		names = append(names, name)
+	type mountConfig struct {
+		name, host        string
+		rights, inherited uint64
 	}
-	sort.Strings(names)
-	for _, name := range names {
+	mounts := make([]mountConfig, 0, len(e.cfg.Mounts))
+	for _, mount := range e.cfg.Mounts {
+		var rights, inherited uint64
+		if mount.Read {
+			rights |= directoryReadRights
+			inherited |= directoryReadRights | fileReadRights
+		}
+		if mount.Write {
+			rights |= rightPathOpen | rightPathFilestatSetSize | rightPathFilestatSetTimes | rightFDFilestatSetTimes
+			inherited |= fileWriteRights | rightPathOpen | rightPathFilestatSetSize | rightPathFilestatSetTimes
+		}
+		if mount.MutateDirectory {
+			rights |= directoryMutationRights
+			inherited |= directoryMutationRights
+		}
+		mounts = append(mounts, mountConfig{name: mount.GuestPath, host: mount.HostPath, rights: rights, inherited: inherited})
+	}
+	sort.Slice(mounts, func(i, j int) bool { return mounts[i].name < mounts[j].name })
+	for _, mount := range mounts {
+		name := mount.name
 		if uint32(len(s.fds)) >= maxFDs {
 			if strict {
 				closeFS(s)
@@ -92,7 +124,7 @@ func (e *Plugin) makeFS(strict bool) (*fsState, error) {
 			}
 			break
 		}
-		host, err := filepath.Abs(e.cfg.Preopens[name])
+		host, err := filepath.Abs(mount.host)
 		if err != nil {
 			if strict {
 				closeFS(s)
@@ -122,24 +154,23 @@ func (e *Plugin) makeFS(strict bool) (*fsState, error) {
 		}
 		fd := s.nextFD
 		s.nextFD++
-		s.fds[fd] = &fdEntry{file: f, mount: host, preopen: name, rights: directoryRights, inheriting: allRights, dirCookies: map[uint64]bool{0: true}}
+		s.fds[fd] = &fdEntry{file: f, mount: host, preopen: name, rights: mount.rights, inheriting: mount.inherited}
 	}
 	return s, nil
 }
 
-func (e *Plugin) withFS(m wago.HostModule, results []uint64, call func()) {
+func (e *Plugin) stateFor(m wago.HostModule) (*fsState, uint64) {
 	e.guard.mu.Lock()
-	defer e.guard.mu.Unlock()
 	if e.guard.closed || e.fs == nil {
-		setStateError(results, wasiEBadf)
-		return
+		e.guard.mu.Unlock()
+		return nil, wasiEBadf
 	}
 	state := e.fs
 	if e.guard.resolver != nil {
 		identity, err := e.guard.resolver.Resolve(m)
 		if err != nil {
-			setStateError(results, wasiEPerm)
-			return
+			e.guard.mu.Unlock()
+			return nil, wasiEPerm
 		}
 		state = e.guard.states[identity]
 		if state == nil {
@@ -149,17 +180,16 @@ func (e *Plugin) withFS(m wago.HostModule, results []uint64, call func()) {
 			} else {
 				state, err = e.makeFS(true)
 				if err != nil {
-					setStateError(results, wasiEIo)
-					return
+					e.guard.mu.Unlock()
+					return nil, wasiEIo
 				}
 			}
 			e.guard.states[identity] = state
 		}
 	}
-	previous := e.fs
-	e.fs = state
-	defer func() { e.fs = previous }()
-	call()
+	state.mu.Lock()
+	e.guard.mu.Unlock()
+	return state, wasiOK
 }
 
 func setStateError(results []uint64, errno uint64) {
@@ -173,6 +203,9 @@ func closeFS(state *fsState) {
 		return
 	}
 	for _, entry := range state.fds {
+		if entry.dirIter != nil {
+			_ = entry.dirIter.Close()
+		}
 		if entry.file != nil {
 			_ = entry.file.Close()
 		}
@@ -182,9 +215,14 @@ func closeFS(state *fsState) {
 
 func (e *Plugin) closeInstance(identity wago.InstanceIdentity) {
 	e.guard.mu.Lock()
-	defer e.guard.mu.Unlock()
 	state := e.guard.states[identity]
 	delete(e.guard.states, identity)
+	e.guard.mu.Unlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	closeFS(state)
 }
 
@@ -193,7 +231,6 @@ func (e *Plugin) closeAll() {
 		return
 	}
 	e.guard.mu.Lock()
-	defer e.guard.mu.Unlock()
 	unique := make(map[*fsState]struct{}, len(e.guard.states)+1)
 	if e.fs != nil {
 		unique[e.fs] = struct{}{}
@@ -201,12 +238,15 @@ func (e *Plugin) closeAll() {
 	for _, state := range e.guard.states {
 		unique[state] = struct{}{}
 	}
-	for state := range unique {
-		closeFS(state)
-	}
 	clear(e.guard.states)
 	e.fs = nil
 	e.guard.closed = true
+	e.guard.mu.Unlock()
+	for state := range unique {
+		state.mu.Lock()
+		closeFS(state)
+		state.mu.Unlock()
+	}
 }
 
 func (e *Plugin) entry(fd uint32) (*fdEntry, uint64) {
@@ -302,7 +342,10 @@ func (e *Plugin) alloc(entry *fdEntry) (uint32, uint64) {
 	return fd, wasiOK
 }
 
-func iovecs(mem []byte, ptr, count uint32) ([][]byte, uint64) {
+func (e *Plugin) iovecs(mem []byte, ptr, count uint32) ([][]byte, uint64) {
+	if count > e.cfg.MaxIOVecs {
+		return nil, wasiENomem
+	}
 	if uint64(ptr)+uint64(count)*8 > uint64(len(mem)) {
 		return nil, wasiEFault
 	}
@@ -360,12 +403,7 @@ func (e *Plugin) fdAllocate(_ wago.HostModule, p, r []uint64) {
 		code = wasiEInval
 	}
 	if code == 0 {
-		st, err := f.file.Stat()
-		if err != nil {
-			code = errno(err)
-		} else if uint64(st.Size()) < end {
-			code = errno(f.file.Truncate(int64(end)))
-		}
+		code = errno(allocateFile(f.file, int64(p[1]), int64(p[2])))
 	}
 	r[0] = code
 }
@@ -394,10 +432,19 @@ func (e *Plugin) fdFdstatSetFlags(_ wago.HostModule, p, r []uint64) {
 	if code == 0 && p[1]&^uint64(0x1f) != 0 {
 		code = wasiEInval
 	}
+	if code == 0 && flags&0x1a != 0 {
+		code = wasiENotsup
+	}
 	if code == 0 {
-		f.flags = flags
-		if f.file != nil {
-			current, _, callErr := syscall.Syscall(syscall.SYS_FCNTL, f.file.Fd(), syscall.F_GETFL, 0)
+		hostFile := f.file
+		if hostFile == nil {
+			hostFile, _ = f.reader.(*os.File)
+		}
+		if hostFile == nil {
+			hostFile, _ = f.writer.(*os.File)
+		}
+		if hostFile != nil {
+			current, _, callErr := syscall.Syscall(syscall.SYS_FCNTL, hostFile.Fd(), syscall.F_GETFL, 0)
 			if callErr != 0 {
 				code = errno(callErr)
 			} else {
@@ -408,11 +455,16 @@ func (e *Plugin) fdFdstatSetFlags(_ wago.HostModule, p, r []uint64) {
 				if flags&4 != 0 {
 					current |= syscall.O_NONBLOCK
 				}
-				_, _, callErr = syscall.Syscall(syscall.SYS_FCNTL, f.file.Fd(), syscall.F_SETFL, current)
+				_, _, callErr = syscall.Syscall(syscall.SYS_FCNTL, hostFile.Fd(), syscall.F_SETFL, current)
 				if callErr != 0 {
 					code = errno(callErr)
 				}
 			}
+		} else if flags != 0 {
+			code = wasiENotsup
+		}
+		if code == 0 {
+			f.flags = flags
 		}
 	}
 	r[0] = code
@@ -470,7 +522,7 @@ func validFstFlags(flags uint64) bool {
 	return flags&^uint64(15) == 0 && flags&3 != 3 && flags&12 != 12
 }
 
-func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64) ([]unix.Timespec, uint64) {
+func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64, now time.Time) ([]unix.Timespec, uint64) {
 	if !validFstFlags(flags) {
 		return nil, wasiEInval
 	}
@@ -478,7 +530,6 @@ func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64) ([]unix.Timespe
 		return nil, wasiEOverflow
 	}
 	a, mt := hostAccessTime(info), info.ModTime()
-	now := time.Now()
 	if flags&1 != 0 {
 		a = time.Unix(0, int64(atim))
 	}
@@ -494,6 +545,14 @@ func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64) ([]unix.Timespe
 	return []unix.Timespec{unix.NsecToTimespec(a.UnixNano()), unix.NsecToTimespec(mt.UnixNano())}, wasiOK
 }
 
+func (e *Plugin) filesystemNow() (time.Time, uint64) {
+	now, _, err := e.cfg.Clocks.Realtime()
+	if err != nil || now > maxInt64Value {
+		return time.Time{}, wasiENotsup
+	}
+	return time.Unix(0, int64(now)), wasiOK
+}
+
 func (e *Plugin) fdFilestatSetTimes(_ wago.HostModule, p, r []uint64) {
 	f, code := e.entry(uint32(p[0]))
 	if code == 0 {
@@ -507,8 +566,14 @@ func (e *Plugin) fdFilestatSetTimes(_ wago.HostModule, p, r []uint64) {
 		if err != nil {
 			code = errno(err)
 		} else {
-			times, timeCode := timesFor(st, p[1], p[2], p[3])
-			code = timeCode
+			var now time.Time
+			if p[3]&0xa != 0 {
+				now, code = e.filesystemNow()
+			}
+			var times []unix.Timespec
+			if code == 0 {
+				times, code = timesFor(st, p[1], p[2], p[3], now)
+			}
 			if code == 0 {
 				code = errno(setFileTimes(f.file, times))
 			}
@@ -525,7 +590,7 @@ func (e *Plugin) readAt(m wago.HostModule, p, r []uint64) {
 	if code == 0 {
 		code = require(f, rightFDRead|rightFDSeek)
 	}
-	bufs, memCode := iovecs(m.Memory(), uint32(p[1]), uint32(p[2]))
+	bufs, memCode := e.iovecs(m.Memory(), uint32(p[1]), uint32(p[2]))
 	if code == 0 {
 		code = memCode
 	}
@@ -562,7 +627,7 @@ func (e *Plugin) writeAt(m wago.HostModule, p, r []uint64) {
 	if code == 0 {
 		code = require(f, rightFDWrite|rightFDSeek)
 	}
-	bufs, memCode := iovecs(m.Memory(), uint32(p[1]), uint32(p[2]))
+	bufs, memCode := e.iovecs(m.Memory(), uint32(p[1]), uint32(p[2]))
 	if code == 0 {
 		code = memCode
 	}
@@ -606,29 +671,16 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 		code = wasiEBadf
 	}
 	cookie := p[3]
-	if code == 0 && (f.dirCookies == nil || !f.dirCookies[cookie]) {
-		code = wasiENoent
-	}
-	var entries []os.DirEntry
-	if code == 0 {
-		dir, openCode := openAt(f, ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
-		code = openCode
-		if code == 0 {
-			var err error
-			entries, err = dir.ReadDir(maxDirectoryEntries)
-			_ = dir.Close()
-			if err != nil && err != io.EOF {
-				code = errno(err)
-			}
-		}
-	}
 	buf, bufLen := uint32(p[1]), uint32(p[2])
 	mem := m.Memory()
 	if code == 0 && uint64(buf)+uint64(bufLen) > uint64(len(mem)) {
 		code = wasiEFault
 	}
 	var used uint32
-	for i := int(cookie); code == 0 && i < len(entries)+2; i++ {
+	if code == 0 {
+		code = positionDirectory(f, cookie)
+	}
+	for i := cookie; code == 0; i++ {
 		name := "."
 		var info os.FileInfo
 		var err error
@@ -638,7 +690,16 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 			name = ".."
 			info, err = f.file.Stat()
 		} else {
-			name = entries[i-2].Name()
+			entries, readErr := f.dirIter.ReadDir(1)
+			if errors.Is(readErr, io.EOF) || len(entries) == 0 {
+				break
+			}
+			if readErr != nil {
+				code = errno(readErr)
+				break
+			}
+			f.dirCookie = i + 1
+			name = entries[0].Name()
 			entryFile, openCode := openMetadataAt(f, name, false)
 			if openCode != 0 {
 				code = openCode
@@ -652,7 +713,7 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 			break
 		}
 		rec := make([]byte, 24+len(name))
-		binary.LittleEndian.PutUint64(rec[0:], uint64(i+1))
+		binary.LittleEndian.PutUint64(rec[0:], i+1)
 		if st, ok := info.Sys().(*syscall.Stat_t); ok {
 			binary.LittleEndian.PutUint64(rec[8:], st.Ino)
 		}
@@ -669,8 +730,8 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 		}
 		copy(mem[buf+used:], rec[:n])
 		used += uint32(n)
-		if n >= 24 {
-			f.dirCookies[uint64(i+1)] = true
+		if n >= 24 && i+1 > f.dirIssued {
+			f.dirIssued = i + 1
 		}
 		if n < len(rec) {
 			break
@@ -680,6 +741,44 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 		code = wasiEFault
 	}
 	r[0] = code
+}
+
+func positionDirectory(f *fdEntry, cookie uint64) uint64 {
+	if cookie != 0 && cookie > f.dirIssued {
+		return wasiENoent
+	}
+	if f.dirIter != nil && f.dirCookie == cookie {
+		return wasiOK
+	}
+	if f.dirIter != nil {
+		_ = f.dirIter.Close()
+	}
+	dir, code := openAt(f, ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if code != 0 {
+		return code
+	}
+	f.dirIter = dir
+	f.dirCookie = 2
+	var remaining uint64
+	if cookie > 2 {
+		remaining = cookie - 2
+	}
+	for remaining > 0 {
+		step := remaining
+		if step > 1024 {
+			step = 1024
+		}
+		entries, err := dir.ReadDir(int(step))
+		f.dirCookie += uint64(len(entries))
+		remaining -= uint64(len(entries))
+		if errors.Is(err, io.EOF) || len(entries) == 0 {
+			return wasiOK
+		}
+		if err != nil {
+			return errno(err)
+		}
+	}
+	return wasiOK
 }
 
 func (e *Plugin) fdRenumber(_ wago.HostModule, p, r []uint64) {
@@ -696,8 +795,13 @@ func (e *Plugin) fdRenumber(_ wago.HostModule, p, r []uint64) {
 		return
 	}
 	if code == 0 {
-		if old := e.fs.fds[to]; old != nil && old.file != nil {
-			_ = old.file.Close()
+		if old := e.fs.fds[to]; old != nil {
+			if old.dirIter != nil {
+				_ = old.dirIter.Close()
+			}
+			if old.file != nil {
+				_ = old.file.Close()
+			}
 		}
 		e.fs.fds[to] = f
 		delete(e.fs.fds, from)
@@ -801,8 +905,14 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 				if err != nil {
 					code = errno(err)
 				} else {
-					times, timeCode := timesFor(st, p[4], p[5], p[6])
-					code = timeCode
+					var now time.Time
+					if p[6]&0xa != 0 {
+						now, code = e.filesystemNow()
+					}
+					var times []unix.Timespec
+					if code == 0 {
+						times, code = timesFor(st, p[4], p[5], p[6], now)
+					}
 					if code == 0 {
 						code = errno(setFileTimes(f, times))
 					}
@@ -821,8 +931,14 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 					if err != nil {
 						code = errno(err)
 					} else {
-						times, timeCode := timesFor(st, p[4], p[5], p[6])
-						code = timeCode
+						var now time.Time
+						if p[6]&0xa != 0 {
+							now, code = e.filesystemNow()
+						}
+						var times []unix.Timespec
+						if code == 0 {
+							times, code = timesFor(st, p[4], p[5], p[6], now)
+						}
 						if code == 0 {
 							code = errno(setPathTimes(parent, leaf, times, true))
 						}
@@ -939,7 +1055,6 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	if code == 0 {
 		f, code = openAt(d, name, flags, 0o666)
 	}
-	openedDir := false
 	if code == 0 {
 		st, err := f.Stat()
 		if err != nil {
@@ -953,7 +1068,6 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 		}
 		if code == 0 && st.IsDir() {
 			rights &= directoryRights
-			openedDir = true
 		}
 	}
 	if code != 0 {
@@ -962,9 +1076,6 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 		}
 	} else {
 		entry := &fdEntry{file: f, mount: d.mount, flags: fdflags, rights: rights, inheriting: inheriting}
-		if openedDir {
-			entry.dirCookies = map[uint64]bool{0: true}
-		}
 		fd, allocCode := e.alloc(entry)
 		if allocCode != 0 {
 			_ = f.Close()
@@ -1033,6 +1144,10 @@ func (e *Plugin) pathUnlinkFile(m wago.HostModule, p, r []uint64) {
 		d, clean, pathCode := e.resolve(uint32(p[0]), name)
 		if pathCode != 0 {
 			r[0] = pathCode
+			return
+		}
+		if rightsCode := require(d, rightPathUnlinkFile); rightsCode != 0 {
+			r[0] = rightsCode
 			return
 		}
 		f, openCode := openMetadataAt(d, clean, false)

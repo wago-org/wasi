@@ -3,13 +3,17 @@
   <p>WASI Preview 1 and Preview 2 for Wago, with explicit host access and guest permissions.</p>
 </div>
 
-`github.com/wago-org/wasi` installs the complete package: Preview 1, Preview 2,
-and the unstable compatibility provider. Preview 1 provides the
+`github.com/wago-org/wasi` installs an experimental bundle containing Preview 1
+and the complete WASI 0.2 command import surface. Preview 1 provides the
 flat `wasi_snapshot_preview1` imports, including a capability-scoped filesystem.
 Preview 2 runs `wasi:cli/command` components through Wago's Component Model
-plugin with stdio/stdin, argv and environment, clocks, random, polling, terminal
-discovery, process exit, and an empty-by-default preopen list. The deprecated
-`wasi_unstable` module remains available for old toolchains.
+plugin. Networking imports are complete and fail closed with typed
+`access-denied` results. Legacy unstable snapshots and compatibility aliases are
+not supported.
+
+All providers expose an empty guest environment by default. Configure `env`
+explicitly when a component needs selected values; the host process environment
+is never inherited implicitly.
 
 The plugin has no import-time side effects. Generated Wago runtimes call
 `register.Providers()` and activate only the exact providers recorded in
@@ -32,11 +36,27 @@ wago add wago-org/wasi/p2
 Non-interactive root installs select everything. Authority grants and contract
 bindings remain explicit in the reviewed lock graph.
 
+### 0.3 breaking changes
+
+Version 0.3 deliberately removes the compatibility surface instead of carrying
+ambiguous security defaults forward:
+
+- `github.com/wago-org/wasi/unstable` has been removed. Use `/p1` and the
+  standard `wasi_snapshot_preview1` module.
+- `Config.Preopens` and the `preopens` JSON field have been removed. Use
+  rights-bearing `Mounts` entries.
+- P1 `Config.Now` has been removed. Supply a `ClockSource` when overriding
+  clocks.
+- P2 `Args` is the complete argument vector, including `argv[0]`; `ProgramName`
+  is gone.
+- P2 stream configuration accepts only `InputStream` and `OutputStream`. Adapt
+  ordinary Go I/O with `NewInputStream` and `NewOutputStream`.
+
 Configure a bounded preopen and keep stdout/stderr attached to the process:
 
 ```sh
 wago plugin config github.com/wago-org/wasi/p1 \
-  '{"preopens":{"/data":"/srv/guest-data"},"maxOpenFiles":256,"maxPollDurationMillis":1000}'
+  '{"mounts":[{"guest":"/data","host":"/srv/guest-data","read":true}],"maxOpenFiles":256}'
 ```
 
 Then run a command module. The module path becomes `argv[0]`; trailing values are
@@ -50,12 +70,11 @@ wago run command.wasm first second
 
 | Plugin ID | Wasm import module | Status |
 | --- | --- | --- |
-| `github.com/wago-org/wasi` | All providers below | Complete package |
-| `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | Stable |
-| `github.com/wago-org/wasi/p2` | `wasi:cli/command` component world | Experimental |
-| `github.com/wago-org/wasi/unstable` | `wasi_unstable` | Stable legacy compatibility |
+| `github.com/wago-org/wasi` | All providers below | Experimental bundle |
+| `github.com/wago-org/wasi/p1` | `wasi_snapshot_preview1` | Experimental (Beta target) |
+| `github.com/wago-org/wasi/p2` | WASI 0.2 `wasi:cli/command` imports | Experimental |
 
-The root selects all three provider paths. Selecting only `/p2` also selects
+The root selects both provider paths. Selecting only `/p2` also selects
 `github.com/wago-org/component-model`; the reviewed
 lock graph binds the component runtime contract to the WASI command provider.
 Core-only Preview 1 users do not load the component runtime.
@@ -67,14 +86,15 @@ run against an already leased Component Model service directly:
 
 ```go
 err := p2.Run(ctx, components, componentBytes, p2.Config{
-    Stdin:  strings.NewReader("input\n"),
-    Stdout: os.Stdout,
-    Stderr: os.Stderr,
-    Args:   []string{"first", "second"},
+    Stdin:  p2.NewInputStream(strings.NewReader("input\n")),
+    Stdout: p2.NewOutputStream(os.Stdout),
+    Stderr: p2.NewOutputStream(os.Stderr),
+    Args:   []string{"command.wasm", "first", "second"},
     Env:    []string{"MODE=production"},
-    Preopens: map[string]string{
-        "/data": "/srv/my-component-data",
-    },
+    Mounts: []p2.Preopen{{
+        GuestPath: "/data", HostPath: "/srv/my-component-data",
+        Read: true, Write: true, MutateDirectory: true,
+    }},
 })
 ```
 
@@ -92,7 +112,7 @@ The Preview 1 providers request four required, non-inheriting Wago authorities:
 
 | Authority | Scope | Why |
 | --- | --- | --- |
-| `host.import.define` | exactly `wasi_snapshot_preview1` or `wasi_unstable` | Define that snapshot's host functions |
+| `host.import.define` | exactly `wasi_snapshot_preview1` | Define Preview 1 host functions |
 | `host.caller.identify` | identity only | Keep descriptor tables separate without instance control |
 | `host.arguments.read` | this runtime's immutable argv | Implement `args_*` without process-global state |
 | `instance.close.observe` | opaque close events | Close the departed guest's files |
@@ -104,7 +124,7 @@ Preview 2 requests only `host.arguments.read`; filesystem paths are supplied as
 explicit preopens in its reviewed configuration, and networking remains denied.
 
 The root is a policy-free bundle provider: it requests no authority and depends
-on P1, P2, and unstable. P1 and unstable are leaves. P2 depends on the Component
+on P1 and P2. P1 is a leaf. P2 depends on the Component
 Model plugin and binds its typed command service. Wago validates the complete
 dependency and contract graph before registration.
 
@@ -120,7 +140,8 @@ every import with one of these narrower capabilities:
 | `wasi.fd.write` | Stream and descriptor writes |
 | `wasi.fd.manage` | Descriptor close, seek, stat, rights, and renumbering |
 | `wasi.path.read` | Path metadata and symlink reads below preopens |
-| `wasi.path.write` | Path open/create/mutation below preopens |
+| `wasi.path.open` | Open paths with descriptor rights bounded by the configured mount |
+| `wasi.path.write` | Path creation and mutation below preopens |
 | `wasi.arguments.read` | Guest argv |
 | `wasi.environment.read` | Guest environment |
 | `wasi.clock.read` | Clock resolution and time |
@@ -157,10 +178,16 @@ outside the documented ranges are rejected before the provider factory runs.
 | --- | --- | --- |
 | `stdin` | `"inherit"` or `"eof"` | `"inherit"` |
 | `stdout`, `stderr` | `"inherit"` or `"discard"` | `"inherit"` |
-| `env` | Up to 4096 `KEY=VALUE` strings | Host process environment |
-| `preopens` | Up to 64 clean absolute guest paths mapped to clean absolute host directories | None |
+| `env` | Up to 4096 explicit `KEY=VALUE` strings | Empty |
+| `mounts` | Up to 64 `{guest,host,read,write,mutateDirectory}` rights-aware preopens | None |
 | `maxOpenFiles` | 3 to 65536, including stdio and preopens | 1024 |
-| `maxPollDurationMillis` | 1 to 60000 | 1000 |
+| `maxIOVecs` | 1 to 65536 Preview 1 iovecs per call | 1024 |
+| `maxSubscriptionsPerPoll` | 1 to 65536 Preview 1 subscriptions per call | 1024 |
+
+Preview 2 accepts a nested `limits` object with `maxDescriptors`, `maxStreams`,
+`maxDirectoryStreams`, `maxPollables`, `maxPollInputs`,
+`maxDirectoryEntryBytes`, and `maxAggregateBufferBytes`. Defaults are 256, 256,
+64, 1024, 1024, 1 MiB, and 16 MiB respectively.
 
 Configured preopens are opened during plugin startup. A missing path, a regular
 file in place of a directory, or an exhausted descriptor bound fails startup and
@@ -203,9 +230,8 @@ imports := wasi.Imports(wasi.Config{Stdout: os.Stdout, Args: []string{"command.w
 instance, err := wago.Instantiate(compiled, wago.InstantiateOptions{Imports: imports})
 ```
 
-The root `wasi.Imports` API remains a low-level Preview 1 convenience. Equivalent
-APIs are available from `p1` and `unstable`; only the imported Wasm module name
-changes.
+The root `wasi.Imports` API remains a low-level Preview 1 convenience. The same
+API is available directly from `p1`.
 
 ## Syscall coverage
 
@@ -216,16 +242,17 @@ the appropriate unsupported, not-a-socket, or bad-descriptor errno; they do not
 receive ambient network or signal access.
 
 Every guest pointer is bounds checked. Preopen path traversal is confined below
-the opened directory using Linux `openat2` resolution rules or Darwin's
-`O_RESOLVE_BENEATH` open policy. Darwin rejects `path_link` when asked to follow
+the opened directory using Linux `openat2` resolution rules or a Darwin
+descriptor walk that opens every component with `O_NOFOLLOW`. Darwin rejects
+`path_link` when asked to follow
 the source symlink because the platform has no race-free descriptor-based link
 operation equivalent to Linux `AT_EMPTY_PATH`.
 
 ## Compatibility and testing
 
-Preview 1 and unstable support `linux/amd64`, `darwin/amd64`, and
-`darwin/arm64`. Preview 2, and therefore the complete root bundle, support
-`darwin/arm64` and `linux/amd64`. All require Go 1.22 or newer and Wago 0.1.0 or
+Preview 1 supports `linux/amd64`, `linux/arm64`, `darwin/amd64`, and
+`darwin/arm64`. Preview 2, and therefore the root bundle, support
+`darwin/arm64`, `linux/amd64`, and `linux/arm64`. All require Go 1.22 or newer and Wago 0.1.0 or
 newer.
 
 ```sh
@@ -242,8 +269,8 @@ seeding, clocks, and polling on Wago rather than synthetic WAT alone.
 
 The hermetic suite covers the host boundary, descriptor rights and lifecycle,
 path confinement, malformed memory, polling, strict plugin configuration, exact
-authority grants, bundle dependencies, and the explicit catalog. Optional
-corpus and wasi-testsuite harnesses remain documented in the test source.
+authority grants, bundle dependencies, and the explicit catalog. CI additionally
+pins the official Preview 1 testsuite and WASI 0.2 WIT revision as release gates.
 
 ## License
 

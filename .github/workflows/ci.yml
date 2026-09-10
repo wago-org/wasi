@@ -9,49 +9,132 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref (e.g. new pushes to a PR).
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  GO_VERSION: "1.22"
-
 jobs:
   test:
-    name: Test & coverage
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Go ${{ matrix.go }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+        go: ["1.22.x", stable]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout wasi
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: ${{ matrix.go }}
           cache-dependency-path: go.sum
-
       - name: Format
+        shell: bash
         run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "gofmt needs to run on:"; echo "$unformatted"
-            exit 1
-          fi
+          unformatted="$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
+          test -z "$unformatted" || { echo "$unformatted"; exit 1; }
+      - run: go vet ./...
+      - run: go build ./...
+      - name: Test
+        run: go test -race ./...
 
-      - name: Vet
-        run: go vet ./...
+  wasi-p1-conformance:
+    name: P1 official testsuite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache-dependency-path: go.sum
+      - name: Checkout pinned WebAssembly/wasi-testsuite
+        uses: actions/checkout@v4
+        with:
+          repository: WebAssembly/wasi-testsuite
+          # Immutable prebuilt branch merge containing upstream main
+          # 5f3c702bee1cde4362b018d1b3b1d99592af99e6.
+          ref: 609c446139956ff30239f87cb18af1dc6128bed2
+          path: upstream-wasi-testsuite
+          submodules: recursive
+      - name: Run Preview 1 conformance
+        env:
+          WAGO_WASITEST_DIR: ${{ github.workspace }}/upstream-wasi-testsuite
+        run: go test ./p1 -run '^TestWASISuite$' -count=1 -v
 
-      - name: Build
-        run: go build ./...
+  pinned-wit-surface:
+    name: P2 pinned WIT surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache-dependency-path: go.sum
+      - name: Checkout pinned WebAssembly/wasi
+        uses: actions/checkout@v4
+        with:
+          repository: WebAssembly/wasi
+          ref: 70214b878af4ce45889b4ad9d26a7ac98db8931b
+          path: upstream-wasi
+      - name: Verify generated surface and registrations
+        shell: bash
+        run: |
+          diff -u p2/testdata/wasi-0.2.0.surface <(go run ./cmd/wit-surface -root upstream-wasi/preview2)
+          go test ./p2 -run '^TestWASI020Surface$' -count=1
 
-      - name: Test (race + coverage)
-        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+  p2-fixtures:
+    name: P2 fixture reproducibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache-dependency-path: go.sum
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Rebuild and compare checked-in components
+        shell: bash
+        run: |
+          cargo build --locked --release --target wasm32-wasip2 --manifest-path p2/testdata/rust-smoke/Cargo.toml
+          cargo build --locked --release --target wasm32-wasip2 --manifest-path p2/testdata/rust-filesystem/Cargo.toml
+          cargo build --locked --release --target wasm32-wasip2 --manifest-path p2/testdata/rust-sockets/Cargo.toml
+          cmp p2/testdata/rust_smoke.component.wasm p2/testdata/rust-smoke/target/wasm32-wasip2/release/wago-wasip2-smoke.wasm
+          cmp p2/testdata/rust_filesystem.component.wasm p2/testdata/rust-filesystem/target/wasm32-wasip2/release/wago-wasip2-filesystem.wasm
+          cmp p2/testdata/rust_sockets.component.wasm p2/testdata/rust-sockets/target/wasm32-wasip2/release/wago-wasip2-sockets.wasm
+          go test ./p2 -count=1
 
-      # Upload to Codecov for the coverage badge. fail_ci_if_error stays false so a
-      # not-yet-enabled Codecov repo (or a missing token) never turns CI red; enable
-      # the repo at codecov.io to light the badge up.
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
+  differential:
+    name: P1 Wago / Wazero / Wasmtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache-dependency-path: go.sum
+      - name: Install pinned Wasmtime
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/bytecodealliance/wasmtime/releases/download/v48.0.1/wasmtime-v48.0.1-x86_64-linux.tar.xz \
+            | tar -xJ -C "${RUNNER_TEMP}"
+      - name: Compare observable behavior
+        env:
+          WASMTIME: ${{ runner.temp }}/wasmtime-v48.0.1-x86_64-linux/wasmtime
+        run: go test ./p1 -run '^TestPreview1DifferentialSmoke$' -count=1 -v
+
+  coverage:
+    name: Race coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+      - run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - uses: codecov/codecov-action@v4
         with:
           files: coverage.out
           fail_ci_if_error: false

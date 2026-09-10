@@ -19,6 +19,13 @@ import (
 //go:embed testdata/rust_smoke.wasm
 var rustSmokeWasm []byte
 
+type fixedClock struct{ realtime uint64 }
+
+func (c fixedClock) Realtime() (uint64, uint64, error) { return c.realtime, 1, nil }
+func (fixedClock) Monotonic() (uint64, uint64, error)  { return 1, 1, nil }
+func (fixedClock) ProcessCPU() (uint64, uint64, error) { return 0, 0, errors.ErrUnsupported }
+func (fixedClock) ThreadCPU() (uint64, uint64, error)  { return 0, 0, errors.ErrUnsupported }
+
 func TestRustWASIP1CommandRunsRepeatedlyOnWago(t *testing.T) {
 	compiled, err := wago.Compile(nil, rustSmokeWasm)
 	if err != nil {
@@ -34,7 +41,7 @@ func TestRustWASIP1CommandRunsRepeatedlyOnWago(t *testing.T) {
 			Stderr: &stderr,
 			Args:   []string{"rust-smoke", "alpha", "beta"},
 			Env:    []string{"WAGO_FLAVOR=core"},
-			Now:    func() int64 { return time.Unix(1_700_000_000, 0).UnixNano() },
+			Clocks: fixedClock{realtime: uint64(time.Unix(1_700_000_000, 0).UnixNano())},
 		})})
 		if err != nil {
 			t.Fatalf("iteration %d: instantiate: %v", iteration, err)

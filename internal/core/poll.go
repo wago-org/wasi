@@ -1,15 +1,36 @@
 package core
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
+	"os"
 	"time"
 
 	wago "github.com/wago-org/wago"
+	"golang.org/x/sys/unix"
 )
 
-// pollOneoff implements the Preview 1 subscription/event ABI. Regular files
-// and configured streams are always ready; relative clock subscriptions wait
-// only when no descriptor event is ready.
+// Pollable is the readiness contract for configured streams that are not
+// backed by an *os.File. Wait must return when ctx is canceled.
+type Pollable interface {
+	Ready() bool
+	Wait(context.Context) error
+}
+
+type pollSubscription struct {
+	userdata uint64
+	typ      byte
+	entry    *fdEntry
+	due      time.Duration
+	clock    bool
+	code     uint16
+}
+
+// pollOneoff implements Preview 1 polling without claiming readiness for an
+// arbitrary synchronous reader or writer. Regular files and EOF/discard streams
+// are immediately ready; OS descriptors use poll(2), and custom streams must
+// implement Pollable.
 func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 	in, out, n, result := uint32(p[0]), uint32(p[1]), uint32(p[2]), uint32(p[3])
 	mem := m.Memory()
@@ -17,92 +38,251 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 		r[0] = wasiEInval
 		return
 	}
+	limit := e.cfg.MaxSubscriptionsPerPoll
+	if limit == 0 {
+		limit = 1024
+	}
+	if n > limit {
+		r[0] = wasiENomem
+		return
+	}
 	if uint64(in)+uint64(n)*48 > uint64(len(mem)) || uint64(out)+uint64(n)*32 > uint64(len(mem)) {
 		r[0] = wasiEFault
 		return
 	}
-	type event struct {
-		userdata uint64
-		typ      byte
-		code     uint16
-	}
-	events := make([]event, 0, n)
-	clocks := make([]event, 0, n)
-	var delay time.Duration
-	maxDelay := e.cfg.MaxPollDuration
-	if maxDelay <= 0 {
-		maxDelay = time.Second
-	}
+
+	subs := make([]pollSubscription, 0, n)
+	var earliest time.Duration
+	hasDeadline := false
 	for i := uint32(0); i < n; i++ {
-		sub := mem[in+i*48 : in+(i+1)*48]
-		ev := event{userdata: binary.LittleEndian.Uint64(sub), typ: sub[8]}
-		switch ev.typ {
-		case 0: // clock
-			clockID := binary.LittleEndian.Uint32(sub[16:])
-			if clockID > 3 {
+		raw := mem[in+i*48 : in+(i+1)*48]
+		sub := pollSubscription{userdata: binary.LittleEndian.Uint64(raw), typ: raw[8]}
+		switch sub.typ {
+		case 0:
+			clockID := binary.LittleEndian.Uint32(raw[16:])
+			timeout := binary.LittleEndian.Uint64(raw[24:])
+			flags := binary.LittleEndian.Uint16(raw[40:])
+			if clockID > 3 || flags&^uint16(1) != 0 {
 				r[0] = wasiEInval
 				return
 			}
-			timeout := binary.LittleEndian.Uint64(sub[24:])
-			flags := binary.LittleEndian.Uint16(sub[40:])
-			if flags&^uint16(1) != 0 {
-				r[0] = wasiEInval
+			now, _, err := clockValue(e.cfg.Clocks, clockID)
+			if err != nil {
+				r[0] = wasiENotsup
 				return
 			}
+			remaining := timeout
 			if flags&1 != 0 {
-				now := uint64(time.Now().UnixNano())
 				if timeout > now {
-					timeout -= now
+					remaining = timeout - now
 				} else {
-					timeout = 0
+					remaining = 0
 				}
 			}
-			if timeout > uint64(maxDelay) {
-				r[0] = wasiEInval
+			if remaining > uint64(^uint64(0)>>1) {
+				r[0] = wasiEOverflow
 				return
 			}
-			if d := time.Duration(timeout); delay == 0 || d < delay {
-				delay = d
+			sub.clock = true
+			sub.due = time.Duration(remaining)
+			if !hasDeadline || sub.due < earliest {
+				earliest, hasDeadline = sub.due, true
 			}
-			clocks = append(clocks, ev)
-		case 1, 2: // fd_read / fd_write
-			fd := binary.LittleEndian.Uint32(sub[16:])
-			f, code := e.entry(fd)
-			if code == 0 {
-				right := rightFDRead
-				if ev.typ == 2 {
-					right = rightFDWrite
-				}
-				code = require(f, uint64(right))
+		case 1, 2:
+			fd := binary.LittleEndian.Uint32(raw[16:])
+			entry, code := e.entry(fd)
+			if code == wasiOK {
+				code = require(entry, rightPollFDReadWrite)
 			}
-			ev.code = uint16(code)
-			events = append(events, ev)
+			sub.entry = entry
+			sub.code = uint16(code)
 		default:
 			r[0] = wasiEInval
 			return
 		}
+		subs = append(subs, sub)
 	}
-	if len(events) == 0 {
-		if delay > 0 {
-			// withFS owns this lock while resolving descriptors. No filesystem
-			// state is used after this point, so release it while waiting to keep
-			// one guest clock from blocking unrelated WASI instances.
-			e.guard.mu.Unlock()
-			time.Sleep(delay)
-			e.guard.mu.Lock()
+
+	started := time.Now()
+	ready := readySubscriptions(subs, 0)
+	if len(ready) == 0 {
+		if err := e.waitSubscriptions(subs, earliest, hasDeadline); err != nil {
+			switch {
+			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+				r[0] = wasiEIntr
+			case errors.Is(err, errPollUnsupported):
+				r[0] = wasiENotsup
+			default:
+				r[0] = errno(err)
+			}
+			return
 		}
-		events = append(events, clocks...)
+		ready = readySubscriptions(subs, time.Since(started))
 	}
+
 	clear(mem[out : out+n*32])
-	for i, ev := range events {
+	for i, index := range ready {
+		sub := subs[index]
 		b := mem[out+uint32(i)*32:]
-		binary.LittleEndian.PutUint64(b, ev.userdata)
-		binary.LittleEndian.PutUint16(b[8:], ev.code)
-		b[10] = ev.typ
+		binary.LittleEndian.PutUint64(b, sub.userdata)
+		binary.LittleEndian.PutUint16(b[8:], sub.code)
+		b[10] = sub.typ
 	}
-	if !putLe32(mem, result, uint32(len(events))) {
+	if !putLe32(mem, result, uint32(len(ready))) {
 		r[0] = wasiEFault
 		return
 	}
 	r[0] = wasiOK
+}
+
+func readySubscriptions(subs []pollSubscription, elapsed time.Duration) []int {
+	ready := make([]int, 0, len(subs))
+	for i := range subs {
+		sub := &subs[i]
+		if sub.clock {
+			if elapsed >= sub.due {
+				ready = append(ready, i)
+			}
+			continue
+		}
+		if sub.code != 0 || streamReady(sub.entry, sub.typ) {
+			ready = append(ready, i)
+		}
+	}
+	return ready
+}
+
+func streamObject(entry *fdEntry, typ byte) any {
+	if entry == nil {
+		return nil
+	}
+	if entry.file != nil {
+		return entry.file
+	}
+	if typ == 1 {
+		return entry.reader
+	}
+	return entry.writer
+}
+
+func streamReady(entry *fdEntry, typ byte) bool {
+	object := streamObject(entry, typ)
+	if object == nil {
+		return true
+	}
+	if pollable, ok := object.(Pollable); ok {
+		return pollable.Ready()
+	}
+	if typ == 2 {
+		if _, ok := object.(interface{ Bytes() []byte }); ok {
+			return true
+		}
+	}
+	file, ok := object.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	if err == nil && info.Mode().IsRegular() {
+		return true
+	}
+	events := int16(unix.POLLIN)
+	if typ == 2 {
+		events = unix.POLLOUT
+	}
+	fds := []unix.PollFd{{Fd: int32(file.Fd()), Events: events}}
+	_, err = unix.Poll(fds, 0)
+	return err == nil && fds[0].Revents != 0
+}
+
+var errPollUnsupported = errors.New("wasi: stream does not implement readiness")
+
+func (e *Plugin) waitSubscriptions(subs []pollSubscription, delay time.Duration, hasDeadline bool) error {
+	ctx := e.cfg.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if hasDeadline {
+		var deadlineCancel context.CancelFunc
+		waitCtx, deadlineCancel = context.WithTimeout(waitCtx, delay)
+		defer deadlineCancel()
+	}
+
+	type waitResult struct{ err error }
+	results := make(chan waitResult, len(subs)+1)
+	hasWaiter := false
+	var files []unix.PollFd
+	for i := range subs {
+		sub := &subs[i]
+		if sub.clock || sub.code != 0 {
+			continue
+		}
+		object := streamObject(sub.entry, sub.typ)
+		if pollable, ok := object.(Pollable); ok {
+			hasWaiter = true
+			go func() { results <- waitResult{err: pollable.Wait(waitCtx)} }()
+			continue
+		}
+		if file, ok := object.(*os.File); ok {
+			events := int16(unix.POLLIN)
+			if sub.typ == 2 {
+				events = unix.POLLOUT
+			}
+			files = append(files, unix.PollFd{Fd: int32(file.Fd()), Events: events})
+			continue
+		}
+		if object != nil {
+			if sub.typ == 2 {
+				if _, ok := object.(interface{ Bytes() []byte }); ok {
+					continue
+				}
+			}
+			return errPollUnsupported
+		}
+	}
+	if len(files) != 0 {
+		hasWaiter = true
+		go func() { results <- waitResult{err: waitOSFiles(waitCtx, files)} }()
+	}
+	if !hasWaiter {
+		if hasDeadline {
+			<-waitCtx.Done()
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return nil
+			}
+			return waitCtx.Err()
+		}
+		return errPollUnsupported
+	}
+	select {
+	case result := <-results:
+		if hasDeadline && errors.Is(result.err, context.DeadlineExceeded) {
+			return nil
+		}
+		return result.err
+	case <-waitCtx.Done():
+		if hasDeadline && errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+			return nil
+		}
+		return waitCtx.Err()
+	}
+}
+
+func waitOSFiles(ctx context.Context, files []unix.PollFd) error {
+	for {
+		ready, err := unix.Poll(files, 50)
+		if err != nil && !errors.Is(err, unix.EINTR) {
+			return err
+		}
+		if ready > 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
 }

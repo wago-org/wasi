@@ -26,24 +26,24 @@ const (
 	// ID is the canonical Preview 2 provider ID.
 	ID = "github.com/wago-org/wasi/p2"
 
-	outputStreamResource  uint32 = 1
-	inputStreamResource   uint32 = 2
-	errorResource         uint32 = 3
-	descriptorResource    uint32 = 4
-	pollableResource      uint32 = 5
-	terminalInResource    uint32 = 6
-	terminalOutResource   uint32 = 7
-	networkResource       uint32 = 9
-	tcpSocketResource     uint32 = 10
-	udpSocketResource     uint32 = 11
-	resolveStreamResource uint32 = 12
+	outputStreamResource     uint32 = 1
+	inputStreamResource      uint32 = 2
+	errorResource            uint32 = 3
+	descriptorResource       uint32 = 4
+	pollableResource         uint32 = 5
+	terminalInResource       uint32 = 6
+	terminalOutResource      uint32 = 7
+	networkResource          uint32 = 9
+	tcpSocketResource        uint32 = 10
+	udpSocketResource        uint32 = 11
+	resolveStreamResource    uint32 = 12
+	incomingDatagramResource uint32 = 13
+	outgoingDatagramResource uint32 = 14
 
-	stdoutRep   uint32 = 1
-	stderrRep   uint32 = 2
-	stdinRep    uint32 = 3
-	readyRep    uint32 = 1
-	timerRepMin uint32 = 0x1000
-	maxIOSize          = 16 << 20
+	stdoutRep uint32 = 1
+	stderrRep uint32 = 2
+	stdinRep  uint32 = 3
+	maxIOSize        = 16 << 20
 )
 
 const (
@@ -70,14 +70,71 @@ const (
 // access is limited to explicitly configured preopens. Socket APIs fail with
 // access-denied until a networking capability is added.
 type Config struct {
-	Stdin          io.Reader
-	Stdout, Stderr io.Writer
-	Args, Env      []string
-	WallClock      func() time.Time
-	Random         io.Reader
-	// Preopens maps absolute guest directory names to host directories. No
-	// host directory is visible unless it is explicitly listed here.
-	Preopens map[string]string
+	Stdin          InputStream
+	Stdout, Stderr OutputStream
+	// Args is the complete argument vector, including argv[0].
+	Args, Env []string
+	WallClock func() time.Time
+	Random    io.Reader
+	// Mounts is the rights-aware preopen configuration. No rights are implied.
+	// GuestPath and HostPath must be clean absolute paths.
+	Mounts []Preopen
+	Limits Limits
+	// filesystem is populated transactionally by Run and remains private so
+	// callers cannot bypass preopen validation.
+	filesystem *filesystemState
+}
+
+// Limits bounds host resources owned by one component instance.
+type Limits struct {
+	MaxDescriptors          uint32 `json:"maxDescriptors,omitempty"`
+	MaxStreams              uint32 `json:"maxStreams,omitempty"`
+	MaxDirectoryStreams     uint32 `json:"maxDirectoryStreams,omitempty"`
+	MaxPollables            uint32 `json:"maxPollables,omitempty"`
+	MaxPollInputs           uint32 `json:"maxPollInputs,omitempty"`
+	MaxDirectoryEntryBytes  uint64 `json:"maxDirectoryEntryBytes,omitempty"`
+	MaxAggregateBufferBytes uint64 `json:"maxAggregateBufferBytes,omitempty"`
+}
+
+func (l Limits) normalized() Limits {
+	if l.MaxDescriptors == 0 {
+		l.MaxDescriptors = 256
+	}
+	if l.MaxStreams == 0 {
+		l.MaxStreams = 256
+	}
+	if l.MaxDirectoryStreams == 0 {
+		l.MaxDirectoryStreams = 64
+	}
+	if l.MaxPollables == 0 {
+		l.MaxPollables = 1024
+	}
+	if l.MaxPollInputs == 0 {
+		l.MaxPollInputs = 1024
+	}
+	if l.MaxDirectoryEntryBytes == 0 {
+		l.MaxDirectoryEntryBytes = 1 << 20
+	}
+	if l.MaxAggregateBufferBytes == 0 {
+		l.MaxAggregateBufferBytes = 16 << 20
+	}
+	return l
+}
+func (l Limits) ioLimit() uint64 {
+	l = l.normalized()
+	if l.MaxAggregateBufferBytes < maxIOSize {
+		return l.MaxAggregateBufferBytes
+	}
+	return maxIOSize
+}
+
+// Preopen grants explicit filesystem rights beneath one host directory.
+type Preopen struct {
+	GuestPath       string `json:"guest"`
+	HostPath        string `json:"host"`
+	Read            bool   `json:"read"`
+	Write           bool   `json:"write"`
+	MutateDirectory bool   `json:"mutateDirectory"`
 }
 
 // Service runs a wasi:cli/command component with the provider's reviewed
@@ -101,12 +158,12 @@ func Definition() wago.PluginDefinition {
 	return wago.PluginDefinition{
 		ID:          ID,
 		Name:        "WASI Preview 2",
-		Version:     "0.2.1",
-		Description: "Preview 2 for WebAssembly components.",
+		Version:     "0.3.0",
+		Description: "Experimental WASI 0.2 command host with fail-closed networking.",
 		Stability:   wago.Experimental,
 		Compatibility: wago.Compatibility{
 			Engines:   map[string]string{"wago": ">=0.1.0", "go": ">=1.22"},
-			Platforms: []string{"darwin/arm64", "linux/amd64"},
+			Platforms: []string{"darwin/arm64", "linux/amd64", "linux/arm64"},
 		},
 		Provenance: wago.PluginProvenance{
 			Homepage:   "https://github.com/wago-org/wasi",
@@ -131,15 +188,16 @@ func Definition() wago.PluginDefinition {
 }
 
 type pluginConfig struct {
-	Stdin    *string            `json:"stdin,omitempty"`
-	Stdout   *string            `json:"stdout,omitempty"`
-	Stderr   *string            `json:"stderr,omitempty"`
-	Env      *[]string          `json:"env,omitempty"`
-	Preopens *map[string]string `json:"preopens,omitempty"`
+	Stdin  *string    `json:"stdin,omitempty"`
+	Stdout *string    `json:"stdout,omitempty"`
+	Stderr *string    `json:"stderr,omitempty"`
+	Env    *[]string  `json:"env,omitempty"`
+	Mounts *[]Preopen `json:"mounts,omitempty"`
+	Limits *Limits    `json:"limits,omitempty"`
 }
 
 func configSchema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"stdin":{"type":"string","enum":["inherit","eof"]},"stdout":{"type":"string","enum":["inherit","discard"]},"stderr":{"type":"string","enum":["inherit","discard"]},"env":{"type":"array","maxItems":4096,"items":{"type":"string","minLength":2,"maxLength":32768,"pattern":"^[^=\\u0000]+=[^\\u0000]*$"}},"preopens":{"type":"object","maxProperties":64,"propertyNames":{"type":"string","pattern":"^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$","maxLength":4096},"additionalProperties":{"type":"string","minLength":1,"maxLength":4096}}}}`)
+	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"stdin":{"type":"string","enum":["inherit","eof"]},"stdout":{"type":"string","enum":["inherit","discard"]},"stderr":{"type":"string","enum":["inherit","discard"]},"env":{"type":"array","maxItems":4096,"items":{"type":"string","minLength":2,"maxLength":32768,"pattern":"^[^=\\u0000]+=[^\\u0000]*$"}},"mounts":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["guest","host"],"properties":{"guest":{"type":"string","pattern":"^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$","maxLength":4096},"host":{"type":"string","minLength":1,"maxLength":4096},"read":{"type":"boolean"},"write":{"type":"boolean"},"mutateDirectory":{"type":"boolean"}}}},"limits":{"type":"object","additionalProperties":false,"properties":{"maxDescriptors":{"type":"integer","minimum":1,"maximum":65536},"maxStreams":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryStreams":{"type":"integer","minimum":1,"maximum":65536},"maxPollables":{"type":"integer","minimum":1,"maximum":65536},"maxPollInputs":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryEntryBytes":{"type":"integer","minimum":1,"maximum":16777216},"maxAggregateBufferBytes":{"type":"integer","minimum":1,"maximum":16777216}}}}}`)
 }
 
 type providerPlugin struct {
@@ -175,8 +233,13 @@ func validateConfig(raw json.RawMessage) error {
 		cfg.Stderr != nil && *cfg.Stderr != "inherit" && *cfg.Stderr != "discard" {
 		return fmt.Errorf("wasi p2: invalid stream configuration")
 	}
-	if cfg.Preopens != nil {
-		if err := validatePreopens(*cfg.Preopens); err != nil {
+	if cfg.Mounts != nil {
+		if err := validateMounts(*cfg.Mounts); err != nil {
+			return err
+		}
+	}
+	if cfg.Limits != nil {
+		if err := validateLimits(*cfg.Limits); err != nil {
 			return err
 		}
 	}
@@ -200,26 +263,40 @@ func (p *providerPlugin) Register(reg *wago.Registrar) error {
 	if err != nil {
 		return err
 	}
-	p.cfg = Config{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Env: os.Environ()}
+	p.cfg = Config{Stdin: newInput(os.Stdin), Stdout: newOutput(os.Stdout), Stderr: newOutput(os.Stderr)}
 	if raw.Stdin != nil && *raw.Stdin == "eof" {
 		p.cfg.Stdin = nil
 	}
 	if raw.Stdout != nil && *raw.Stdout == "discard" {
-		p.cfg.Stdout = io.Discard
+		p.cfg.Stdout = newOutput(io.Discard)
 	}
 	if raw.Stderr != nil && *raw.Stderr == "discard" {
-		p.cfg.Stderr = io.Discard
+		p.cfg.Stderr = newOutput(io.Discard)
 	}
 	if raw.Env != nil {
 		p.cfg.Env = append([]string(nil), (*raw.Env)...)
 	}
-	if raw.Preopens != nil {
-		p.cfg.Preopens = make(map[string]string, len(*raw.Preopens))
-		for guest, host := range *raw.Preopens {
-			p.cfg.Preopens[guest] = host
-		}
+	if raw.Mounts != nil {
+		p.cfg.Mounts = append([]Preopen(nil), (*raw.Mounts)...)
+	}
+	if raw.Limits != nil {
+		p.cfg.Limits = *raw.Limits
 	}
 	return wagoplugin.Provide(reg, Contract, Service(p))
+}
+
+func validateLimits(l Limits) error {
+	values := []struct {
+		name  string
+		value uint64
+		max   uint64
+	}{{"MaxDescriptors", uint64(l.MaxDescriptors), 65536}, {"MaxStreams", uint64(l.MaxStreams), 65536}, {"MaxDirectoryStreams", uint64(l.MaxDirectoryStreams), 65536}, {"MaxPollables", uint64(l.MaxPollables), 65536}, {"MaxPollInputs", uint64(l.MaxPollInputs), 65536}, {"MaxDirectoryEntryBytes", l.MaxDirectoryEntryBytes, 16 << 20}, {"MaxAggregateBufferBytes", l.MaxAggregateBufferBytes, 16 << 20}}
+	for _, v := range values {
+		if v.value > v.max {
+			return fmt.Errorf("wasi p2: %s exceeds %d", v.name, v.max)
+		}
+	}
+	return nil
 }
 
 func (p *providerPlugin) Run(ctx context.Context, wasm []byte) error {
@@ -228,9 +305,7 @@ func (p *providerPlugin) Run(ctx context.Context, wasm []byte) error {
 		return err
 	}
 	cfg := p.cfg
-	if len(args) > 0 {
-		cfg.Args = append([]string(nil), args[1:]...)
-	}
+	cfg.Args = append([]string(nil), args...)
 	return p.components.With(func(components component.Service) error { return Run(ctx, components, wasm, cfg) })
 }
 
@@ -240,9 +315,15 @@ func Run(ctx context.Context, components component.Service, wasm []byte, cfg Con
 	if components == nil {
 		return fmt.Errorf("wasi p2: nil component service")
 	}
-	if err := validatePreopens(cfg.Preopens); err != nil {
+	if err := validateMounts(cfg.Mounts); err != nil {
 		return err
 	}
+	filesystem, err := prepareFilesystem(cfg.Mounts, cfg.Limits)
+	if err != nil {
+		return err
+	}
+	defer filesystem.closeMounts()
+	cfg.filesystem = filesystem
 	return components.WithInstance(ctx, wasm, func(in *component.Instance) error {
 		exports := in.InstanceExports()
 		sort.Strings(exports)
@@ -269,49 +350,60 @@ func Run(ctx context.Context, components component.Service, wasm []byte, cfg Con
 	}, Options(cfg)...)
 }
 
-func validatePreopens(preopens map[string]string) error {
-	if len(preopens) > 64 {
-		return fmt.Errorf("wasi p2: preopens has %d entries, max 64", len(preopens))
+func validateMounts(mounts []Preopen) error {
+	if len(mounts) > 64 {
+		return fmt.Errorf("wasi p2: mounts has %d entries, max 64", len(mounts))
 	}
-	for guest, host := range preopens {
+	seen := make(map[string]struct{}, len(mounts))
+	for _, mount := range mounts {
+		guest, host := mount.GuestPath, mount.HostPath
 		if guest == "" || len(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
-			return fmt.Errorf("wasi p2: invalid guest preopen path %q", guest)
+			return fmt.Errorf("wasi p2: invalid guest mount path %q", guest)
 		}
 		if host == "" || len(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
-			return fmt.Errorf("wasi p2: preopen %q requires a clean absolute host path", guest)
+			return fmt.Errorf("wasi p2: mount %q requires a clean absolute host path", guest)
 		}
+		if _, ok := seen[mount.GuestPath]; ok {
+			return fmt.Errorf("wasi p2: duplicate guest mount path %q", mount.GuestPath)
+		}
+		seen[mount.GuestPath] = struct{}{}
 	}
 	return nil
 }
 
 type hostState struct {
-	mu        sync.Mutex
-	stdin     []byte
-	stdinAt   int
-	resources *component.HandleTable
-	base      time.Time
-	wall      func() time.Time
-	deadlines map[uint32]time.Time
-	nextTimer uint32
+	mu           sync.Mutex
+	stdinMu      sync.Mutex
+	stdin        InputStream
+	stdout       OutputStream
+	stderr       OutputStream
+	resources    *component.HandleTable
+	base         time.Time
+	wall         func() time.Time
+	errors       map[uint32]streamErrorValue
+	nextError    uint32
+	pollables    map[uint32]pollableValue
+	nextPollable uint32
+	permits      map[uint32]uint64
+	outputs      map[uint32]OutputStream
+	limits       Limits
 }
 
 // Options returns Component Model host options for the Preview 2 command
 // interfaces. Interface patch versions are matched by the component runtime.
 func Options(cfg Config) []component.Option {
-	stdout, stderr := cfg.Stdout, cfg.Stderr
+	limits := cfg.Limits.normalized()
+	stdin := cfg.Stdin
+	if stdin == nil {
+		stdin = newInput(nil)
+	}
+	stdout := cfg.Stdout
 	if stdout == nil {
-		stdout = io.Discard
+		stdout = newOutput(nil)
 	}
+	stderr := cfg.Stderr
 	if stderr == nil {
-		stderr = io.Discard
-	}
-	var stdin []byte
-	var stdinErr error
-	if cfg.Stdin != nil {
-		stdin, stdinErr = io.ReadAll(io.LimitReader(cfg.Stdin, maxIOSize+1))
-		if len(stdin) > maxIOSize {
-			stdinErr = fmt.Errorf("stdin exceeds %d bytes", maxIOSize)
-		}
+		stderr = newOutput(nil)
 	}
 	wall := cfg.WallClock
 	if wall == nil {
@@ -321,8 +413,13 @@ func Options(cfg Config) []component.Option {
 	if random == nil {
 		random = crand.Reader
 	}
-	s := &hostState{stdin: stdin, base: time.Now(), wall: wall, deadlines: map[uint32]time.Time{}, nextTimer: timerRepMin}
-	fs := newFilesystem(cfg.Preopens)
+	s := &hostState{stdin: stdin, stdout: stdout, stderr: stderr, base: time.Now(), wall: wall, errors: map[uint32]streamErrorValue{}, nextError: 1, pollables: map[uint32]pollableValue{}, nextPollable: 1, permits: map[uint32]uint64{}, outputs: map[uint32]OutputStream{}, limits: limits}
+	fs := cfg.filesystem
+	if fs == nil {
+		fs = newFilesystem(cfg.Mounts, limits)
+	}
+	fs.wall = wall
+	fs.ioState = s
 
 	getOutput := func(rep uint32) component.HostFunc {
 		return func(context.Context, []component.Value) ([]component.Value, error) {
@@ -330,14 +427,10 @@ func Options(cfg Config) []component.Option {
 		}
 	}
 	getStdin := func(context.Context, []component.Value) ([]component.Value, error) {
-		if stdinErr != nil {
-			return nil, fmt.Errorf("wasi:cli/stdin.get-stdin: %w", stdinErr)
-		}
 		return []component.Value{stdinRep}, nil
 	}
 	getArgs := func(context.Context, []component.Value) ([]component.Value, error) {
-		out := make([]component.Value, 0, len(cfg.Args)+1)
-		out = append(out, "wago")
+		out := make([]component.Value, 0, len(cfg.Args))
 		for _, arg := range cfg.Args {
 			out = append(out, arg)
 		}
@@ -352,6 +445,22 @@ func Options(cfg Config) []component.Option {
 		}
 		return []component.Value{out}, nil
 	}
+	initialCWD := func(context.Context, []component.Value) ([]component.Value, error) {
+		return []component.Value{nil}, nil
+	}
+	errorDebug := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+		rep, err := repArg(args)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		value, ok := s.errors[rep]
+		s.mu.Unlock()
+		if !ok {
+			return nil, fmt.Errorf("wasi:io/error: unknown error rep %d", rep)
+		}
+		return []component.Value{value.err.Error()}, nil
+	}
 	exit := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("wasi:cli/exit.exit: expected 1 argument")
@@ -365,15 +474,29 @@ func Options(cfg Config) []component.Option {
 		}
 		return nil, &ExitError{Code: 0}
 	}
-	writer := func(rep uint32) (io.Writer, error) {
+	writer := func(rep uint32) (OutputStream, error) {
 		switch rep {
 		case stdoutRep:
-			return stdout, nil
+			return s.stdout, nil
 		case stderrRep:
-			return stderr, nil
+			return s.stderr, nil
+		}
+		s.mu.Lock()
+		cached := s.outputs[rep]
+		s.mu.Unlock()
+		if cached != nil {
+			return cached, nil
 		}
 		if w := fs.output(rep); w != nil {
-			return w, nil
+			out := newOutput(w)
+			s.mu.Lock()
+			if prior := s.outputs[rep]; prior != nil {
+				out = prior
+			} else {
+				s.outputs[rep] = out
+			}
+			s.mu.Unlock()
+			return out, nil
 		}
 		return nil, fmt.Errorf("wasi:io/streams: unknown output-stream rep %d", rep)
 	}
@@ -385,10 +508,21 @@ func Options(cfg Config) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("output-stream.check-write: self is %T", args[0])
 		}
-		if _, err := writer(rep); err != nil {
+		w, err := writer(rep)
+		if err != nil {
 			return nil, err
 		}
-		return []component.Value{component.ResultValue{Payload: uint64(1) << 40}}, nil
+		permit, err := w.CheckWrite()
+		if err != nil {
+			return s.streamFailure(err), nil
+		}
+		if permit > limits.ioLimit() {
+			permit = limits.ioLimit()
+		}
+		s.mu.Lock()
+		s.permits[rep] = permit
+		s.mu.Unlock()
+		return []component.Value{component.ResultValue{Payload: permit}}, nil
 	}
 	write := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 2 {
@@ -406,12 +540,17 @@ func Options(cfg Config) []component.Option {
 		if err != nil {
 			return nil, err
 		}
-		n, err := w.Write(buf)
-		if err != nil {
-			return nil, err
+		s.mu.Lock()
+		permit, granted := s.permits[rep]
+		if granted {
+			delete(s.permits, rep)
 		}
-		if n != len(buf) {
-			return nil, io.ErrShortWrite
+		s.mu.Unlock()
+		if !granted || uint64(len(buf)) > permit {
+			return nil, fmt.Errorf("output-stream.write exceeds check-write permit")
+		}
+		if err := w.TryWrite(buf); err != nil {
+			return s.streamFailure(err), nil
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}
@@ -420,21 +559,66 @@ func Options(cfg Config) []component.Option {
 		if err != nil {
 			return err
 		}
-		if f, ok := w.(interface{ Flush() error }); ok {
-			return f.Flush()
-		}
-		return nil
+		return w.BeginFlush()
 	}
 	blockingWriteAndFlush := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
-		result, err := write(ctx, args)
+		if len(args) != 2 {
+			return nil, fmt.Errorf("output-stream.blocking-write-and-flush: expected self and contents")
+		}
+		rep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("output-stream.blocking-write-and-flush: invalid self")
+		}
+		buf, err := bytesValue(args[1])
 		if err != nil {
 			return nil, err
 		}
-		rep, _ := args[0].(uint32) // write already validated the representation.
-		if err := flushWriter(rep); err != nil {
+		if len(buf) > 4096 {
+			return nil, fmt.Errorf("output-stream.blocking-write-and-flush: contents exceed 4096 bytes")
+		}
+		w, err := writer(rep)
+		if err != nil {
 			return nil, err
 		}
-		return result, nil
+		for len(buf) > 0 {
+			if err := w.WaitWritable(ctx); err != nil {
+				return nil, err
+			}
+			values, err := checkWrite(ctx, []component.Value{rep})
+			if err != nil {
+				return nil, err
+			}
+			rv := values[0].(component.ResultValue)
+			if rv.IsErr {
+				return values, nil
+			}
+			permit := rv.Payload.(uint64)
+			if permit == 0 {
+				continue
+			}
+			n := len(buf)
+			if uint64(n) > permit {
+				n = int(permit)
+			}
+			values, err = write(ctx, []component.Value{rep, buf[:n]})
+			if err != nil {
+				return nil, err
+			}
+			if values[0].(component.ResultValue).IsErr {
+				return values, nil
+			}
+			buf = buf[n:]
+		}
+		if err := w.WaitWritable(ctx); err != nil {
+			return nil, err
+		}
+		if err := w.BeginFlush(); err != nil {
+			return s.streamFailure(err), nil
+		}
+		if err := w.WaitWritable(ctx); err != nil {
+			return nil, err
+		}
+		return []component.Value{component.ResultValue{}}, nil
 	}
 	flush := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 1 {
@@ -445,6 +629,26 @@ func Options(cfg Config) []component.Option {
 			return nil, fmt.Errorf("output-stream.blocking-flush: self is %T", args[0])
 		}
 		if err := flushWriter(rep); err != nil {
+			return s.streamFailure(err), nil
+		}
+		return []component.Value{component.ResultValue{}}, nil
+	}
+	blockingFlush := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("output-stream.blocking-flush: expected self")
+		}
+		rep := args[0].(uint32)
+		w, err := writer(rep)
+		if err != nil {
+			return nil, err
+		}
+		if err := w.WaitWritable(ctx); err != nil {
+			return nil, err
+		}
+		if err := w.BeginFlush(); err != nil {
+			return s.streamFailure(err), nil
+		}
+		if err := w.WaitWritable(ctx); err != nil {
 			return nil, err
 		}
 		return []component.Value{component.ResultValue{}}, nil
@@ -461,27 +665,139 @@ func Options(cfg Config) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("input-stream.read: len is %T", args[1])
 		}
-		if n > maxIOSize {
-			n = maxIOSize
+		if n > limits.ioLimit() {
+			n = limits.ioLimit()
 		}
 		if n == 0 {
 			return []component.Value{component.ResultValue{Payload: []byte{}}}, nil
 		}
 		if rep != stdinRep {
-			return fs.readStream(rep, n)
+			values, err := fs.readStream(rep, n)
+			if err != nil {
+				return s.streamFailure(err), nil
+			}
+			return values, nil
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.stdinAt >= len(s.stdin) {
-			return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: 1}}}, nil
+		buf := make([]byte, int(n))
+		s.stdinMu.Lock()
+		got, err := s.stdin.TryRead(buf)
+		s.stdinMu.Unlock()
+		if errors.Is(err, ErrWouldBlock) {
+			return []component.Value{component.ResultValue{Payload: []byte{}}}, nil
 		}
-		end := s.stdinAt + int(n)
-		if end > len(s.stdin) {
-			end = len(s.stdin)
+		if err != nil && got == 0 {
+			return s.streamFailure(err), nil
 		}
-		out := append([]byte(nil), s.stdin[s.stdinAt:end]...)
-		s.stdinAt = end
-		return []component.Value{component.ResultValue{Payload: out}}, nil
+		return []component.Value{component.ResultValue{Payload: buf[:got]}}, nil
+	}
+	blockingRead := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		if len(args) == 2 {
+			if rep, ok := args[0].(uint32); ok && rep == stdinRep {
+				s.stdinMu.Lock()
+				err := s.stdin.WaitReadable(ctx)
+				s.stdinMu.Unlock()
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		return read(ctx, args)
+	}
+	skip := func(blocking bool) component.HostFunc {
+		return func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+			var values []component.Value
+			var err error
+			if blocking {
+				values, err = blockingRead(ctx, args)
+			} else {
+				values, err = read(ctx, args)
+			}
+			if err != nil || len(values) != 1 {
+				return values, err
+			}
+			rv, ok := values[0].(component.ResultValue)
+			if !ok || rv.IsErr {
+				return values, nil
+			}
+			buf, err := bytesValue(rv.Payload)
+			if err != nil {
+				return nil, err
+			}
+			return []component.Value{component.ResultValue{Payload: uint64(len(buf))}}, nil
+		}
+	}
+	writeZeroes := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("output-stream.write-zeroes: expected self and len")
+		}
+		n, ok := args[1].(uint64)
+		if !ok || n > maxIOSize {
+			return nil, fmt.Errorf("output-stream.write-zeroes: invalid len")
+		}
+		return write(ctx, []component.Value{args[0], make([]byte, int(n))})
+	}
+	blockingWriteZeroes := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("output-stream.blocking-write-zeroes-and-flush: expected self and len")
+		}
+		n, ok := args[1].(uint64)
+		if !ok || n > 4096 {
+			return nil, fmt.Errorf("output-stream.blocking-write-zeroes-and-flush: invalid len")
+		}
+		return blockingWriteAndFlush(ctx, []component.Value{args[0], make([]byte, int(n))})
+	}
+	splice := func(blocking bool) component.HostFunc {
+		return func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+			if len(args) != 3 {
+				return nil, fmt.Errorf("output-stream.splice: expected self, src, len")
+			}
+			outRep, ok := args[0].(uint32)
+			if !ok {
+				return nil, fmt.Errorf("output-stream.splice: invalid self")
+			}
+			n, ok := args[2].(uint64)
+			if !ok {
+				return nil, fmt.Errorf("output-stream.splice: invalid len")
+			}
+			check, err := checkWrite(ctx, []component.Value{outRep})
+			if err != nil {
+				return nil, err
+			}
+			cr := check[0].(component.ResultValue)
+			if cr.IsErr {
+				return check, nil
+			}
+			permit := cr.Payload.(uint64)
+			if n > permit {
+				n = permit
+			}
+			var got []component.Value
+			if blocking {
+				got, err = blockingRead(ctx, []component.Value{args[1], n})
+			} else {
+				got, err = read(ctx, []component.Value{args[1], n})
+			}
+			if err != nil {
+				return nil, err
+			}
+			rr := got[0].(component.ResultValue)
+			if rr.IsErr {
+				return got, nil
+			}
+			buf, e := bytesValue(rr.Payload)
+			if e != nil {
+				return nil, e
+			}
+			written, err := write(ctx, []component.Value{outRep, buf})
+			if err != nil {
+				return nil, err
+			}
+			wr := written[0].(component.ResultValue)
+			if wr.IsErr {
+				return written, nil
+			}
+			return []component.Value{component.ResultValue{Payload: uint64(len(buf))}}, nil
+		}
 	}
 	getRandom := func(name string) component.HostFunc {
 		return func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -492,8 +808,8 @@ func Options(cfg Config) []component.Option {
 			if !ok {
 				return nil, fmt.Errorf("%s: len is %T", name, args[0])
 			}
-			if n > maxIOSize {
-				return nil, fmt.Errorf("%s: length exceeds %d", name, maxIOSize)
+			if n > limits.ioLimit() {
+				return nil, fmt.Errorf("%s: length exceeds %d", name, limits.ioLimit())
 			}
 			b := make([]byte, int(n))
 			if _, err := io.ReadFull(random, b); err != nil {
@@ -534,27 +850,50 @@ func Options(cfg Config) []component.Option {
 		component.WithResourceTag("wasi:io/error@0.2.0", "error", errorResource),
 		component.WithResourceTag(ifaceFilesystem, "descriptor", descriptorResource),
 		component.WithResourceTag(ifacePoll, "pollable", pollableResource),
-		component.WithImport(ifaceStdout, "get-stdout", getOutput(stdoutRep), nil, []component.TypeDesc{component.OwnDesc{ResourceType: outputStreamResource}}),
-		component.WithImport(ifaceStderr, "get-stderr", getOutput(stderrRep), nil, []component.TypeDesc{component.OwnDesc{ResourceType: outputStreamResource}}),
-		component.WithImport(ifaceStdin, "get-stdin", getStdin, nil, []component.TypeDesc{component.OwnDesc{ResourceType: inputStreamResource}}),
-		component.WithImport(ifaceEnvironment, "get-arguments", getArgs, nil, []component.TypeDesc{component.ListDesc{Element: component.Prim("string")}}),
-		component.WithImport(ifaceExit, "exit", exit, []component.TypeDesc{component.ResultDesc{}}, nil),
+		component.WithHostResourceDtor(errorResource, func(_ context.Context, rep uint32) error {
+			s.mu.Lock()
+			delete(s.errors, rep)
+			s.mu.Unlock()
+			return nil
+		}),
+		custom(ifaceStdout, "get-stdout", getOutput(stdoutRep), func(t *component.TypeTable) component.FuncDesc { return t.Func(nil, t.Own(outputStreamResource)) }),
+		custom(ifaceStderr, "get-stderr", getOutput(stderrRep), func(t *component.TypeTable) component.FuncDesc { return t.Func(nil, t.Own(outputStreamResource)) }),
+		custom(ifaceStdin, "get-stdin", getStdin, func(t *component.TypeTable) component.FuncDesc { return t.Func(nil, t.Own(inputStreamResource)) }),
+		custom(ifaceEnvironment, "get-arguments", getArgs, func(t *component.TypeTable) component.FuncDesc { return t.Func(nil, t.List(component.Prim("string"))) }),
+		custom(ifaceExit, "exit", exit, func(t *component.TypeTable) component.FuncDesc {
+			return t.Func([]component.TypeRef{t.Result(component.TypeRef{}, component.TypeRef{})}, component.TypeRef{})
+		}),
 		custom(ifaceEnvironment, "get-environment", getEnv, func(t *component.TypeTable) component.FuncDesc {
 			return t.Func(nil, t.List(t.Tuple(component.Prim("string"), component.Prim("string"))))
+		}),
+		custom(ifaceEnvironment, "initial-cwd", initialCWD, func(t *component.TypeTable) component.FuncDesc {
+			return t.Func(nil, t.Option(component.Prim("string")))
+		}),
+		custom("wasi:io/error@0.2.0", "[method]error.to-debug-string", errorDebug, func(t *component.TypeTable) component.FuncDesc {
+			return t.Func([]component.TypeRef{t.Borrow(errorResource)}, component.Prim("string"))
 		}),
 		custom(ifaceStreams, "[method]output-stream.check-write", checkWrite, checkWriteDesc),
 		custom(ifaceStreams, "[method]output-stream.write", write, writeDesc),
 		custom(ifaceStreams, "[method]output-stream.blocking-write-and-flush", blockingWriteAndFlush, writeDesc),
-		custom(ifaceStreams, "[method]output-stream.blocking-flush", flush, flushDesc),
+		custom(ifaceStreams, "[method]output-stream.blocking-flush", blockingFlush, flushDesc),
+		custom(ifaceStreams, "[method]output-stream.flush", flush, flushDesc),
+		custom(ifaceStreams, "[method]output-stream.write-zeroes", writeZeroes, writeZeroesDesc),
+		custom(ifaceStreams, "[method]output-stream.blocking-write-zeroes-and-flush", blockingWriteZeroes, writeZeroesDesc),
+		custom(ifaceStreams, "[method]output-stream.splice", splice(false), spliceDesc),
+		custom(ifaceStreams, "[method]output-stream.blocking-splice", splice(true), spliceDesc),
 		custom(ifaceStreams, "[method]input-stream.read", read, inputReadDesc),
-		custom(ifaceStreams, "[method]input-stream.blocking-read", read, inputReadDesc),
-		component.WithImport(ifaceRandom, "get-random-bytes", getRandom("get-random-bytes"), []component.TypeDesc{component.PrimitiveDesc{Prim: "u64"}}, []component.TypeDesc{component.ListDesc{Element: component.Prim("u8")}}),
-		component.WithImport(ifaceInsecure, "get-insecure-random-bytes", getRandom("get-insecure-random-bytes"), []component.TypeDesc{component.PrimitiveDesc{Prim: "u64"}}, []component.TypeDesc{component.ListDesc{Element: component.Prim("u8")}}),
-		component.WithImport(ifaceRandom, "get-random-u64", randU64("get-random-u64"), nil, []component.TypeDesc{component.PrimitiveDesc{Prim: "u64"}}),
-		component.WithImport(ifaceInsecure, "get-insecure-random-u64", randU64("get-insecure-random-u64"), nil, []component.TypeDesc{component.PrimitiveDesc{Prim: "u64"}}),
-		component.WithImport(ifaceSeed, "insecure-seed", seed, nil, []component.TypeDesc{component.TupleDesc{Elements: []component.TypeRef{component.Prim("u64"), component.Prim("u64")}}}),
+		custom(ifaceStreams, "[method]input-stream.blocking-read", blockingRead, inputReadDesc),
+		custom(ifaceStreams, "[method]input-stream.skip", skip(false), inputSkipDesc),
+		custom(ifaceStreams, "[method]input-stream.blocking-skip", skip(true), inputSkipDesc),
+		custom(ifaceRandom, "get-random-bytes", getRandom("get-random-bytes"), bytesRandomDesc),
+		custom(ifaceInsecure, "get-insecure-random-bytes", getRandom("get-insecure-random-bytes"), bytesRandomDesc),
+		custom(ifaceRandom, "get-random-u64", randU64("get-random-u64"), u64Result),
+		custom(ifaceInsecure, "get-insecure-random-u64", randU64("get-insecure-random-u64"), u64Result),
+		custom(ifaceSeed, "insecure-seed", seed, func(t *component.TypeTable) component.FuncDesc {
+			return t.Func(nil, t.Tuple(component.Prim("u64"), component.Prim("u64")))
+		}),
 	}
-	opts = append(opts, clockOptions(s)...)
+	opts = append(opts, clockOptions(s, fs)...)
 	opts = append(opts, filesystemOptions(fs)...)
 	opts = append(opts, socketOptions()...)
 	// Non-TTY is a valid implementation of the terminal discovery interfaces.
@@ -578,9 +917,27 @@ func terminalOption(iface, name string, resource uint32, fn component.HostFunc) 
 	})
 }
 func custom(iface, name string, fn component.HostFunc, build func(*component.TypeTable) component.FuncDesc) component.Option {
+	recordSurface(iface, name)
 	t := component.NewTypeTable()
 	fd := build(t)
 	return component.WithImportCustom(iface, name, fn, fd, t.Resolver())
+}
+
+var surfaceRecorder struct {
+	sync.Mutex
+	fn func(string, string)
+}
+
+func recordSurface(iface, name string) {
+	surfaceRecorder.Lock()
+	fn := surfaceRecorder.fn
+	surfaceRecorder.Unlock()
+	if fn != nil {
+		fn(iface, name)
+	}
+}
+func bytesRandomDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{component.Prim("u64")}, t.List(component.Prim("u8")))
 }
 func streamError(t *component.TypeTable) component.TypeRef {
 	return t.Variant(component.VariantCaseSpec{Name: "last-operation-failed", Type: t.Own(errorResource)}, component.VariantCaseSpec{Name: "closed"})
@@ -596,6 +953,15 @@ func flushDesc(t *component.TypeTable) component.FuncDesc {
 }
 func inputReadDesc(t *component.TypeTable) component.FuncDesc {
 	return t.Func([]component.TypeRef{t.Borrow(inputStreamResource), component.Prim("u64")}, t.Result(t.List(component.Prim("u8")), streamError(t)))
+}
+func inputSkipDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(inputStreamResource), component.Prim("u64")}, t.Result(component.Prim("u64"), streamError(t)))
+}
+func writeZeroesDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(outputStreamResource), component.Prim("u64")}, t.Result(component.TypeRef{}, streamError(t)))
+}
+func spliceDesc(t *component.TypeTable) component.FuncDesc {
+	return t.Func([]component.TypeRef{t.Borrow(outputStreamResource), t.Borrow(inputStreamResource), component.Prim("u64")}, t.Result(component.Prim("u64"), streamError(t)))
 }
 func bytesValue(v component.Value) ([]byte, error) {
 	if b, ok := v.([]byte); ok {

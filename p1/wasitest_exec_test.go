@@ -1,4 +1,4 @@
-//go:build linux && amd64 && !tinygo
+//go:build linux && !tinygo
 
 // This WASI-suite harness uses t.Skip/t.Fatal and os/filepath, none of which
 // behave under TinyGo, so it is excluded there (like the spec-suite harness).
@@ -110,7 +110,7 @@ func runOneWASITest(wasmPath string, man wasiManifest) string {
 		if err = copyTree(srcRoot, tmp); err != nil {
 			return "copy root: " + err.Error()
 		}
-		cfg.Preopens = map[string]string{"/": tmp}
+		cfg.Mounts = []p1.Preopen{{GuestPath: "/", HostPath: tmp, Read: true, Write: true, MutateDirectory: true}}
 	}
 	var stdout, stderr bytes.Buffer
 	cfg.Stdout = &stdout

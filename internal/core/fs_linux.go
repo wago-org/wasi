@@ -3,7 +3,10 @@
 package core
 
 import (
+	"errors"
 	"os"
+	"path"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +22,43 @@ func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) 
 	fd, err := unix.Openat2(int(d.file.Fd()), name, &unix.OpenHow{
 		Flags: uint64(flags | unix.O_CLOEXEC), Mode: uint64(mode), Resolve: secureResolve,
 	})
+	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.E2BIG) || errors.Is(err, unix.EPERM) {
+		return openAtWalk(d, name, flags, mode)
+	}
+	if err != nil {
+		return nil, capabilityErr(err)
+	}
+	return os.NewFile(uintptr(fd), name), wasiOK
+}
+
+// openAtWalk is the secure fallback for kernels, seccomp profiles, and syscall
+// emulators without openat2. It refuses symlinks rather than attempting a
+// race-prone userspace emulation of RESOLVE_BENEATH.
+func openAtWalk(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
+	clean := path.Clean(name)
+	if clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
+		return nil, wasiENotcapable
+	}
+	parts := strings.Split(clean, "/")
+	curFD, err := unix.Dup(int(d.file.Fd()))
+	if err != nil {
+		return nil, errno(err)
+	}
+	cur := os.NewFile(uintptr(curFD), d.file.Name())
+	defer func() { _ = cur.Close() }()
+	for _, part := range parts[:len(parts)-1] {
+		if part == "." || part == "" {
+			continue
+		}
+		next, err := unix.Openat(int(cur.Fd()), part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, capabilityErr(err)
+		}
+		cur.Close()
+		cur = os.NewFile(uintptr(next), part)
+	}
+	leaf := parts[len(parts)-1]
+	fd, err := unix.Openat(int(cur.Fd()), leaf, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 	if err != nil {
 		return nil, capabilityErr(err)
 	}
@@ -64,10 +104,12 @@ func setPathTimes(parent *os.File, leaf string, times []unix.Timespec, noFollow 
 }
 
 func linkAtFollow(oldDirectory *fdEntry, oldName string, newParent *os.File, newLeaf string) uint64 {
-	oldFile, code := openMetadataAt(oldDirectory, oldName, true)
-	if code != 0 {
-		return code
-	}
-	defer oldFile.Close()
-	return errno(unix.Linkat(int(oldFile.Fd()), "", int(newParent.Fd()), newLeaf, unix.AT_EMPTY_PATH))
+	// Preview 1 permits implementations to reject link-time symlink following.
+	// Refusing it avoids Linux AT_EMPTY_PATH's CAP_DAC_READ_SEARCH requirement
+	// and the unsafe /proc/self/fd fallback on hosts without procfs.
+	return wasiEInval
+}
+
+func allocateFile(file *os.File, offset, length int64) error {
+	return unix.Fallocate(int(file.Fd()), 0, offset, length)
 }

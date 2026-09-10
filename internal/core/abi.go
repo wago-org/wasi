@@ -9,23 +9,33 @@ import (
 
 // WASI Preview 1 errno numbers used by the filesystem implementation.
 const (
+	wasiE2big        = 1
 	wasiEAcces       = 2
 	wasiEAgain       = 6
+	wasiEBusy        = 10
+	wasiEDquot       = 19
 	wasiEExist       = 20
 	wasiEFault       = 21
+	wasiEFbig        = 22
+	wasiEIntr        = 27
 	wasiEIo          = 29
 	wasiEIsdir       = 31
 	wasiELoop        = 32
 	wasiEMfile       = 33
 	wasiENametoolong = 37
+	wasiENfile       = 41
 	wasiENoent       = 44
+	wasiENomem       = 48
+	wasiENospc       = 51
 	wasiENotdir      = 54
 	wasiENotempty    = 55
 	wasiENotsock     = 57
 	wasiEOverflow    = 61
 	wasiEPerm        = 63
+	wasiEPipe        = 64
 	wasiERofs        = 69
 	wasiENotcapable  = 76
+	wasiEXdev        = 75
 )
 
 const (
@@ -80,13 +90,56 @@ const directoryRights = rightPathCreateDirectory | rightPathCreateFile |
 	rightFDFilestatSetTimes | rightPathSymlink | rightPathRemoveDirectory |
 	rightPathUnlinkFile
 
+const directoryReadRights = rightPathOpen | rightFDReadDir | rightPathReadlink |
+	rightPathFilestatGet | rightFDFilestatGet | rightPollFDReadWrite
+
+const fileReadRights = rightFDRead | rightFDSeek | rightFDTell | rightFDAdvise |
+	rightFDFilestatGet | rightPollFDReadWrite
+
+const fileWriteRights = rightFDWrite | rightFDDataSync | rightFDSync |
+	rightFDStatSetFlags | rightFDAllocate | rightFDFilestatSetSize |
+	rightFDFilestatSetTimes | rightPollFDReadWrite
+
+const directoryMutationRights = rightPathCreateDirectory | rightPathCreateFile |
+	rightPathLinkSource | rightPathLinkTarget | rightPathRenameSource |
+	rightPathRenameTarget | rightPathSymlink | rightPathRemoveDirectory |
+	rightPathUnlinkFile
+
 func errno(err error) uint64 {
 	if err == nil {
 		return wasiOK
 	}
 	switch {
+	case errors.Is(err, syscall.EPERM):
+		return wasiEPerm
+	case errors.Is(err, syscall.E2BIG):
+		return wasiE2big
 	case errors.Is(err, os.ErrPermission), errors.Is(err, syscall.EACCES):
 		return wasiEAcces
+	case errors.Is(err, syscall.EAGAIN):
+		return wasiEAgain
+	case errors.Is(err, syscall.EINTR):
+		return wasiEIntr
+	case errors.Is(err, syscall.ENOSPC):
+		return wasiENospc
+	case errors.Is(err, syscall.EDQUOT):
+		return wasiEDquot
+	case errors.Is(err, syscall.ENOMEM):
+		return wasiENomem
+	case errors.Is(err, syscall.EMFILE):
+		return wasiEMfile
+	case errors.Is(err, syscall.ENFILE):
+		return wasiENfile
+	case errors.Is(err, syscall.EFBIG):
+		return wasiEFbig
+	case errors.Is(err, syscall.EOVERFLOW):
+		return wasiEOverflow
+	case errors.Is(err, syscall.EBUSY):
+		return wasiEBusy
+	case errors.Is(err, syscall.EPIPE):
+		return wasiEPipe
+	case errors.Is(err, syscall.EXDEV):
+		return wasiEXdev
 	case errors.Is(err, os.ErrNotExist), errors.Is(err, syscall.ENOENT):
 		return wasiENoent
 	case errors.Is(err, syscall.ENOTEMPTY):

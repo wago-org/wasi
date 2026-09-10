@@ -6,9 +6,9 @@
       "definition": {
         "id": "github.com/wago-org/wasi",
         "name": "WASI",
-        "version": "0.2.1",
-        "description": "Complete WASI support: Preview 1, Preview 2, and unstable compatibility.",
-        "stability": "stable",
+        "version": "0.3.0",
+        "description": "Experimental bundle of Preview 1 and WASI 0.2 command imports.",
+        "stability": "experimental",
         "compatibility": {
           "engines": {
             "go": "\u003e=1.22",
@@ -16,7 +16,8 @@
           },
           "platforms": [
             "darwin/arm64",
-            "linux/amd64"
+            "linux/amd64",
+            "linux/arm64"
           ]
         },
         "provenance": {
@@ -30,28 +31,24 @@
         "requires": [
           {
             "id": "github.com/wago-org/wasi/p1",
-            "version": "^0.2.1"
+            "version": "^0.3.0"
           },
           {
             "id": "github.com/wago-org/wasi/p2",
-            "version": "^0.2.1"
-          },
-          {
-            "id": "github.com/wago-org/wasi/unstable",
-            "version": "^0.2.1"
+            "version": "^0.3.0"
           }
         ]
       },
-      "definitionDigest": "sha256:ee223ad26c7b0c8894c5a38848a7291975bcb39bc9625deebfa4ebf71bcc071f"
+      "definitionDigest": "sha256:73d5b1dd4b7284d390cb05db9db5086d93f954cfeae05f6537cb0da54c448574"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p1",
         "name": "WASI Preview 1",
-        "version": "0.2.1",
+        "version": "0.3.0",
         "description": "Preview 1 for core WebAssembly modules.",
-        "stability": "stable",
+        "stability": "experimental",
         "compatibility": {
           "engines": {
             "go": "\u003e=1.22",
@@ -60,7 +57,8 @@
           "platforms": [
             "darwin/amd64",
             "darwin/arm64",
-            "linux/amd64"
+            "linux/amd64",
+            "linux/arm64"
           ]
         },
         "provenance": {
@@ -114,29 +112,53 @@
               "maxItems": 4096,
               "type": "array"
             },
+            "maxIOVecs": {
+              "maximum": 65536,
+              "minimum": 1,
+              "type": "integer"
+            },
             "maxOpenFiles": {
               "maximum": 65536,
               "minimum": 3,
               "type": "integer"
             },
-            "maxPollDurationMillis": {
-              "maximum": 60000,
+            "maxSubscriptionsPerPoll": {
+              "maximum": 65536,
               "minimum": 1,
               "type": "integer"
             },
-            "preopens": {
-              "additionalProperties": {
-                "maxLength": 4096,
-                "minLength": 1,
-                "type": "string"
+            "mounts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "guest": {
+                    "maxLength": 4096,
+                    "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
+                    "type": "string"
+                  },
+                  "host": {
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "mutateDirectory": {
+                    "type": "boolean"
+                  },
+                  "read": {
+                    "type": "boolean"
+                  },
+                  "write": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "guest",
+                  "host"
+                ],
+                "type": "object"
               },
-              "maxProperties": 64,
-              "propertyNames": {
-                "maxLength": 4096,
-                "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
-                "type": "string"
-              },
-              "type": "object"
+              "maxItems": 64,
+              "type": "array"
             },
             "stderr": {
               "enum": [
@@ -163,15 +185,15 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:d81cb88f445427c936f3b4a18636e5fe4b45edb57c32c8288f90186141ccbf66"
+      "definitionDigest": "sha256:bcc0db7cabf72e149e8c9b51dd05a181a00af9136c5622fef1c9567420bcd7c7"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
       "definition": {
         "id": "github.com/wago-org/wasi/p2",
         "name": "WASI Preview 2",
-        "version": "0.2.1",
-        "description": "Preview 2 for WebAssembly components.",
+        "version": "0.3.0",
+        "description": "Experimental WASI 0.2 command host with fail-closed networking.",
         "stability": "experimental",
         "compatibility": {
           "engines": {
@@ -180,7 +202,8 @@
           },
           "platforms": [
             "darwin/arm64",
-            "linux/amd64"
+            "linux/amd64",
+            "linux/arm64"
           ]
         },
         "provenance": {
@@ -218,19 +241,79 @@
               "maxItems": 4096,
               "type": "array"
             },
-            "preopens": {
-              "additionalProperties": {
-                "maxLength": 4096,
-                "minLength": 1,
-                "type": "string"
-              },
-              "maxProperties": 64,
-              "propertyNames": {
-                "maxLength": 4096,
-                "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
-                "type": "string"
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "maxAggregateBufferBytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maxDescriptors": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maxDirectoryEntryBytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maxDirectoryStreams": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maxPollInputs": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maxPollables": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maxStreams": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                }
               },
               "type": "object"
+            },
+            "mounts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "guest": {
+                    "maxLength": 4096,
+                    "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
+                    "type": "string"
+                  },
+                  "host": {
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "mutateDirectory": {
+                    "type": "boolean"
+                  },
+                  "read": {
+                    "type": "boolean"
+                  },
+                  "write": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "guest",
+                  "host"
+                ],
+                "type": "object"
+              },
+              "maxItems": 64,
+              "type": "array"
             },
             "stderr": {
               "enum": [
@@ -270,128 +353,7 @@
           }
         ]
       },
-      "definitionDigest": "sha256:bd029c1ce83c49c1f0b82df570afe762297a98ac6056c58105af03295023202a"
-    },
-    {
-      "importPath": "github.com/wago-org/wasi/register",
-      "definition": {
-        "id": "github.com/wago-org/wasi/unstable",
-        "name": "WASI unstable",
-        "version": "0.2.1",
-        "description": "Legacy wasi_unstable compatibility.",
-        "stability": "stable",
-        "compatibility": {
-          "engines": {
-            "go": "\u003e=1.22",
-            "wago": "\u003e=0.1.0"
-          },
-          "platforms": [
-            "darwin/amd64",
-            "darwin/arm64",
-            "linux/amd64"
-          ]
-        },
-        "provenance": {
-          "homepage": "https://github.com/wago-org/wasi",
-          "repository": "https://github.com/wago-org/wasi",
-          "license": "Apache-2.0",
-          "authors": [
-            "The Wago authors"
-          ]
-        },
-        "authorities": [
-          {
-            "name": "host.arguments.read",
-            "mode": "required",
-            "reason": "expose this runtime's immutable guest argv through Preview 1",
-            "scope": {}
-          },
-          {
-            "name": "host.caller.identify",
-            "mode": "required",
-            "reason": "isolate descriptor tables by the opaque identity of the active guest",
-            "scope": {}
-          },
-          {
-            "name": "host.import.define",
-            "mode": "required",
-            "reason": "define the selected WASI snapshot's host functions",
-            "scope": {
-              "modules": [
-                "wasi_unstable"
-              ]
-            }
-          },
-          {
-            "name": "instance.close.observe",
-            "mode": "required",
-            "reason": "close the departed guest's files without receiving instance control",
-            "scope": {}
-          }
-        ],
-        "configSchema": {
-          "additionalProperties": false,
-          "properties": {
-            "env": {
-              "items": {
-                "maxLength": 32768,
-                "minLength": 2,
-                "pattern": "^[^=\\u0000]+=[^\\u0000]*$",
-                "type": "string"
-              },
-              "maxItems": 4096,
-              "type": "array"
-            },
-            "maxOpenFiles": {
-              "maximum": 65536,
-              "minimum": 3,
-              "type": "integer"
-            },
-            "maxPollDurationMillis": {
-              "maximum": 60000,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "preopens": {
-              "additionalProperties": {
-                "maxLength": 4096,
-                "minLength": 1,
-                "type": "string"
-              },
-              "maxProperties": 64,
-              "propertyNames": {
-                "maxLength": 4096,
-                "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$",
-                "type": "string"
-              },
-              "type": "object"
-            },
-            "stderr": {
-              "enum": [
-                "inherit",
-                "discard"
-              ],
-              "type": "string"
-            },
-            "stdin": {
-              "enum": [
-                "inherit",
-                "eof"
-              ],
-              "type": "string"
-            },
-            "stdout": {
-              "enum": [
-                "inherit",
-                "discard"
-              ],
-              "type": "string"
-            }
-          },
-          "type": "object"
-        }
-      },
-      "definitionDigest": "sha256:8f2d51e77ea38c034510d1bf205ebc7f151e5d52684985bda49364c6c280e5e9"
+      "definitionDigest": "sha256:96dd10067d9d55720261745a55696bdee9f60d661d2cd08f60c2ecbbac1ec8ce"
     }
   ]
 }

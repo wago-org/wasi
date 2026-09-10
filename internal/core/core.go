@@ -1,9 +1,5 @@
-// Package core is the shared implementation behind the versioned WASI plugins.
-// The command and filesystem surface is shared across wasi_unstable
-// (pre-preview1) and wasi_snapshot_preview1; only the wasm
-// import module name differs, so both wrap this package with their own module
-// string. It is internal: use github.com/wago-org/wasi/p1 or
-// github.com/wago-org/wasi/unstable.
+// Package core implements the shared internals of the Preview 1 provider.
+// It is internal: use github.com/wago-org/wasi/p1.
 package core
 
 import (
@@ -19,7 +15,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	wago "github.com/wago-org/wago"
@@ -34,6 +29,7 @@ const (
 	CapFDWrite         wago.Capability = "wasi.fd.write"
 	CapFDManage        wago.Capability = "wasi.fd.manage"
 	CapPathRead        wago.Capability = "wasi.path.read"
+	CapPathOpen        wago.Capability = "wasi.path.open"
 	CapPathWrite       wago.Capability = "wasi.path.write"
 	CapArgumentsRead   wago.Capability = "wasi.arguments.read"
 	CapEnvironmentRead wago.Capability = "wasi.environment.read"
@@ -54,36 +50,46 @@ const (
 	wasiENotsup = 58
 )
 
-// Config configures the WASI host bundle. A nil writer/reader discards/EOFs; a
-// nil Now yields a fixed clock (handy for deterministic tests); a nil Rand uses
-// crypto/rand.
+// Config configures the WASI host bundle. A nil writer/reader discards/EOFs;
+// nil Clocks uses separate system realtime and monotonic clocks; a nil Rand
+// uses crypto/rand.
 type Config struct {
 	Stdout, Stderr io.Writer
 	Stdin          io.Reader
-	Args           []string     // argv; Args[0] is conventionally the program name
-	Env            []string     // "KEY=VALUE" entries
-	Now            func() int64 // wall-clock nanoseconds for clock_time_get
-	Rand           io.Reader    // random source for random_get
-	// Preopens maps guest-visible directory names (commonly "/") to host
-	// directories. Each entry is exposed as a capability-scoped preopen starting
-	// at fd 3. No host filesystem is visible when this is nil.
-	Preopens map[string]string
+	Args           []string        // argv; Args[0] is conventionally the program name
+	Env            []string        // "KEY=VALUE" entries
+	Clocks         ClockSource     // distinct realtime, monotonic, and optional CPU clocks
+	Context        context.Context // cancellation for blocking host operations
+	Rand           io.Reader       // random source for random_get
+	// Mounts is the rights-aware preopen configuration. No rights are implied.
+	Mounts []Preopen
 	// MaxOpenFiles bounds the host descriptors owned by one guest instance,
 	// including stdio and preopens. Zero uses the secure default of 1024.
 	MaxOpenFiles uint32
-	// MaxPollDuration rejects clock subscriptions longer than this duration so a
-	// guest cannot pin a host call indefinitely. Zero uses one second.
-	MaxPollDuration time.Duration
+	// MaxIOVecs and MaxSubscriptionsPerPoll bound guest-controlled host slices.
+	// Zero uses 1024 for each limit.
+	MaxIOVecs               uint32
+	MaxSubscriptionsPerPoll uint32
+}
+
+// Preopen grants explicit filesystem rights beneath one host directory.
+type Preopen struct {
+	GuestPath       string `json:"guest"`
+	HostPath        string `json:"host"`
+	Read            bool   `json:"read"`
+	Write           bool   `json:"write"`
+	MutateDirectory bool   `json:"mutateDirectory"`
 }
 
 type pluginConfig struct {
-	Stdin                 *string            `json:"stdin,omitempty"`
-	Stdout                *string            `json:"stdout,omitempty"`
-	Stderr                *string            `json:"stderr,omitempty"`
-	Env                   *[]string          `json:"env,omitempty"`
-	Preopens              *map[string]string `json:"preopens,omitempty"`
-	MaxOpenFiles          *uint32            `json:"maxOpenFiles,omitempty"`
-	MaxPollDurationMillis *int64             `json:"maxPollDurationMillis,omitempty"`
+	Stdin            *string    `json:"stdin,omitempty"`
+	Stdout           *string    `json:"stdout,omitempty"`
+	Stderr           *string    `json:"stderr,omitempty"`
+	Env              *[]string  `json:"env,omitempty"`
+	Mounts           *[]Preopen `json:"mounts,omitempty"`
+	MaxOpenFiles     *uint32    `json:"maxOpenFiles,omitempty"`
+	MaxIOVecs        *uint32    `json:"maxIOVecs,omitempty"`
+	MaxSubscriptions *uint32    `json:"maxSubscriptionsPerPoll,omitempty"`
 }
 
 var configSchema = json.RawMessage(`{
@@ -98,14 +104,25 @@ var configSchema = json.RawMessage(`{
       "maxItems": 4096,
       "items": {"type": "string", "minLength": 2, "maxLength": 32768, "pattern": "^[^=\\u0000]+=[^\\u0000]*$"}
     },
-    "preopens": {
-      "type": "object",
-      "maxProperties": 64,
-      "propertyNames": {"type": "string", "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$", "maxLength": 4096},
-      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 4096}
+    "mounts": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["guest", "host"],
+        "properties": {
+          "guest": {"type": "string", "pattern": "^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$", "maxLength": 4096},
+          "host": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "read": {"type": "boolean"},
+          "write": {"type": "boolean"},
+          "mutateDirectory": {"type": "boolean"}
+        }
+      }
     },
     "maxOpenFiles": {"type": "integer", "minimum": 3, "maximum": 65536},
-    "maxPollDurationMillis": {"type": "integer", "minimum": 1, "maximum": 60000}
+    "maxIOVecs": {"type": "integer", "minimum": 1, "maximum": 65536},
+    "maxSubscriptionsPerPoll": {"type": "integer", "minimum": 1, "maximum": 65536}
   }
 }`)
 
@@ -211,7 +228,7 @@ func (e *Plugin) stop(context.Context) error {
 func Imports(module string, cfg Config) wago.Imports {
 	e := &Plugin{module: module, cfg: cloneConfig(cfg)}
 	e.resetFS()
-	_ = e.initFS(false) // preserve the raw API's historical best-effort preopens
+	_ = e.initFS(false) // raw imports cannot report mount initialization errors
 	return e.Imports()
 }
 
@@ -227,6 +244,7 @@ func (e *Plugin) Imports() wago.Imports {
 // Imports both derive from bindings so the plugin and raw-bundle paths never drift.
 type binding struct {
 	name            string
+	handler         func(*Plugin, wago.HostModule, []uint64, []uint64)
 	fn              wago.HostFunc
 	params, results []wago.ValType
 	cap             wago.Capability
@@ -243,6 +261,7 @@ var guestCapabilities = []guestCapability{
 	{CapFDWrite, "write streams and granted file descriptors"},
 	{CapFDManage, "close, seek, inspect, and renumber descriptors"},
 	{CapPathRead, "inspect paths below configured preopens"},
+	{CapPathOpen, "open paths below configured preopens with descriptor rights enforced by the mount"},
 	{CapPathWrite, "mutate paths below configured preopens"},
 	{CapArgumentsRead, "read runtime-scoped guest argv"},
 	{CapEnvironmentRead, "read the configured guest environment"},
@@ -263,58 +282,66 @@ func (e *Plugin) bindings() []binding {
 	i32v := wago.ValI32
 
 	bindings := []binding{
-		{"fd_write", e.fdWrite, i32x4, i32, CapFDWrite, "write iovecs to a file descriptor (stdout/stderr)"},
-		{"fd_read", e.fdRead, i32x4, i32, CapFDRead, "read into iovecs from a file descriptor (stdin)"},
-		{"fd_close", e.fdClose, i32, i32, CapFDManage, "close a file descriptor (streams: no-op)"},
-		{"fd_seek", e.fdSeek, []wago.ValType{i32v, i64, i32v, i32v}, i32, CapFDManage, "seek a file descriptor (streams: ESPIPE)"},
-		{"fd_fdstat_get", e.fdFdstatGet, i32x2, i32, CapFDManage, "report fd stat (streams: character device)"},
-		{"fd_prestat_get", e.fdPrestatGet, i32x2, i32, CapFDManage, "report a preopen (none: EBADF)"},
-		{"fd_prestat_dir_name", e.fdPrestatDirName, i32x3, i32, CapFDManage, "report a preopen dir name (none: EBADF)"},
-		{"proc_exit", e.procExit, i32, nil, CapProcessExit, "terminate the program with an exit code"},
-		{"args_sizes_get", e.argsSizesGet, i32x2, i32, CapArgumentsRead, "report argc and argv byte size"},
-		{"args_get", e.argsGet, i32x2, i32, CapArgumentsRead, "write argv pointers and bytes"},
-		{"environ_sizes_get", e.environSizesGet, i32x2, i32, CapEnvironmentRead, "report environ count and byte size"},
-		{"environ_get", e.environGet, i32x2, i32, CapEnvironmentRead, "write environ pointers and bytes"},
-		{"clock_time_get", e.clockTimeGet, []wago.ValType{i32v, i64, i32v}, i32, CapClockRead, "read a clock's current time"},
-		{"clock_res_get", e.clockResGet, i32x2, i32, CapClockRead, "read a clock's resolution"},
-		{"random_get", e.randomGet, i32x2, i32, CapRandomRead, "fill a buffer with random bytes"},
+		{"fd_write", (*Plugin).fdWrite, nil, i32x4, i32, CapFDWrite, "write iovecs to a file descriptor (stdout/stderr)"},
+		{"fd_read", (*Plugin).fdRead, nil, i32x4, i32, CapFDRead, "read into iovecs from a file descriptor (stdin)"},
+		{"fd_close", (*Plugin).fdClose, nil, i32, i32, CapFDManage, "close a file descriptor (streams: no-op)"},
+		{"fd_seek", (*Plugin).fdSeek, nil, []wago.ValType{i32v, i64, i32v, i32v}, i32, CapFDManage, "seek a file descriptor (streams: ESPIPE)"},
+		{"fd_fdstat_get", (*Plugin).fdFdstatGet, nil, i32x2, i32, CapFDManage, "report fd stat (streams: character device)"},
+		{"fd_prestat_get", (*Plugin).fdPrestatGet, nil, i32x2, i32, CapFDManage, "report a preopen (none: EBADF)"},
+		{"fd_prestat_dir_name", (*Plugin).fdPrestatDirName, nil, i32x3, i32, CapFDManage, "report a preopen dir name (none: EBADF)"},
+		{"proc_exit", (*Plugin).procExit, nil, i32, nil, CapProcessExit, "terminate the program with an exit code"},
+		{"args_sizes_get", (*Plugin).argsSizesGet, nil, i32x2, i32, CapArgumentsRead, "report argc and argv byte size"},
+		{"args_get", (*Plugin).argsGet, nil, i32x2, i32, CapArgumentsRead, "write argv pointers and bytes"},
+		{"environ_sizes_get", (*Plugin).environSizesGet, nil, i32x2, i32, CapEnvironmentRead, "report environ count and byte size"},
+		{"environ_get", (*Plugin).environGet, nil, i32x2, i32, CapEnvironmentRead, "write environ pointers and bytes"},
+		{"clock_time_get", (*Plugin).clockTimeGet, nil, []wago.ValType{i32v, i64, i32v}, i32, CapClockRead, "read a clock's current time"},
+		{"clock_res_get", (*Plugin).clockResGet, nil, i32x2, i32, CapClockRead, "read a clock's resolution"},
+		{"random_get", (*Plugin).randomGet, nil, i32x2, i32, CapRandomRead, "fill a buffer with random bytes"},
 
-		{"sched_yield", e.schedYield, nil, i32, CapSchedulerYield, "yield execution"},
-		{"fd_advise", e.fdAdvise, []wago.ValType{i32v, i64, i64, i32v}, i32, CapFDManage, "provide file access advice"},
-		{"fd_allocate", e.fdAllocate, []wago.ValType{i32v, i64, i64}, i32, CapFDWrite, "allocate file space"},
-		{"fd_datasync", e.fdDatasync, i32, i32, CapFDWrite, "synchronize file data"},
-		{"fd_sync", e.fdSync, i32, i32, CapFDWrite, "synchronize a file"},
-		{"fd_fdstat_set_flags", e.fdFdstatSetFlags, i32x2, i32, CapFDManage, "set descriptor flags"},
-		{"fd_fdstat_set_rights", e.fdFdstatSetRights, []wago.ValType{i32v, i64, i64}, i32, CapFDManage, "reduce descriptor rights"},
-		{"fd_filestat_get", e.fdFilestatGet, i32x2, i32, CapFDRead, "get file metadata"},
-		{"fd_filestat_set_size", e.fdFilestatSetSize, []wago.ValType{i32v, i64}, i32, CapFDWrite, "set file size"},
-		{"fd_filestat_set_times", e.fdFilestatSetTimes, []wago.ValType{i32v, i64, i64, i32v}, i32, CapFDWrite, "set file timestamps"},
-		{"fd_pread", e.fdPread, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, CapFDRead, "read at an offset"},
-		{"fd_pwrite", e.fdPwrite, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, CapFDWrite, "write at an offset"},
-		{"fd_readdir", e.fdReaddir, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, CapFDRead, "read directory entries"},
-		{"fd_renumber", e.fdRenumber, i32x2, i32, CapFDManage, "renumber a descriptor"},
-		{"fd_tell", e.fdTell, i32x2, i32, CapFDManage, "get a descriptor offset"},
-		{"path_create_directory", e.pathCreateDirectory, i32x3, i32, CapPathWrite, "create a directory"},
-		{"path_filestat_get", e.pathFilestatGet, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, CapPathRead, "get path metadata"},
-		{"path_filestat_set_times", e.pathFilestatSetTimes, []wago.ValType{i32v, i32v, i32v, i32v, i64, i64, i32v}, i32, CapPathWrite, "set path timestamps"},
-		{"path_link", e.pathLink, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapPathWrite, "create a hard link"},
-		{"path_open", e.pathOpen, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i64, i64, i32v, i32v}, i32, CapPathWrite, "open or create a path"},
-		{"path_readlink", e.pathReadlink, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapPathRead, "read a symbolic link"},
-		{"path_remove_directory", e.pathRemoveDirectory, i32x3, i32, CapPathWrite, "remove a directory"},
-		{"path_rename", e.pathRename, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapPathWrite, "rename a path"},
-		{"path_symlink", e.pathSymlink, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, CapPathWrite, "create a symbolic link"},
-		{"path_unlink_file", e.pathUnlinkFile, i32x3, i32, CapPathWrite, "unlink a file"},
-		{"poll_oneoff", e.pollOneoff, i32x4, i32, CapPoll, "wait for events"},
-		{"proc_raise", e.procRaise, i32, i32, CapUnsupported, "raise a signal (unsupported)"},
-		{"sock_accept", e.sockAccept, i32x3, i32, CapUnsupported, "accept a socket (unsupported)"},
-		{"sock_recv", e.sockRecv, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapUnsupported, "receive from a socket (unsupported)"},
-		{"sock_send", e.sockSend, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, CapUnsupported, "send to a socket (unsupported)"},
-		{"sock_shutdown", e.sockShutdown, i32x2, i32, CapUnsupported, "shut down a socket (unsupported)"},
+		{"sched_yield", (*Plugin).schedYield, nil, nil, i32, CapSchedulerYield, "yield execution"},
+		{"fd_advise", (*Plugin).fdAdvise, nil, []wago.ValType{i32v, i64, i64, i32v}, i32, CapFDManage, "provide file access advice"},
+		{"fd_allocate", (*Plugin).fdAllocate, nil, []wago.ValType{i32v, i64, i64}, i32, CapFDWrite, "allocate file space"},
+		{"fd_datasync", (*Plugin).fdDatasync, nil, i32, i32, CapFDWrite, "synchronize file data"},
+		{"fd_sync", (*Plugin).fdSync, nil, i32, i32, CapFDWrite, "synchronize a file"},
+		{"fd_fdstat_set_flags", (*Plugin).fdFdstatSetFlags, nil, i32x2, i32, CapFDManage, "set descriptor flags"},
+		{"fd_fdstat_set_rights", (*Plugin).fdFdstatSetRights, nil, []wago.ValType{i32v, i64, i64}, i32, CapFDManage, "reduce descriptor rights"},
+		{"fd_filestat_get", (*Plugin).fdFilestatGet, nil, i32x2, i32, CapFDRead, "get file metadata"},
+		{"fd_filestat_set_size", (*Plugin).fdFilestatSetSize, nil, []wago.ValType{i32v, i64}, i32, CapFDWrite, "set file size"},
+		{"fd_filestat_set_times", (*Plugin).fdFilestatSetTimes, nil, []wago.ValType{i32v, i64, i64, i32v}, i32, CapFDWrite, "set file timestamps"},
+		{"fd_pread", (*Plugin).fdPread, nil, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, CapFDRead, "read at an offset"},
+		{"fd_pwrite", (*Plugin).fdPwrite, nil, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, CapFDWrite, "write at an offset"},
+		{"fd_readdir", (*Plugin).fdReaddir, nil, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, CapFDRead, "read directory entries"},
+		{"fd_renumber", (*Plugin).fdRenumber, nil, i32x2, i32, CapFDManage, "renumber a descriptor"},
+		{"fd_tell", (*Plugin).fdTell, nil, i32x2, i32, CapFDManage, "get a descriptor offset"},
+		{"path_create_directory", (*Plugin).pathCreateDirectory, nil, i32x3, i32, CapPathWrite, "create a directory"},
+		{"path_filestat_get", (*Plugin).pathFilestatGet, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, CapPathRead, "get path metadata"},
+		{"path_filestat_set_times", (*Plugin).pathFilestatSetTimes, nil, []wago.ValType{i32v, i32v, i32v, i32v, i64, i64, i32v}, i32, CapPathWrite, "set path timestamps"},
+		{"path_link", (*Plugin).pathLink, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapPathWrite, "create a hard link"},
+		{"path_open", (*Plugin).pathOpen, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i64, i64, i32v, i32v}, i32, CapPathOpen, "open a path with rights limited by its preopen"},
+		{"path_readlink", (*Plugin).pathReadlink, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapPathRead, "read a symbolic link"},
+		{"path_remove_directory", (*Plugin).pathRemoveDirectory, nil, i32x3, i32, CapPathWrite, "remove a directory"},
+		{"path_rename", (*Plugin).pathRename, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapPathWrite, "rename a path"},
+		{"path_symlink", (*Plugin).pathSymlink, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, CapPathWrite, "create a symbolic link"},
+		{"path_unlink_file", (*Plugin).pathUnlinkFile, nil, i32x3, i32, CapPathWrite, "unlink a file"},
+		{"poll_oneoff", (*Plugin).pollOneoff, nil, i32x4, i32, CapPoll, "wait for events"},
+		{"proc_raise", (*Plugin).procRaise, nil, i32, i32, CapUnsupported, "raise a signal (unsupported)"},
+		{"sock_accept", (*Plugin).sockAccept, nil, i32x3, i32, CapUnsupported, "accept a socket (unsupported)"},
+		{"sock_recv", (*Plugin).sockRecv, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapUnsupported, "receive from a socket (unsupported)"},
+		{"sock_send", (*Plugin).sockSend, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, CapUnsupported, "send to a socket (unsupported)"},
+		{"sock_shutdown", (*Plugin).sockShutdown, nil, i32x2, i32, CapUnsupported, "shut down a socket (unsupported)"},
 	}
 	for i := range bindings {
-		fn := bindings[i].fn
+		handler := bindings[i].handler
 		bindings[i].fn = func(m wago.HostModule, p, r []uint64) {
-			e.withFS(m, r, func() { fn(m, p, r) })
+			state, code := e.stateFor(m)
+			if code != wasiOK {
+				setStateError(r, code)
+				return
+			}
+			defer state.mu.Unlock()
+			call := *e
+			call.fs = state
+			handler(&call, m, p, r)
 		}
 	}
 	return bindings
@@ -436,8 +463,8 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 func configFromPluginConfig(cfg pluginConfig) (Config, error) {
 	resolved := Config{
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
-		Env: os.Environ(), Now: func() int64 { return time.Now().UnixNano() },
-		MaxOpenFiles: 1024, MaxPollDuration: time.Second,
+		Clocks: newSystemClock(nil), Context: context.Background(),
+		MaxOpenFiles: 1024, MaxIOVecs: 1024, MaxSubscriptionsPerPoll: 1024,
 	}
 	if err := applyInputMode(&resolved, cfg.Stdin); err != nil {
 		return Config{}, err
@@ -460,20 +487,21 @@ func configFromPluginConfig(cfg pluginConfig) (Config, error) {
 			}
 		}
 	}
-	if cfg.Preopens != nil {
-		if len(*cfg.Preopens) > 64 {
-			return Config{}, fmt.Errorf("wasi: preopens has %d entries, max 64", len(*cfg.Preopens))
+	if cfg.Mounts != nil {
+		if len(*cfg.Mounts) > 64 {
+			return Config{}, fmt.Errorf("wasi: mounts has %d entries, max 64", len(*cfg.Mounts))
 		}
-		resolved.Preopens = make(map[string]string, len(*cfg.Preopens))
-		for guest, host := range *cfg.Preopens {
-			if len(guest) == 0 || len(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
-				return Config{}, fmt.Errorf("wasi: invalid guest preopen path %q", guest)
+		seen := make(map[string]struct{}, len(*cfg.Mounts))
+		for _, mount := range *cfg.Mounts {
+			if err := validateMount(mount); err != nil {
+				return Config{}, err
 			}
-			if len(host) == 0 || len(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
-				return Config{}, fmt.Errorf("wasi: preopen %q requires a clean absolute host path", guest)
+			if _, ok := seen[mount.GuestPath]; ok {
+				return Config{}, fmt.Errorf("wasi: duplicate guest mount path %q", mount.GuestPath)
 			}
-			resolved.Preopens[guest] = host
+			seen[mount.GuestPath] = struct{}{}
 		}
+		resolved.Mounts = append([]Preopen(nil), (*cfg.Mounts)...)
 	}
 	if cfg.MaxOpenFiles != nil {
 		if *cfg.MaxOpenFiles < 3 || *cfg.MaxOpenFiles > 65536 {
@@ -481,11 +509,17 @@ func configFromPluginConfig(cfg pluginConfig) (Config, error) {
 		}
 		resolved.MaxOpenFiles = *cfg.MaxOpenFiles
 	}
-	if cfg.MaxPollDurationMillis != nil {
-		if *cfg.MaxPollDurationMillis < 1 || *cfg.MaxPollDurationMillis > 60000 {
-			return Config{}, fmt.Errorf("wasi: maxPollDurationMillis must be between 1 and 60000")
+	if cfg.MaxIOVecs != nil {
+		if *cfg.MaxIOVecs < 1 || *cfg.MaxIOVecs > 65536 {
+			return Config{}, fmt.Errorf("wasi: maxIOVecs must be between 1 and 65536")
 		}
-		resolved.MaxPollDuration = time.Duration(*cfg.MaxPollDurationMillis) * time.Millisecond
+		resolved.MaxIOVecs = *cfg.MaxIOVecs
+	}
+	if cfg.MaxSubscriptions != nil {
+		if *cfg.MaxSubscriptions < 1 || *cfg.MaxSubscriptions > 65536 {
+			return Config{}, fmt.Errorf("wasi: maxSubscriptionsPerPoll must be between 1 and 65536")
+		}
+		resolved.MaxSubscriptionsPerPoll = *cfg.MaxSubscriptions
 	}
 	return resolved, nil
 }
@@ -515,14 +549,31 @@ func applyOutputMode(name string, dst *io.Writer, mode *string) error {
 func cloneConfig(cfg Config) Config {
 	cfg.Args = append([]string(nil), cfg.Args...)
 	cfg.Env = append([]string(nil), cfg.Env...)
-	if cfg.Preopens != nil {
-		preopens := make(map[string]string, len(cfg.Preopens))
-		for guest, host := range cfg.Preopens {
-			preopens[guest] = host
-		}
-		cfg.Preopens = preopens
+	cfg.Mounts = append([]Preopen(nil), cfg.Mounts...)
+	if cfg.Clocks == nil {
+		cfg.Clocks = newSystemClock(nil)
+	}
+	if cfg.Context == nil {
+		cfg.Context = context.Background()
+	}
+	if cfg.MaxIOVecs == 0 {
+		cfg.MaxIOVecs = 1024
+	}
+	if cfg.MaxSubscriptionsPerPoll == 0 {
+		cfg.MaxSubscriptionsPerPoll = 1024
 	}
 	return cfg
+}
+
+func validateMount(mount Preopen) error {
+	guest, host := mount.GuestPath, mount.HostPath
+	if len(guest) == 0 || len(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
+		return fmt.Errorf("wasi: invalid guest mount path %q", guest)
+	}
+	if len(host) == 0 || len(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
+		return fmt.Errorf("wasi: mount %q requires a clean absolute host path", guest)
+	}
+	return nil
 }
 
 // --- memory helpers (bounds-checked; malformed pointers yield EFAULT, never a
@@ -555,42 +606,40 @@ func putLe64(mem []byte, off uint32, v uint64) bool {
 
 func (e *Plugin) fdWrite(m wago.HostModule, p, r []uint64) {
 	fd, iovs, n, nwrittenPtr := uint32(p[0]), uint32(p[1]), uint32(p[2]), uint32(p[3])
-	var out io.Writer
-	switch fd {
-	case 1:
-		out = e.cfg.Stdout
-	case 2:
-		out = e.cfg.Stderr
-	default:
-		f, code := e.entry(fd)
-		if code != 0 {
-			r[0] = code
-			return
-		}
-		if code = require(f, rightFDWrite); code != 0 {
-			r[0] = code
-			return
-		}
-		if f.file == nil {
-			r[0] = wasiEBadf
-			return
-		}
+	f, code := e.entry(fd)
+	if code == 0 {
+		code = require(f, rightFDWrite)
+	}
+	if code != 0 {
+		r[0] = code
+		return
+	}
+	out := f.writer
+	if f.file != nil {
 		out = f.file
 	}
 	mem := m.Memory()
-	bufs, code := iovecs(mem, iovs, n)
+	bufs, code := e.iovecs(mem, iovs, n)
 	if code != 0 {
 		r[0] = code
 		return
 	}
 	var total uint32
+	var writeErr error
 	for _, buf := range bufs {
 		if out != nil {
 			nn, err := out.Write(buf)
+			if nn < 0 || nn > len(buf) {
+				err = io.ErrShortWrite
+				nn = 0
+			}
 			total += uint32(nn)
-			if err != nil {
-				r[0] = errno(err)
-				return
+			if err != nil || nn != len(buf) {
+				if err == nil {
+					err = io.ErrShortWrite
+				}
+				writeErr = err
+				break
 			}
 		} else {
 			total += uint32(len(buf))
@@ -600,54 +649,60 @@ func (e *Plugin) fdWrite(m wago.HostModule, p, r []uint64) {
 		r[0] = wasiEFault
 		return
 	}
+	if writeErr != nil && total == 0 {
+		r[0] = errno(writeErr)
+		return
+	}
 	r[0] = wasiOK
 }
 
 func (e *Plugin) fdRead(m wago.HostModule, p, r []uint64) {
 	fd, iovs, n, nreadPtr := uint32(p[0]), uint32(p[1]), uint32(p[2]), uint32(p[3])
-	var in io.Reader
-	if fd == 0 {
-		in = e.cfg.Stdin
-		if in == nil { // stdin with no reader: clean EOF
-			if putLe32(m.Memory(), nreadPtr, 0) {
-				r[0] = wasiOK
-				return
-			}
-			r[0] = wasiEFault
-			return
-		}
-	} else {
-		f, code := e.entry(fd)
-		if code != 0 {
-			r[0] = code
-			return
-		}
-		if code = require(f, rightFDRead); code != 0 {
-			r[0] = code
-			return
-		}
-		if f.file == nil {
-			r[0] = wasiEBadf
-			return
-		}
+	f, code := e.entry(fd)
+	if code == 0 {
+		code = require(f, rightFDRead)
+	}
+	if code != 0 {
+		r[0] = code
+		return
+	}
+	in := f.reader
+	if f.file != nil {
 		in = f.file
 	}
 	mem := m.Memory()
-	bufs, code := iovecs(mem, iovs, n)
+	bufs, code := e.iovecs(mem, iovs, n)
 	if code != 0 {
 		r[0] = code
 		return
 	}
 	var total uint32
-	for _, buf := range bufs {
-		nn, err := in.Read(buf)
-		total += uint32(nn)
-		if err != nil || nn < len(buf) {
-			break
+	var readErr error
+	if in != nil {
+		for _, buf := range bufs {
+			nn, err := in.Read(buf)
+			if nn < 0 || nn > len(buf) {
+				err = io.ErrNoProgress
+				nn = 0
+			}
+			total += uint32(nn)
+			if err != nil {
+				if !errors.Is(err, io.EOF) {
+					readErr = err
+				}
+				break
+			}
+			if nn < len(buf) {
+				break
+			}
 		}
 	}
 	if !putLe32(mem, nreadPtr, total) {
 		r[0] = wasiEFault
+		return
+	}
+	if readErr != nil && total == 0 {
+		r[0] = errno(readErr)
 		return
 	}
 	r[0] = wasiOK
@@ -657,8 +712,15 @@ func (e *Plugin) fdClose(_ wago.HostModule, p, r []uint64) {
 	fd := uint32(p[0])
 	f, code := e.entry(fd)
 	if code == 0 {
+		if f.dirIter != nil {
+			code = errno(f.dirIter.Close())
+			f.dirIter = nil
+		}
 		if f.file != nil {
-			code = errno(f.file.Close())
+			closeCode := errno(f.file.Close())
+			if code == 0 {
+				code = closeCode
+			}
 		}
 		if code == 0 {
 			delete(e.fs.fds, fd)
@@ -819,24 +881,29 @@ func (e *Plugin) clockTimeGet(m wago.HostModule, p, r []uint64) {
 		r[0] = wasiEInval
 		return
 	}
-	var now int64
-	if e.cfg.Now != nil {
-		now = e.cfg.Now()
+	now, _, err := clockValue(e.cfg.Clocks, uint32(p[0]))
+	if err != nil {
+		r[0] = wasiENotsup
+		return
 	}
-	if !putLe64(m.Memory(), uint32(p[2]), uint64(now)) {
+	if !putLe64(m.Memory(), uint32(p[2]), now) {
 		r[0] = wasiEFault
 		return
 	}
 	r[0] = wasiOK
 }
 
-// clockResGet writes a coarse clock resolution (1ns) and succeeds.
 func (e *Plugin) clockResGet(m wago.HostModule, p, r []uint64) {
 	if p[0] > 3 {
 		r[0] = wasiEInval
 		return
 	}
-	if !putLe64(m.Memory(), uint32(p[1]), 1) {
+	_, resolution, err := clockValue(e.cfg.Clocks, uint32(p[0]))
+	if err != nil {
+		r[0] = wasiENotsup
+		return
+	}
+	if !putLe64(m.Memory(), uint32(p[1]), resolution) {
 		r[0] = wasiEFault
 		return
 	}

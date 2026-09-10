@@ -12,7 +12,6 @@ import (
 	"github.com/wago-org/wasi/p1"
 	"github.com/wago-org/wasi/p2"
 	wasiregister "github.com/wago-org/wasi/register"
-	"github.com/wago-org/wasi/unstable"
 )
 
 type manifestAuthor struct {
@@ -55,10 +54,9 @@ func TestManifestMatchesEveryCatalogDefinition(t *testing.T) {
 	}
 
 	canonical := map[string]wago.PluginDefinition{
-		wasi.ID:     wasi.Definition(),
-		p1.ID:       p1.Definition(),
-		p2.ID:       p2.Definition(),
-		unstable.ID: unstable.Definition(),
+		wasi.ID: wasi.Definition(),
+		p1.ID:   p1.Definition(),
+		p2.ID:   p2.Definition(),
 	}
 	providers := wasiregister.Providers()
 	if len(providers) != len(canonical) {
