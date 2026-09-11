@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	sysunix "golang.org/x/sys/unix"
 )
 
 func hostStat(info fs.FileInfo) (nlink uint64, atime, mtime, ctime time.Time, dev, ino uint64) {
@@ -21,7 +21,7 @@ func hostStat(info fs.FileInfo) (nlink uint64, atime, mtime, ctime time.Time, de
 }
 
 func setFileTimes(f *os.File, atime, mtime time.Time) error {
-	times := []unix.Timeval{unix.NsecToTimeval(atime.UnixNano()), unix.NsecToTimeval(mtime.UnixNano())}
-	return unix.Futimes(int(f.Fd()), times)
+	times := []sysunix.Timeval{sysunix.NsecToTimeval(atime.UnixNano()), sysunix.NsecToTimeval(mtime.UnixNano())}
+	return sysunix.Futimes(int(f.Fd()), times)
 }
-func syncFileData(f *os.File) error { return unix.Fdatasync(int(f.Fd())) }
+func syncFileData(f *os.File) error { return sysunix.Fdatasync(int(f.Fd())) }

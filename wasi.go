@@ -48,7 +48,7 @@ func Definition() wago.PluginDefinition {
 		Stability:   wago.Experimental,
 		Compatibility: wago.Compatibility{
 			Engines:   map[string]string{"wago": ">=0.1.0", "go": ">=1.22"},
-			Platforms: []string{"darwin/arm64", "linux/amd64", "linux/arm64"},
+			Platforms: []string{"darwin/arm64", "linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64"},
 		},
 		Provenance: wago.PluginProvenance{
 			Homepage:   "https://github.com/wago-org/wasi",

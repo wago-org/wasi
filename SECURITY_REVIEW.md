@@ -31,6 +31,7 @@ The descriptor-relative filesystem confinement remains a strong foundation.
 - [x] Make P2 append atomic across streams and reject `u64` offsets above `math.MaxInt64`.
 - [x] Replace P1's 16,384-entry directory snapshot with incremental iteration.
 - [x] Add secure Linux and pre-macOS 15 descriptor-walk fallbacks, platform allocation/sync helpers, expanded errno tests, and Linux/macOS CI.
+- [x] Add Windows root-relative handle confinement, native descriptor polling, share-delete lifecycle semantics, and Windows CI.
 - [x] Correct stability and completeness claims: the root, P1, and P2 are experimental; remove the legacy `wasi_unstable` compatibility provider.
 
 ## Additional correctness work
@@ -53,7 +54,7 @@ The descriptor-relative filesystem confinement remains a strong foundation.
 - [x] Blocked-I/O, slow-writer, cancellation, and cross-instance progress tests.
 - [x] Read-only mount and child attenuation tests.
 - [x] Resource exhaustion tests and ABI-decoder fuzz targets.
-- [x] Linux amd64/arm64 and macOS arm64 jobs at the minimum and current Go versions.
+- [x] Linux amd64/arm64, macOS arm64, and Windows amd64 jobs at the minimum and current Go versions, plus native Windows arm64 testing.
 - [x] Reproducible rebuild and pinned-toolchain checks for checked-in component fixtures.
 - [x] Host-call allocation and parallel-instance benchmark coverage. Numeric
   promotion budgets remain a release-policy decision because they depend on the

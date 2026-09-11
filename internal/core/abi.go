@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"syscall"
 )
 
 // WASI Preview 1 errno numbers used by the filesystem implementation.
@@ -109,58 +108,61 @@ func errno(err error) uint64 {
 	if err == nil {
 		return wasiOK
 	}
+	if code, ok := platformErrno(err); ok {
+		return code
+	}
 	switch {
-	case errors.Is(err, syscall.EPERM):
+	case errors.Is(err, hostErrno.EPERM):
 		return wasiEPerm
-	case errors.Is(err, syscall.E2BIG):
+	case errors.Is(err, hostErrno.E2BIG):
 		return wasiE2big
-	case errors.Is(err, os.ErrPermission), errors.Is(err, syscall.EACCES):
+	case errors.Is(err, os.ErrPermission), errors.Is(err, hostErrno.EACCES):
 		return wasiEAcces
-	case errors.Is(err, syscall.EAGAIN):
+	case errors.Is(err, hostErrno.EAGAIN):
 		return wasiEAgain
-	case errors.Is(err, syscall.EINTR):
+	case errors.Is(err, hostErrno.EINTR):
 		return wasiEIntr
-	case errors.Is(err, syscall.ENOSPC):
+	case errors.Is(err, hostErrno.ENOSPC):
 		return wasiENospc
-	case errors.Is(err, syscall.EDQUOT):
+	case errors.Is(err, hostErrno.EDQUOT):
 		return wasiEDquot
-	case errors.Is(err, syscall.ENOMEM):
+	case errors.Is(err, hostErrno.ENOMEM):
 		return wasiENomem
-	case errors.Is(err, syscall.EMFILE):
+	case errors.Is(err, hostErrno.EMFILE):
 		return wasiEMfile
-	case errors.Is(err, syscall.ENFILE):
+	case errors.Is(err, hostErrno.ENFILE):
 		return wasiENfile
-	case errors.Is(err, syscall.EFBIG):
+	case errors.Is(err, hostErrno.EFBIG):
 		return wasiEFbig
-	case errors.Is(err, syscall.EOVERFLOW):
+	case errors.Is(err, hostErrno.EOVERFLOW):
 		return wasiEOverflow
-	case errors.Is(err, syscall.EBUSY):
+	case errors.Is(err, hostErrno.EBUSY):
 		return wasiEBusy
-	case errors.Is(err, syscall.EPIPE):
+	case errors.Is(err, hostErrno.EPIPE):
 		return wasiEPipe
-	case errors.Is(err, syscall.EXDEV):
+	case errors.Is(err, hostErrno.EXDEV):
 		return wasiEXdev
-	case errors.Is(err, os.ErrNotExist), errors.Is(err, syscall.ENOENT):
+	case errors.Is(err, os.ErrNotExist), errors.Is(err, hostErrno.ENOENT):
 		return wasiENoent
-	case errors.Is(err, syscall.ENOTEMPTY):
+	case errors.Is(err, hostErrno.ENOTEMPTY):
 		return wasiENotempty
-	case errors.Is(err, os.ErrExist), errors.Is(err, syscall.EEXIST):
+	case errors.Is(err, os.ErrExist), errors.Is(err, hostErrno.EEXIST):
 		return wasiEExist
-	case errors.Is(err, syscall.EBADF):
+	case errors.Is(err, hostErrno.EBADF):
 		return wasiEBadf
-	case errors.Is(err, syscall.EINVAL):
+	case errors.Is(err, hostErrno.EINVAL):
 		return wasiEInval
-	case errors.Is(err, syscall.EISDIR):
+	case errors.Is(err, hostErrno.EISDIR):
 		return wasiEIsdir
-	case errors.Is(err, syscall.ENOTDIR):
+	case errors.Is(err, hostErrno.ENOTDIR):
 		return wasiENotdir
-	case errors.Is(err, syscall.ELOOP):
+	case errors.Is(err, hostErrno.ELOOP):
 		return wasiELoop
-	case errors.Is(err, syscall.ENAMETOOLONG):
+	case errors.Is(err, hostErrno.ENAMETOOLONG):
 		return wasiENametoolong
-	case errors.Is(err, syscall.EROFS):
+	case errors.Is(err, hostErrno.EROFS):
 		return wasiERofs
-	case errors.Is(err, syscall.ESPIPE):
+	case errors.Is(err, hostErrno.ESPIPE):
 		return wasiESpipe
 	default:
 		return wasiEIo

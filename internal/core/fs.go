@@ -11,11 +11,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	wago "github.com/wago-org/wago"
-	"golang.org/x/sys/unix"
 )
 
 const maxInt64Value = uint64(^uint64(0) >> 1)
@@ -40,6 +38,7 @@ type fdEntry struct {
 	reader     io.Reader
 	writer     io.Writer
 	mount      string
+	root       string
 	preopen    string
 	flags      uint16
 	rights     uint64
@@ -132,7 +131,7 @@ func (e *Plugin) makeFS(strict bool) (*fsState, error) {
 			}
 			continue
 		}
-		f, err := os.Open(host)
+		f, err := openPreopen(host, mount.rights&(rightFDFilestatSetTimes|rightPathFilestatSetTimes) != 0)
 		if err != nil {
 			if strict {
 				closeFS(s)
@@ -152,9 +151,18 @@ func (e *Plugin) makeFS(strict bool) (*fsState, error) {
 			}
 			continue
 		}
+		root, err := hostMountRoot(f, host)
+		if err != nil {
+			_ = f.Close()
+			if strict {
+				closeFS(s)
+				return nil, fmt.Errorf("wasi: resolve preopen root %q (%s): %w", name, host, err)
+			}
+			continue
+		}
 		fd := s.nextFD
 		s.nextFD++
-		s.fds[fd] = &fdEntry{file: f, mount: host, preopen: name, rights: mount.rights, inheriting: mount.inherited}
+		s.fds[fd] = &fdEntry{file: f, mount: host, root: root, preopen: name, rights: mount.rights, inheriting: mount.inherited}
 	}
 	return s, nil
 }
@@ -313,7 +321,7 @@ func (e *Plugin) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
 }
 
 func capabilityErr(err error) uint64 {
-	if err == syscall.EXDEV {
+	if errors.Is(err, hostErrno.EXDEV) {
 		return wasiENotcapable
 	}
 	return errno(err)
@@ -325,7 +333,7 @@ func openParent(d *fdEntry, name string) (*os.File, string, uint64) {
 	if parent == "" {
 		parent = "."
 	}
-	f, code := openAt(d, parent, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	f, code := openAt(d, parent, hostOpenReadOnly|hostOpenDirectory, 0)
 	return f, leaf, code
 }
 
@@ -444,22 +452,7 @@ func (e *Plugin) fdFdstatSetFlags(_ wago.HostModule, p, r []uint64) {
 			hostFile, _ = f.writer.(*os.File)
 		}
 		if hostFile != nil {
-			current, _, callErr := syscall.Syscall(syscall.SYS_FCNTL, hostFile.Fd(), syscall.F_GETFL, 0)
-			if callErr != 0 {
-				code = errno(callErr)
-			} else {
-				current &^= syscall.O_APPEND | syscall.O_NONBLOCK
-				if flags&1 != 0 {
-					current |= syscall.O_APPEND
-				}
-				if flags&4 != 0 {
-					current |= syscall.O_NONBLOCK
-				}
-				_, _, callErr = syscall.Syscall(syscall.SYS_FCNTL, hostFile.Fd(), syscall.F_SETFL, current)
-				if callErr != 0 {
-					code = errno(callErr)
-				}
-			}
+			code = errno(setHostFileFlags(f, hostFile, flags))
 		} else if flags != 0 {
 			code = wasiENotsup
 		}
@@ -522,7 +515,7 @@ func validFstFlags(flags uint64) bool {
 	return flags&^uint64(15) == 0 && flags&3 != 3 && flags&12 != 12
 }
 
-func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64, now time.Time) ([]unix.Timespec, uint64) {
+func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64, now time.Time) ([]time.Time, uint64) {
 	if !validFstFlags(flags) {
 		return nil, wasiEInval
 	}
@@ -542,7 +535,7 @@ func timesFor(info os.FileInfo, atim, mtim uint64, flags uint64, now time.Time) 
 	if flags&8 != 0 {
 		mt = now
 	}
-	return []unix.Timespec{unix.NsecToTimespec(a.UnixNano()), unix.NsecToTimespec(mt.UnixNano())}, wasiOK
+	return []time.Time{a, mt}, wasiOK
 }
 
 func (e *Plugin) filesystemNow() (time.Time, uint64) {
@@ -570,7 +563,7 @@ func (e *Plugin) fdFilestatSetTimes(_ wago.HostModule, p, r []uint64) {
 			if p[3]&0xa != 0 {
 				now, code = e.filesystemNow()
 			}
-			var times []unix.Timespec
+			var times []time.Time
 			if code == 0 {
 				times, code = timesFor(st, p[1], p[2], p[3], now)
 			}
@@ -646,7 +639,7 @@ func (e *Plugin) writeAt(m wago.HostModule, p, r []uint64) {
 		var n int
 		var err error
 		if f.flags&1 != 0 {
-			n, err = unix.Pwrite(int(f.file.Fd()), b, off)
+			n, err = appendWriteAt(f.file, b, off)
 		} else {
 			n, err = f.file.WriteAt(b, off)
 		}
@@ -699,14 +692,14 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 				break
 			}
 			f.dirCookie = i + 1
-			name = entries[0].Name()
-			entryFile, openCode := openMetadataAt(f, name, false)
-			if openCode != 0 {
-				code = openCode
+			entry := entries[0]
+			name = entry.Name()
+			var entryCode uint64
+			info, entryCode = directoryEntryInfo(f, entry)
+			if entryCode != wasiOK {
+				code = entryCode
 				break
 			}
-			info, err = entryFile.Stat()
-			_ = entryFile.Close()
 		}
 		if err != nil {
 			code = errno(err)
@@ -714,9 +707,7 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 		}
 		rec := make([]byte, 24+len(name))
 		binary.LittleEndian.PutUint64(rec[0:], i+1)
-		if st, ok := info.Sys().(*syscall.Stat_t); ok {
-			binary.LittleEndian.PutUint64(rec[8:], st.Ino)
-		}
+		binary.LittleEndian.PutUint64(rec[8:], hostInode(info))
 		binary.LittleEndian.PutUint32(rec[16:], uint32(len(name)))
 		rec[20] = filetype(info)
 		copy(rec[24:], name)
@@ -753,7 +744,7 @@ func positionDirectory(f *fdEntry, cookie uint64) uint64 {
 	if f.dirIter != nil {
 		_ = f.dirIter.Close()
 	}
-	dir, code := openAt(f, ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	dir, code := openAt(f, ".", hostOpenReadOnly|hostOpenDirectory, 0)
 	if code != 0 {
 		return code
 	}
@@ -829,10 +820,10 @@ func (e *Plugin) fdTell(m wago.HostModule, p, r []uint64) {
 }
 
 func (e *Plugin) pathCreateDirectory(m wago.HostModule, p, r []uint64) {
-	e.pathUnary(m, p, r, rightPathCreateDirectory, func(fd int, name string) error { return unix.Mkdirat(fd, name, 0o777) })
+	e.pathUnary(m, p, r, rightPathCreateDirectory, func(parent *os.File, name string) error { return makeDirectoryAt(parent, name, 0o777) })
 }
 
-func (e *Plugin) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op func(int, string) error) {
+func (e *Plugin) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op func(*os.File, string) error) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
@@ -845,7 +836,7 @@ func (e *Plugin) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op fu
 		parent, leaf, parentCode := openParent(d, name)
 		code = parentCode
 		if code == 0 {
-			code = errno(op(int(parent.Fd()), leaf))
+			code = errno(op(parent, leaf))
 			_ = parent.Close()
 		}
 	}
@@ -909,7 +900,7 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 					if p[6]&0xa != 0 {
 						now, code = e.filesystemNow()
 					}
-					var times []unix.Timespec
+					var times []time.Time
 					if code == 0 {
 						times, code = timesFor(st, p[4], p[5], p[6], now)
 					}
@@ -935,7 +926,7 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 						if p[6]&0xa != 0 {
 							now, code = e.filesystemNow()
 						}
-						var times []unix.Timespec
+						var times []time.Time
 						if code == 0 {
 							times, code = timesFor(st, p[4], p[5], p[6], now)
 						}
@@ -991,7 +982,7 @@ func (e *Plugin) pathLink(m wago.HostModule, p, r []uint64) {
 				oldParent, oldLeaf, oldCode := openParent(od, oldName)
 				code = oldCode
 				if code == 0 {
-					code = errno(unix.Linkat(int(oldParent.Fd()), oldLeaf, int(newParent.Fd()), newLeaf, 0))
+					code = errno(linkAt(oldParent, oldLeaf, newParent, newLeaf))
 					_ = oldParent.Close()
 				}
 			}
@@ -1045,11 +1036,14 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	if fdflags&1 != 0 {
 		flags |= os.O_APPEND
 	}
+	if rights&(rightFDFilestatSetTimes|rightPathFilestatSetTimes) != 0 {
+		flags |= hostOpenWriteAttributes
+	}
 	if oflags&2 != 0 || trailingSlash {
-		flags |= unix.O_DIRECTORY
+		flags |= hostOpenDirectory
 	}
 	if uint16(p[1])&1 == 0 {
-		flags |= unix.O_NOFOLLOW
+		flags |= hostOpenNoFollow
 	}
 	var f *os.File
 	if code == 0 {
@@ -1075,7 +1069,7 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 			_ = f.Close()
 		}
 	} else {
-		entry := &fdEntry{file: f, mount: d.mount, flags: fdflags, rights: rights, inheriting: inheriting}
+		entry := &fdEntry{file: f, mount: d.mount, root: d.root, flags: fdflags, rights: rights, inheriting: inheriting}
 		fd, allocCode := e.alloc(entry)
 		if allocCode != 0 {
 			_ = f.Close()
@@ -1104,7 +1098,7 @@ func (e *Plugin) pathReadlink(m wago.HostModule, p, r []uint64) {
 		code = parentCode
 		if code == 0 {
 			buf := make([]byte, 4096)
-			n, err := unix.Readlinkat(int(parent.Fd()), leaf, buf)
+			n, err := readlinkAt(parent, leaf, buf)
 			_ = parent.Close()
 			if err != nil {
 				code = errno(err)
@@ -1133,8 +1127,8 @@ func (e *Plugin) pathReadlink(m wago.HostModule, p, r []uint64) {
 }
 
 func (e *Plugin) pathRemoveDirectory(m wago.HostModule, p, r []uint64) {
-	e.pathUnary(m, p, r, rightPathRemoveDirectory, func(fd int, name string) error {
-		return unix.Unlinkat(fd, name, unix.AT_REMOVEDIR)
+	e.pathUnary(m, p, r, rightPathRemoveDirectory, func(parent *os.File, name string) error {
+		return removeAt(parent, name, true)
 	})
 }
 
@@ -1164,8 +1158,8 @@ func (e *Plugin) pathUnlinkFile(m wago.HostModule, p, r []uint64) {
 		}
 		return
 	}
-	e.pathUnary(m, p, r, rightPathUnlinkFile, func(fd int, name string) error {
-		return unix.Unlinkat(fd, name, 0)
+	e.pathUnary(m, p, r, rightPathUnlinkFile, func(parent *os.File, name string) error {
+		return removeAt(parent, name, false)
 	})
 }
 
@@ -1195,7 +1189,7 @@ func (e *Plugin) pathRename(m wago.HostModule, p, r []uint64) {
 			newParent, newLeaf, newCode := openParent(nd, newName)
 			code = newCode
 			if code == 0 {
-				code = errno(unix.Renameat(int(oldParent.Fd()), oldLeaf, int(newParent.Fd()), newLeaf))
+				code = errno(renameAt(oldParent, oldLeaf, newParent, newLeaf))
 				_ = newParent.Close()
 			}
 			_ = oldParent.Close()
@@ -1227,7 +1221,7 @@ func (e *Plugin) pathSymlink(m wago.HostModule, p, r []uint64) {
 		parent, leaf, parentCode := openParent(d, name)
 		code = parentCode
 		if code == 0 {
-			code = errno(unix.Symlinkat(target, int(parent.Fd()), leaf))
+			code = errno(symlinkAt(target, parent, leaf))
 			_ = parent.Close()
 		}
 	}

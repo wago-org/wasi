@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
         go: ["1.22.x", stable]
     runs-on: ${{ matrix.os }}
     steps:
@@ -37,6 +37,19 @@ jobs:
       - run: go build ./...
       - name: Test
         run: go test -race ./...
+
+  windows-arm64:
+    name: Windows arm64
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
 
   wasi-p1-conformance:
     name: P1 official testsuite

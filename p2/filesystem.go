@@ -15,7 +15,6 @@ import (
 	"time"
 
 	component "github.com/wago-org/component-model"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -123,23 +122,23 @@ type filesystemState struct {
 
 func requireDirectoryMutation(n *descriptorNode) error {
 	if n == nil || n.flags&(1<<5) == 0 {
-		return unix.EROFS
+		return hostFS.EROFS
 	}
 	return nil
 }
 
 func validateChildFlags(base *descriptorNode, requested, openFlags uint32) error {
 	if requested&^uint32(0x3f) != 0 {
-		return unix.EINVAL
+		return hostFS.EINVAL
 	}
 	if requested&1 != 0 && base.flags&1 == 0 || requested&2 != 0 && base.flags&2 == 0 || requested&(1<<5) != 0 && base.flags&(1<<5) == 0 {
-		return unix.EROFS
+		return hostFS.EROFS
 	}
 	if requested&0x1c != 0 && base.flags&2 == 0 {
-		return unix.EROFS
+		return hostFS.EROFS
 	}
 	if openFlags&(1<<3) != 0 && requested&2 == 0 {
-		return unix.EINVAL
+		return hostFS.EINVAL
 	}
 	if openFlags&(1|1<<3) != 0 || requested&2 != 0 {
 		return requireDirectoryMutation(base)
@@ -149,7 +148,7 @@ func validateChildFlags(base *descriptorNode, requested, openFlags uint32) error
 
 func checkedOffset(offset uint64) (int64, error) {
 	if offset > math.MaxInt64 {
-		return 0, unix.EOVERFLOW
+		return 0, hostFS.EOVERFLOW
 	}
 	return int64(offset), nil
 }
@@ -177,7 +176,7 @@ func prepareFilesystem(configured []Preopen, limits Limits) (*filesystemState, e
 	s := newFilesystem(configured, limits)
 	for i := range s.mounts {
 		mount := &s.mounts[i]
-		f, err := os.Open(mount.host)
+		f, err := openPreopenDirectory(mount.host, mount.flags&(2|1<<5) != 0)
 		if err != nil {
 			s.closeMounts()
 			return nil, fmt.Errorf("wasi p2: preopen %q: %w", mount.guest, err)
@@ -209,7 +208,7 @@ func (s *filesystemState) addDesc(n *descriptorNode) (uint32, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if uint32(len(s.descs)) >= s.limits.MaxDescriptors {
-		return 0, unix.EMFILE
+		return 0, hostFS.EMFILE
 	}
 	if !n.isDir && n.append == nil {
 		n.append = &appendTarget{}
@@ -234,7 +233,7 @@ func (s *filesystemState) addStream(n *fileStream) (uint32, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if uint32(len(s.streams)) >= s.limits.MaxStreams {
-		return 0, unix.EMFILE
+		return 0, hostFS.EMFILE
 	}
 	rep := s.nextStream
 	s.nextStream++
@@ -307,7 +306,7 @@ func (s *filesystemState) readStream(rep uint32, length uint64) ([]component.Val
 }
 
 func dupFile(f *os.File) (*os.File, error) {
-	fd, err := unix.Dup(int(f.Fd()))
+	fd, err := hostFS.Dup(int(f.Fd()))
 	if err != nil {
 		return nil, err
 	}
@@ -316,14 +315,14 @@ func dupFile(f *os.File) (*os.File, error) {
 
 func splitRelative(name string) ([]string, error) {
 	if strings.IndexByte(name, 0) >= 0 || path.IsAbs(name) {
-		return nil, unix.EPERM
+		return nil, hostFS.EPERM
 	}
 	clean := path.Clean(name)
 	if clean == "." {
 		return nil, nil
 	}
 	if clean == ".." || strings.HasPrefix(clean, "../") {
-		return nil, unix.EPERM
+		return nil, hostFS.EPERM
 	}
 	return strings.Split(clean, "/"), nil
 }
@@ -337,7 +336,7 @@ func openUnder(dir *os.File, name string, flags int, mode uint32) (*os.File, err
 		return nil, err
 	}
 	if len(parts) == 0 {
-		fd, err := unix.Openat(int(dir.Fd()), ".", flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
+		fd, err := hostFS.Openat(int(dir.Fd()), ".", flags|hostFS.O_NOFOLLOW|hostFS.O_CLOEXEC, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -348,14 +347,14 @@ func openUnder(dir *os.File, name string, flags int, mode uint32) (*os.File, err
 		return nil, err
 	}
 	for _, part := range parts[:len(parts)-1] {
-		fd, err := unix.Openat(int(cur.Fd()), part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, err := hostFS.Openat(int(cur.Fd()), part, hostFS.O_RDONLY|hostFS.O_DIRECTORY|hostFS.O_NOFOLLOW|hostFS.O_CLOEXEC, 0)
 		cur.Close()
 		if err != nil {
 			return nil, err
 		}
 		cur = os.NewFile(uintptr(fd), part)
 	}
-	fd, err := unix.Openat(int(cur.Fd()), parts[len(parts)-1], flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
+	fd, err := hostFS.Openat(int(cur.Fd()), parts[len(parts)-1], flags|hostFS.O_NOFOLLOW|hostFS.O_CLOEXEC, mode)
 	cur.Close()
 	if err != nil {
 		return nil, err
@@ -367,88 +366,91 @@ func parentUnder(dir *os.File, name string) (*os.File, string, error) {
 	parts, err := splitRelative(name)
 	if err != nil || len(parts) == 0 {
 		if err == nil {
-			err = unix.EPERM
+			err = hostFS.EPERM
 		}
 		return nil, "", err
 	}
 	parent := strings.Join(parts[:len(parts)-1], "/")
-	f, err := openUnder(dir, parent, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	f, err := openUnder(dir, parent, hostFS.O_RDONLY|hostFS.O_DIRECTORY, 0)
 	return f, parts[len(parts)-1], err
 }
 
 func fsError(err error) uint32 {
-	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOENT) {
+	if code, ok := platformFilesystemError(err); ok {
+		return code
+	}
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, hostFS.ENOENT) {
 		return fsErrNoEntry
 	}
-	if errors.Is(err, fs.ErrPermission) || errors.Is(err, unix.EACCES) {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, hostFS.EACCES) {
 		return fsErrAccess
 	}
 	switch {
-	case errors.Is(err, unix.EAGAIN):
+	case errors.Is(err, hostFS.EAGAIN):
 		return fsErrWouldBlock
-	case errors.Is(err, unix.EALREADY):
+	case errors.Is(err, hostFS.EALREADY):
 		return fsErrAlready
-	case errors.Is(err, unix.EBADF):
+	case errors.Is(err, hostFS.EBADF):
 		return fsErrBadDescriptor
-	case errors.Is(err, unix.EBUSY):
+	case errors.Is(err, hostFS.EBUSY):
 		return fsErrBusy
-	case errors.Is(err, unix.EDEADLK):
+	case errors.Is(err, hostFS.EDEADLK):
 		return fsErrDeadlock
-	case errors.Is(err, unix.EDQUOT):
+	case errors.Is(err, hostFS.EDQUOT):
 		return fsErrQuota
-	case errors.Is(err, unix.EEXIST):
+	case errors.Is(err, hostFS.EEXIST):
 		return fsErrExist
-	case errors.Is(err, unix.EFBIG):
+	case errors.Is(err, hostFS.EFBIG):
 		return fsErrFileTooLarge
-	case errors.Is(err, unix.EILSEQ):
+	case errors.Is(err, hostFS.EILSEQ):
 		return fsErrIllegalByteSequence
-	case errors.Is(err, unix.EINPROGRESS):
+	case errors.Is(err, hostFS.EINPROGRESS):
 		return fsErrInProgress
-	case errors.Is(err, unix.EINTR):
+	case errors.Is(err, hostFS.EINTR):
 		return fsErrInterrupted
-	case errors.Is(err, unix.EISDIR):
+	case errors.Is(err, hostFS.EISDIR):
 		return fsErrIsDirectory
-	case errors.Is(err, unix.ENOTDIR):
+	case errors.Is(err, hostFS.ENOTDIR):
 		return fsErrNotDirectory
-	case errors.Is(err, unix.ENOTEMPTY):
+	case errors.Is(err, hostFS.ENOTEMPTY):
 		return fsErrNotEmpty
-	case errors.Is(err, unix.ELOOP):
+	case errors.Is(err, hostFS.ELOOP):
 		return fsErrLoop
-	case errors.Is(err, unix.ENAMETOOLONG):
+	case errors.Is(err, hostFS.ENAMETOOLONG):
 		return fsErrNameTooLong
-	case errors.Is(err, unix.ENODEV):
+	case errors.Is(err, hostFS.ENODEV):
 		return fsErrNoDevice
-	case errors.Is(err, unix.ENOLCK):
+	case errors.Is(err, hostFS.ENOLCK):
 		return fsErrNoLock
-	case errors.Is(err, unix.ENOMEM):
+	case errors.Is(err, hostFS.ENOMEM):
 		return fsErrInsufficientMemory
-	case errors.Is(err, unix.ENOSPC):
+	case errors.Is(err, hostFS.ENOSPC):
 		return fsErrInsufficientSpace
-	case errors.Is(err, unix.ENOTRECOVERABLE):
+	case errors.Is(err, hostFS.ENOTRECOVERABLE):
 		return fsErrNotRecoverable
-	case errors.Is(err, unix.ENOTSUP), errors.Is(err, unix.ENOSYS):
+	case errors.Is(err, hostFS.ENOTSUP), errors.Is(err, hostFS.ENOSYS):
 		return fsErrUnsupported
-	case errors.Is(err, unix.ENOTTY):
+	case errors.Is(err, hostFS.ENOTTY):
 		return fsErrNoTTY
-	case errors.Is(err, unix.ENXIO):
+	case errors.Is(err, hostFS.ENXIO):
 		return fsErrNoSuchDevice
-	case errors.Is(err, unix.EPERM):
+	case errors.Is(err, hostFS.EPERM):
 		return fsErrNotPermitted
-	case errors.Is(err, unix.EROFS):
+	case errors.Is(err, hostFS.EROFS):
 		return fsErrReadOnly
-	case errors.Is(err, unix.EXDEV):
+	case errors.Is(err, hostFS.EXDEV):
 		return fsErrCrossDevice
-	case errors.Is(err, unix.EPIPE):
+	case errors.Is(err, hostFS.EPIPE):
 		return fsErrPipe
-	case errors.Is(err, unix.ESPIPE):
+	case errors.Is(err, hostFS.ESPIPE):
 		return fsErrInvalidSeek
-	case errors.Is(err, unix.ETXTBSY):
+	case errors.Is(err, hostFS.ETXTBSY):
 		return fsErrTextFileBusy
-	case errors.Is(err, unix.EINVAL):
+	case errors.Is(err, hostFS.EINVAL):
 		return fsErrInvalid
-	case errors.Is(err, unix.EOVERFLOW):
+	case errors.Is(err, hostFS.EOVERFLOW):
 		return fsErrOverflow
-	case errors.Is(err, unix.EMFILE), errors.Is(err, unix.ENFILE):
+	case errors.Is(err, hostFS.EMFILE), errors.Is(err, hostFS.ENFILE):
 		return fsErrQuota
 	default:
 		return fsErrIO
@@ -517,16 +519,16 @@ func requestedTimes(access, modification component.Value, info fs.FileInfo, now 
 		case 2:
 			r, ok := x.Payload.([]component.Value)
 			if !ok || len(r) != 2 {
-				return time.Time{}, false, unix.EINVAL
+				return time.Time{}, false, hostFS.EINVAL
 			}
 			seconds, ok1 := r[0].(uint64)
 			nanos, ok2 := r[1].(uint32)
 			if !ok1 || !ok2 || seconds > math.MaxInt64 || nanos >= 1e9 {
-				return time.Time{}, false, unix.EOVERFLOW
+				return time.Time{}, false, hostFS.EOVERFLOW
 			}
 			return time.Unix(int64(seconds), int64(nanos)), true, nil
 		default:
-			return time.Time{}, false, unix.EINVAL
+			return time.Time{}, false, hostFS.EINVAL
 		}
 	}
 	at, ac, e := parse(access, currentAccess)
@@ -546,7 +548,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			if mount.base != nil {
 				f, err = dupFile(mount.base)
 			} else {
-				f, err = os.Open(mount.host)
+				f, err = openPreopenDirectory(mount.host, mount.flags&(2|1<<5) != 0)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("preopen %q: %w", mount.guest, err)
@@ -588,31 +590,34 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, err
 		}
 		if !n.isDir {
-			return fsFailure(unix.ENOTDIR), nil
+			return fsFailure(hostFS.ENOTDIR), nil
 		}
 		openFlags, descFlags := args[3].(uint32), args[4].(uint32)
 		if e := validateChildFlags(n, descFlags, openFlags); e != nil {
 			return fsFailure(e), nil
 		}
 		readable, writable := descFlags&1 != 0, descFlags&2 != 0
-		flags := unix.O_RDONLY
+		flags := hostFS.O_RDONLY
 		if readable && writable {
-			flags = unix.O_RDWR
+			flags = hostFS.O_RDWR
 		} else if writable {
-			flags = unix.O_WRONLY
+			flags = hostFS.O_WRONLY
 		}
 		if openFlags&(1<<1) != 0 {
-			flags = unix.O_RDONLY | unix.O_DIRECTORY
+			flags = hostFS.O_RDONLY | hostFS.O_DIRECTORY
 			writable = false
 		}
 		if openFlags&1 != 0 {
-			flags |= unix.O_CREAT
+			flags |= hostFS.O_CREAT
 		}
 		if openFlags&(1<<2) != 0 {
-			flags |= unix.O_EXCL
+			flags |= hostFS.O_EXCL
 		}
 		if openFlags&(1<<3) != 0 && writable {
-			flags |= unix.O_TRUNC
+			flags |= hostFS.O_TRUNC
+		}
+		if descFlags&(2|1<<5) != 0 {
+			flags |= hostFS.O_WRITE_ATTRIBUTES
 		}
 		f, err := openUnder(n.file, args[2].(string), flags, 0o644)
 		if err != nil {
@@ -664,7 +669,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		f, e := openUnder(n.file, args[2].(string), unix.O_RDONLY, 0)
+		f, e := openUnder(n.file, args[2].(string), hostFS.O_RDONLY, 0)
 		if e != nil {
 			return fsFailure(e), nil
 		}
@@ -691,7 +696,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		f, e := openUnder(n.file, args[2].(string), unix.O_RDONLY, 0)
+		f, e := openUnder(n.file, args[2].(string), hostFS.O_RDONLY, 0)
 		if e != nil {
 			return fsFailure(e), nil
 		}
@@ -708,7 +713,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if n.flags&1 == 0 {
-			return fsFailure(unix.EBADF), nil
+			return fsFailure(hostFS.EBADF), nil
 		}
 		f, e := dupFile(n.file)
 		if e != nil {
@@ -732,7 +737,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if n.flags&2 == 0 {
-			return fsFailure(unix.EBADF), nil
+			return fsFailure(hostFS.EBADF), nil
 		}
 		f, e := dupFile(n.file)
 		if e != nil {
@@ -756,7 +761,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if n.flags&2 == 0 {
-			return fsFailure(unix.EBADF), nil
+			return fsFailure(hostFS.EBADF), nil
 		}
 		f, e := dupFile(n.file)
 		if e != nil {
@@ -775,7 +780,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if !n.isDir {
-			return fsFailure(unix.ENOTDIR), nil
+			return fsFailure(hostFS.ENOTDIR), nil
 		}
 		f, e := dupFile(n.file)
 		if e != nil {
@@ -785,7 +790,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if uint32(len(s.dirs)) >= s.limits.MaxDirectoryStreams {
 			s.mu.Unlock()
 			f.Close()
-			return fsFailure(unix.EMFILE), nil
+			return fsFailure(hostFS.EMFILE), nil
 		}
 		rep := s.nextDir
 		s.nextDir++
@@ -811,7 +816,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		}
 		entry := entries[0]
 		if uint64(len(entry.Name())) > s.limits.MaxDirectoryEntryBytes {
-			return fsFailure(unix.ENAMETOOLONG), nil
+			return fsFailure(hostFS.ENAMETOOLONG), nil
 		}
 		i, e := entry.Info()
 		if e != nil {
@@ -825,14 +830,14 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if n.flags&(1<<5) == 0 {
-			return fsFailure(unix.EROFS), nil
+			return fsFailure(hostFS.EROFS), nil
 		}
 		p, name, e := parentUnder(n.file, args[1].(string))
 		if e != nil {
 			return fsFailure(e), nil
 		}
 		defer p.Close()
-		e = unix.Mkdirat(int(p.Fd()), name, 0o755)
+		e = hostFS.Mkdirat(int(p.Fd()), name, 0o755)
 		if e != nil {
 			return fsFailure(e), nil
 		}
@@ -845,7 +850,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 				return nil, e
 			}
 			if n.flags&(1<<5) == 0 {
-				return fsFailure(unix.EROFS), nil
+				return fsFailure(hostFS.EROFS), nil
 			}
 			p, name, e := parentUnder(n.file, args[1].(string))
 			if e != nil {
@@ -854,9 +859,9 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			defer p.Close()
 			flags := 0
 			if dir {
-				flags = unix.AT_REMOVEDIR
+				flags = hostFS.AT_REMOVEDIR
 			}
-			e = unix.Unlinkat(int(p.Fd()), name, flags)
+			e = hostFS.Unlinkat(int(p.Fd()), name, flags)
 			if e != nil {
 				return fsFailure(e), nil
 			}
@@ -873,10 +878,10 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if a.flags&(1<<5) == 0 || b.flags&(1<<5) == 0 {
-			return fsFailure(unix.EROFS), nil
+			return fsFailure(hostFS.EROFS), nil
 		}
 		if a.mount != b.mount {
-			return fsFailure(unix.EXDEV), nil
+			return fsFailure(hostFS.EXDEV), nil
 		}
 		ap, an, e := parentUnder(a.file, args[1].(string))
 		if e != nil {
@@ -888,7 +893,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return fsFailure(e), nil
 		}
 		defer bp.Close()
-		e = unix.Renameat(int(ap.Fd()), an, int(bp.Fd()), bn)
+		e = hostFS.Renameat(int(ap.Fd()), an, int(bp.Fd()), bn)
 		if e != nil {
 			return fsFailure(e), nil
 		}
@@ -915,7 +920,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		return ok(nil), nil
 	}
 	advise := func(context.Context, []component.Value) ([]component.Value, error) {
-		return fsFailure(unix.ENOTSUP), nil
+		return fsFailure(hostFS.ENOTSUP), nil
 	}
 	setSize := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		n, e := s.desc(args[0].(uint32))
@@ -923,7 +928,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if n.flags&2 == 0 {
-			return fsFailure(unix.EROFS), nil
+			return fsFailure(hostFS.EROFS), nil
 		}
 		size, e := checkedOffset(args[1].(uint64))
 		if e == nil {
@@ -940,7 +945,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if n.flags&1 == 0 {
-			return fsFailure(unix.EBADF), nil
+			return fsFailure(hostFS.EBADF), nil
 		}
 		length := args[1].(uint64)
 		if length > s.limits.ioLimit() {
@@ -964,7 +969,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if n.flags&2 == 0 {
-			return fsFailure(unix.EROFS), nil
+			return fsFailure(hostFS.EROFS), nil
 		}
 		buf, e := bytesValue(args[1])
 		if e != nil {
@@ -989,7 +994,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return nil, e
 		}
 		if n.flags&2 == 0 {
-			return fsFailure(unix.EROFS), nil
+			return fsFailure(hostFS.EROFS), nil
 		}
 		info, e := n.file.Stat()
 		if e != nil {
@@ -1012,7 +1017,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e = requireDirectoryMutation(n); e != nil {
 			return fsFailure(e), nil
 		}
-		f, e := openUnder(n.file, args[2].(string), unix.O_RDONLY, 0)
+		f, e := openUnder(n.file, args[2].(string), hostFS.O_RDONLY|hostFS.O_WRITE_ATTRIBUTES, 0)
 		if e != nil {
 			return fsFailure(e), nil
 		}
@@ -1043,10 +1048,10 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return fsFailure(e), nil
 		}
 		if a.mount != b.mount {
-			return fsFailure(unix.EXDEV), nil
+			return fsFailure(hostFS.EXDEV), nil
 		}
 		if args[1].(uint32)&1 != 0 {
-			return fsFailure(unix.ENOTSUP), nil
+			return fsFailure(hostFS.ENOTSUP), nil
 		}
 		ap, an, e := parentUnder(a.file, args[2].(string))
 		if e != nil {
@@ -1058,7 +1063,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return fsFailure(e), nil
 		}
 		defer bp.Close()
-		e = unix.Linkat(int(ap.Fd()), an, int(bp.Fd()), bn, 0)
+		e = hostFS.Linkat(int(ap.Fd()), an, int(bp.Fd()), bn, 0)
 		if e != nil {
 			return fsFailure(e), nil
 		}
@@ -1076,7 +1081,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		defer p.Close()
 		buf := make([]byte, 4096)
 		for {
-			got, e := unix.Readlinkat(int(p.Fd()), name, buf)
+			got, e := hostFS.Readlinkat(int(p.Fd()), name, buf)
 			if e != nil {
 				return fsFailure(e), nil
 			}
@@ -1084,7 +1089,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 				return ok(string(buf[:got])), nil
 			}
 			if len(buf) >= maxIOSize {
-				return fsFailure(unix.ENAMETOOLONG), nil
+				return fsFailure(hostFS.ENAMETOOLONG), nil
 			}
 			buf = make([]byte, len(buf)*2)
 		}
@@ -1102,7 +1107,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			return fsFailure(e), nil
 		}
 		defer p.Close()
-		e = unix.Symlinkat(args[1].(string), int(p.Fd()), name)
+		e = hostFS.Symlinkat(args[1].(string), int(p.Fd()), name)
 		if e != nil {
 			return fsFailure(e), nil
 		}
