@@ -74,12 +74,15 @@ func openAt(root windows.Handle, name string, flags int, mode uint32, directory,
 	if name == "" {
 		return windows.InvalidHandle, windows.ERROR_FILE_NOT_FOUND
 	}
-	if name == "." && additionalAccess == 0 {
+	if name == "." {
 		if flags&os.O_CREATE != 0 && flags&os.O_EXCL != 0 {
 			return windows.InvalidHandle, syscall.EEXIST
 		}
 		if flags&(os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_RDWR) != 0 {
 			return windows.InvalidHandle, syscall.EISDIR
+		}
+		if additionalAccess != 0 {
+			return reopen(root, windows.FILE_GENERIC_READ|additionalAccess)
 		}
 		process := windows.CurrentProcess()
 		var duplicate windows.Handle
@@ -137,6 +140,17 @@ func openAt(root windows.Handle, name string, flags int, mode uint32, directory,
 		return windows.InvalidHandle, errno(err)
 	}
 	return handle, nil
+}
+
+func reopen(handle windows.Handle, access uint32) (windows.Handle, error) {
+	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
+	h, _, callErr := proc.Call(uintptr(handle), uintptr(access),
+		uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE),
+		uintptr(windows.FILE_FLAG_BACKUP_SEMANTICS))
+	if windows.Handle(h) == windows.InvalidHandle {
+		return windows.InvalidHandle, callErr
+	}
+	return windows.Handle(h), nil
 }
 
 func MkdirAt(root windows.Handle, name string) error {
