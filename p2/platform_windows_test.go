@@ -100,3 +100,37 @@ func TestWindowsFilesystemErrorMapping(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsMutateOnlyMountCanSetTimesAt(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	if err := os.WriteFile(child, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fs, err := prepareFilesystem([]Preopen{{GuestPath: "/data", HostPath: root, MutateDirectory: true}}, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.closeMounts()
+	wantRoot := time.Date(2004, time.May, 6, 7, 8, 9, 0, time.UTC)
+	if err := setFileTimes(fs.mounts[0].base, wantRoot, wantRoot); err != nil {
+		t.Fatalf("set mutate-only preopen times: %v", err)
+	}
+	fd, err := hostFS.Openat(int(fs.mounts[0].base.Fd()), "child", hostFS.O_RDONLY|hostFS.O_WRITE_ATTRIBUTES, 0)
+	if err != nil {
+		t.Fatalf("open child for set-times-at: %v", err)
+	}
+	f := os.NewFile(uintptr(fd), child)
+	defer f.Close()
+	wantChild := time.Date(2005, time.June, 7, 8, 9, 10, 0, time.UTC)
+	if err := setFileTimes(f, wantChild, wantChild); err != nil {
+		t.Fatalf("set child times: %v", err)
+	}
+	info, err := os.Stat(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(wantChild) {
+		t.Fatalf("child mtime = %v, want %v", info.ModTime(), wantChild)
+	}
+}
