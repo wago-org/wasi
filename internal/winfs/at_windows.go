@@ -82,7 +82,7 @@ func openAt(root windows.Handle, name string, flags int, mode uint32, directory,
 			return windows.InvalidHandle, syscall.EISDIR
 		}
 		if additionalAccess != 0 {
-			return reopen(root, windows.FILE_GENERIC_READ|additionalAccess)
+			return reopen(root, additionalAccess)
 		}
 		process := windows.CurrentProcess()
 		var duplicate windows.Handle
@@ -337,7 +337,7 @@ func symlinkAt(target string, root windows.Handle, name string, directory bool) 
 	if len(substitute) == 0 || !isAbsoluteWindowsPath(substitute) {
 		rdb.Flags = symlinkFlagRelative
 	}
-	pathBuffer := (*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&buf[headerSize]))
+	pathBuffer := unsafe.Slice((*uint16)(unsafe.Pointer(&buf[headerSize])), len(substitute16)+len(print16))
 	copy(pathBuffer[:len(substitute16):len(substitute16)], substitute16)
 	copy(pathBuffer[len(substitute16):len(substitute16)+len(print16)], print16)
 	err = windows.DeviceIoControl(handle, windows.FSCTL_SET_REPARSE_POINT, &buf[0], uint32(len(buf)), nil, 0, nil, nil)
@@ -408,6 +408,6 @@ func ReadlinkAt(root windows.Handle, name string, buf []byte) (int, error) {
 	if start < 20 || end > int(returned) || end < start {
 		return 0, syscall.EINVAL
 	}
-	text := windows.UTF16ToString((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&raw[start]))[: rdb.PrintLength/2 : rdb.PrintLength/2])
+	text := windows.UTF16ToString(unsafe.Slice((*uint16)(unsafe.Pointer(&raw[start])), int(rdb.PrintLength/2)))
 	return copy(buf, text), nil
 }
