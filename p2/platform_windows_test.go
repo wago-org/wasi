@@ -24,6 +24,9 @@ func TestWindowsRelativeDirectoryMutation(t *testing.T) {
 	}
 	parent := os.NewFile(uintptr(fd), base.Name())
 	defer parent.Close()
+	if err := hostFS.Symlinkat("", int(parent.Fd()), "empty-target"); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("Symlinkat empty target = %T %v", err, err)
+	}
 	if err := hostFS.Mkdirat(int(parent.Fd()), "work", 0o755); err != nil {
 		t.Fatalf("Mkdirat: %T %v", err, err)
 	}

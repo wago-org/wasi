@@ -291,6 +291,9 @@ type reparseDataBuffer struct {
 }
 
 func SymlinkAt(target string, root windows.Handle, name string, directory bool) error {
+	if target == "" {
+		return syscall.EINVAL
+	}
 	return withSymlinkPrivilege(func() error {
 		return symlinkAt(target, root, name, directory)
 	})
