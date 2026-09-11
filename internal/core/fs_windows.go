@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	hostOpenReadOnly  = os.O_RDONLY
-	hostOpenDirectory = 1 << 24
-	hostOpenNoFollow  = 1 << 25
+	hostOpenReadOnly        = os.O_RDONLY
+	hostOpenDirectory       = 1 << 24
+	hostOpenNoFollow        = 1 << 25
+	hostOpenWriteAttributes = 1 << 26
 )
 
 func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
@@ -35,20 +36,20 @@ func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) 
 		defer p.Close()
 		return openAt(&fdEntry{file: p, mount: d.mount, root: d.root}, leaf, flags, mode)
 	}
-	openFlags := flags &^ (hostOpenDirectory | hostOpenNoFollow | os.O_TRUNC)
+	openFlags := flags &^ (hostOpenDirectory | hostOpenNoFollow | hostOpenWriteAttributes | os.O_TRUNC)
 	root := windows.Handle(d.file.Fd())
 	var h windows.Handle
 	var err error
 	if flags&os.O_CREATE != 0 && flags&os.O_EXCL == 0 {
-		h, err = winfs.OpenAt(root, leaf, openFlags&^os.O_CREATE, mode,
-			flags&hostOpenDirectory != 0, false, flags&hostOpenNoFollow != 0)
+		h, err = winfs.OpenAtAccess(root, leaf, openFlags&^os.O_CREATE, mode,
+			flags&hostOpenDirectory != 0, false, flags&hostOpenNoFollow != 0, windowsAccess(flags))
 		if errors.Is(err, os.ErrNotExist) {
-			h, err = winfs.OpenAt(root, leaf, openFlags, mode,
-				flags&hostOpenDirectory != 0, true, flags&hostOpenNoFollow != 0)
+			h, err = winfs.OpenAtAccess(root, leaf, openFlags, mode,
+				flags&hostOpenDirectory != 0, true, flags&hostOpenNoFollow != 0, windowsAccess(flags))
 		}
 	} else {
-		h, err = winfs.OpenAt(root, leaf, openFlags, mode,
-			flags&hostOpenDirectory != 0, flags&os.O_CREATE != 0, flags&hostOpenNoFollow != 0)
+		h, err = winfs.OpenAtAccess(root, leaf, openFlags, mode,
+			flags&hostOpenDirectory != 0, flags&os.O_CREATE != 0, flags&hostOpenNoFollow != 0, windowsAccess(flags))
 	}
 	if err != nil {
 		if flags&os.O_CREATE != 0 && flags&os.O_EXCL != 0 && errors.Is(err, syscall.ELOOP) {
@@ -94,8 +95,19 @@ func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) 
 	return f, wasiOK
 }
 
-func openPreopen(path string) (*os.File, error) {
-	return openWindowsPath(path, os.O_RDONLY, true, false)
+func windowsAccess(flags int) uint32 {
+	if flags&hostOpenWriteAttributes != 0 {
+		return windows.FILE_WRITE_ATTRIBUTES
+	}
+	return 0
+}
+
+func openPreopen(path string, writeAttributes bool) (*os.File, error) {
+	flags := os.O_RDONLY
+	if writeAttributes {
+		flags |= hostOpenWriteAttributes
+	}
+	return openWindowsPath(path, flags, true, false)
 }
 
 func hostMountRoot(file *os.File, _ string) (string, error) {
@@ -118,6 +130,7 @@ func openWindowsPath(path string, flags int, directory, reparse bool) (*os.File,
 		access |= windows.FILE_APPEND_DATA
 		access &^= windows.FILE_WRITE_DATA
 	}
+	access |= windowsAccess(flags)
 	creation := uint32(windows.OPEN_EXISTING)
 	switch {
 	case flags&os.O_CREATE != 0 && flags&os.O_EXCL != 0:

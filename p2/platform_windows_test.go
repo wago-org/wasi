@@ -8,16 +8,28 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
 
 func TestWindowsRelativeDirectoryMutation(t *testing.T) {
-	base, err := openPreopenDirectory(t.TempDir())
+	base, err := openPreopenDirectory(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer base.Close()
+	want := time.Date(2003, time.April, 5, 6, 7, 8, 0, time.UTC)
+	if err := setFileTimes(base, want, want); err != nil {
+		t.Fatalf("set preopen times: %v", err)
+	}
+	info, err := base.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(want) {
+		t.Fatalf("preopen mtime = %v, want %v", info.ModTime(), want)
+	}
 	fd, err := hostFS.Openat(int(base.Fd()), ".", hostFS.O_RDONLY|hostFS.O_DIRECTORY|hostFS.O_NOFOLLOW, 0)
 	if err != nil {
 		t.Fatal(err)

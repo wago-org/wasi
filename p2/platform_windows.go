@@ -47,8 +47,9 @@ var (
 )
 
 const (
-	winDirectory = 1 << 24
-	winNoFollow  = 1 << 25
+	winDirectory       = 1 << 24
+	winNoFollow        = 1 << 25
+	winWriteAttributes = 1 << 26
 )
 
 var hostFS = filesystemPlatform{
@@ -65,7 +66,7 @@ var hostFS = filesystemPlatform{
 	ESPIPE: errInvalidSeek, ETXTBSY: errTextFileBusy, ENFILE: errQuota,
 	O_RDONLY: os.O_RDONLY, O_RDWR: os.O_RDWR, O_WRONLY: os.O_WRONLY,
 	O_DIRECTORY: winDirectory, O_CREAT: os.O_CREATE, O_EXCL: os.O_EXCL,
-	O_TRUNC: os.O_TRUNC, O_NOFOLLOW: winNoFollow, O_CLOEXEC: 0, AT_REMOVEDIR: 1,
+	O_TRUNC: os.O_TRUNC, O_NOFOLLOW: winNoFollow, O_CLOEXEC: 0, O_WRITE_ATTRIBUTES: winWriteAttributes, AT_REMOVEDIR: 1,
 	Dup: duplicateFileHandle, Openat: openFileAt, Mkdirat: mkdirFileAt,
 	Unlinkat: unlinkFileAt, Renameat: renameFileAt, Linkat: linkFileAt,
 	Readlinkat: readlinkFileAt, Symlinkat: symlinkFileAt,
@@ -85,8 +86,8 @@ func openFileAt(fd int, name string, flags int, mode uint32) (int, error) {
 	if filepath.IsAbs(clean) || filepath.Base(clean) != clean {
 		return 0, errNotPermitted
 	}
-	openFlags := flags &^ (winDirectory | winNoFollow)
-	f, err := openWindowsP2At(windows.Handle(fd), clean, openFlags, flags&winDirectory != 0, flags&winNoFollow != 0)
+	openFlags := flags &^ (winDirectory | winNoFollow | winWriteAttributes)
+	f, err := openWindowsP2At(windows.Handle(fd), clean, openFlags, flags&winDirectory != 0, flags&winNoFollow != 0, flags&winWriteAttributes != 0)
 	if err != nil {
 		return 0, err
 	}
@@ -112,8 +113,12 @@ func openFileAt(fd int, name string, flags int, mode uint32) (int, error) {
 	return duplicate, nil
 }
 
-func openWindowsP2At(root windows.Handle, name string, flags int, directory, noFollow bool) (*os.File, error) {
-	handle, err := winfs.OpenAt(root, name, flags, 0o666, directory, true, noFollow)
+func openWindowsP2At(root windows.Handle, name string, flags int, directory, noFollow, writeAttributes bool) (*os.File, error) {
+	var access uint32
+	if writeAttributes {
+		access = windows.FILE_WRITE_ATTRIBUTES
+	}
+	handle, err := winfs.OpenAtAccess(root, name, flags, 0o666, directory, true, noFollow, access)
 	if err != nil {
 		if flags&os.O_CREATE != 0 && flags&os.O_EXCL != 0 && errors.Is(err, syscall.ELOOP) {
 			return nil, os.ErrExist
@@ -139,11 +144,11 @@ func openWindowsP2At(root windows.Handle, name string, flags int, directory, noF
 	return f, nil
 }
 
-func openPreopenDirectory(path string) (*os.File, error) {
-	return openWindowsP2Path(path, os.O_RDONLY, true)
+func openPreopenDirectory(path string, writeAttributes bool) (*os.File, error) {
+	return openWindowsP2Path(path, os.O_RDONLY, true, writeAttributes)
 }
 
-func openWindowsP2Path(path string, flags int, directory bool) (*os.File, error) {
+func openWindowsP2Path(path string, flags int, directory, writeAttributes bool) (*os.File, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -154,6 +159,9 @@ func openWindowsP2Path(path string, flags int, directory bool) (*os.File, error)
 		access = windows.GENERIC_WRITE
 	case os.O_RDWR:
 		access = windows.GENERIC_READ | windows.GENERIC_WRITE
+	}
+	if writeAttributes {
+		access |= windows.FILE_WRITE_ATTRIBUTES
 	}
 	creation := uint32(windows.OPEN_EXISTING)
 	switch {

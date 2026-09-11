@@ -3,14 +3,11 @@
 package core
 
 import (
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/windows"
 )
 
 func TestWindowsOpenAtUsesDescriptorDirectory(t *testing.T) {
@@ -21,7 +18,7 @@ func TestWindowsOpenAtUsesDescriptorDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "sub", "file"), []byte("nested"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	preopen, err := openPreopen(root)
+	preopen, err := openPreopen(root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +71,7 @@ func TestWindowsSetPathTimesNoFollowUpdatesSymlink(t *testing.T) {
 	if err := os.Symlink("target", link); err != nil {
 		t.Fatal(err)
 	}
-	preopen, err := openPreopen(root)
+	preopen, err := openPreopen(root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,16 +98,13 @@ func TestWindowsSetPathTimesNoFollowUpdatesSymlink(t *testing.T) {
 
 func TestWindowsSetPathTimesUpdatesPreopenDirectory(t *testing.T) {
 	root := t.TempDir()
-	preopen, err := openPreopen(root)
+	preopen, err := openPreopen(root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer preopen.Close()
 	want := time.Date(2002, time.March, 4, 5, 6, 7, 0, time.UTC)
 	if err := setPathTimes(preopen, ".", []time.Time{want, want}, false); err != nil {
-		if isWine() && errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			t.Skip("Wine does not support reopening a directory handle with FILE_WRITE_ATTRIBUTES")
-		}
 		t.Fatal(err)
 	}
 	info, err := os.Stat(root)
@@ -120,10 +114,6 @@ func TestWindowsSetPathTimesUpdatesPreopenDirectory(t *testing.T) {
 	if !info.ModTime().Equal(want) {
 		t.Fatalf("preopen mtime = %v, want %v", info.ModTime(), want)
 	}
-}
-
-func isWine() bool {
-	return windows.NewLazySystemDLL("ntdll.dll").NewProc("wine_get_version").Find() == nil
 }
 
 func TestWindowsOpenAtAcceptsSymlinkPreopen(t *testing.T) {
@@ -139,7 +129,7 @@ func TestWindowsOpenAtAcceptsSymlinkPreopen(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	preopen, err := openPreopen(link)
+	preopen, err := openPreopen(link, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +147,7 @@ func TestWindowsOpenAtAcceptsSymlinkPreopen(t *testing.T) {
 
 func TestWindowsOpenAtCreateAppendIsAppendOnly(t *testing.T) {
 	root := t.TempDir()
-	preopen, err := openPreopen(root)
+	preopen, err := openPreopen(root, true)
 	if err != nil {
 		t.Fatal(err)
 	}

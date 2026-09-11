@@ -131,7 +131,7 @@ func (e *Plugin) makeFS(strict bool) (*fsState, error) {
 			}
 			continue
 		}
-		f, err := openPreopen(host)
+		f, err := openPreopen(host, mount.rights&(rightFDFilestatSetTimes|rightPathFilestatSetTimes) != 0)
 		if err != nil {
 			if strict {
 				closeFS(s)
@@ -1035,6 +1035,9 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	}
 	if fdflags&1 != 0 {
 		flags |= os.O_APPEND
+	}
+	if rights&(rightFDFilestatSetTimes|rightPathFilestatSetTimes) != 0 {
+		flags |= hostOpenWriteAttributes
 	}
 	if oflags&2 != 0 || trailingSlash {
 		flags |= hostOpenDirectory

@@ -8,7 +8,7 @@ type filesystemPlatform struct {
 	ENOTRECOVERABLE, ENOTSUP, ENOSYS, ENOTTY, ENXIO, EXDEV            error
 	EPIPE, ESPIPE, ETXTBSY, ENFILE                                    error
 	O_RDONLY, O_RDWR, O_WRONLY, O_DIRECTORY, O_CREAT, O_EXCL, O_TRUNC int
-	O_NOFOLLOW, O_CLOEXEC, AT_REMOVEDIR                               int
+	O_NOFOLLOW, O_CLOEXEC, O_WRITE_ATTRIBUTES, AT_REMOVEDIR           int
 	Dup                                                               func(int) (int, error)
 	Openat                                                            func(int, string, int, uint32) (int, error)
 	Mkdirat                                                           func(int, string, uint32) error

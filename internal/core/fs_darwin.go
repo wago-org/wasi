@@ -15,12 +15,13 @@ import (
 func hostMountRoot(_ *os.File, host string) (string, error) { return host, nil }
 
 const (
-	hostOpenReadOnly  = unix.O_RDONLY
-	hostOpenDirectory = unix.O_DIRECTORY
-	hostOpenNoFollow  = unix.O_NOFOLLOW
+	hostOpenReadOnly        = unix.O_RDONLY
+	hostOpenDirectory       = unix.O_DIRECTORY
+	hostOpenNoFollow        = unix.O_NOFOLLOW
+	hostOpenWriteAttributes = 0
 )
 
-func openPreopen(path string) (*os.File, error) { return os.Open(path) }
+func openPreopen(path string, _ bool) (*os.File, error) { return os.Open(path) }
 
 func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
 	return openAtDarwin(d, name, flags, mode, 0)

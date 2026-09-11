@@ -8,7 +8,7 @@ import (
 	sysunix "golang.org/x/sys/unix"
 )
 
-func openPreopenDirectory(path string) (*os.File, error) { return os.Open(path) }
+func openPreopenDirectory(path string, _ bool) (*os.File, error) { return os.Open(path) }
 
 func platformFilesystemError(error) (uint32, bool) { return 0, false }
 
@@ -25,7 +25,7 @@ var hostFS = filesystemPlatform{
 	ESPIPE: sysunix.ESPIPE, ETXTBSY: sysunix.ETXTBSY, ENFILE: sysunix.ENFILE,
 	O_RDONLY: sysunix.O_RDONLY, O_RDWR: sysunix.O_RDWR, O_WRONLY: sysunix.O_WRONLY,
 	O_DIRECTORY: sysunix.O_DIRECTORY, O_CREAT: sysunix.O_CREAT, O_EXCL: sysunix.O_EXCL,
-	O_TRUNC: sysunix.O_TRUNC, O_NOFOLLOW: sysunix.O_NOFOLLOW, O_CLOEXEC: sysunix.O_CLOEXEC,
+	O_TRUNC: sysunix.O_TRUNC, O_NOFOLLOW: sysunix.O_NOFOLLOW, O_CLOEXEC: sysunix.O_CLOEXEC, O_WRITE_ATTRIBUTES: 0,
 	AT_REMOVEDIR: sysunix.AT_REMOVEDIR,
 	Dup:          sysunix.Dup, Openat: sysunix.Openat, Mkdirat: sysunix.Mkdirat, Unlinkat: sysunix.Unlinkat,
 	Renameat: sysunix.Renameat, Linkat: sysunix.Linkat, Readlinkat: sysunix.Readlinkat,

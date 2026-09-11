@@ -176,7 +176,7 @@ func prepareFilesystem(configured []Preopen, limits Limits) (*filesystemState, e
 	s := newFilesystem(configured, limits)
 	for i := range s.mounts {
 		mount := &s.mounts[i]
-		f, err := openPreopenDirectory(mount.host)
+		f, err := openPreopenDirectory(mount.host, mount.flags&2 != 0)
 		if err != nil {
 			s.closeMounts()
 			return nil, fmt.Errorf("wasi p2: preopen %q: %w", mount.guest, err)
@@ -548,7 +548,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			if mount.base != nil {
 				f, err = dupFile(mount.base)
 			} else {
-				f, err = openPreopenDirectory(mount.host)
+				f, err = openPreopenDirectory(mount.host, mount.flags&2 != 0)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("preopen %q: %w", mount.guest, err)
@@ -666,7 +666,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		f, e := openUnder(n.file, args[2].(string), hostFS.O_RDONLY, 0)
+		f, e := openUnder(n.file, args[2].(string), hostFS.O_RDONLY|hostFS.O_WRITE_ATTRIBUTES, 0)
 		if e != nil {
 			return fsFailure(e), nil
 		}
