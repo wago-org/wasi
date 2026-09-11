@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -411,10 +412,16 @@ func TestDefinitionAndConfigAreStrict(t *testing.T) {
 			t.Fatalf("accepted invalid config %s", raw)
 		}
 	}
-	if err := p2.Provider().ValidateConfig(json.RawMessage(`{"mounts":[{"guest":"/data","host":"/tmp","read":true}]}`)); err != nil {
-		t.Fatalf("valid rights-aware mount: %v", err)
-	}
-	if err := p2.Provider().ValidateConfig(json.RawMessage(`{"mounts":[{"guest":"/data","host":"/tmp","write":true}]}`)); err != nil {
-		t.Fatalf("independent write mount flag: %v", err)
+	for _, mount := range []p2.Preopen{
+		{GuestPath: "/data", HostPath: filepath.Clean(os.TempDir()), Read: true},
+		{GuestPath: "/data", HostPath: filepath.Clean(os.TempDir()), Write: true},
+	} {
+		raw, err := json.Marshal(map[string]any{"mounts": []p2.Preopen{mount}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p2.Provider().ValidateConfig(raw); err != nil {
+			t.Fatalf("valid rights-aware mount %+v: %v", mount, err)
+		}
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	wago "github.com/wago-org/wago"
-	"golang.org/x/sys/unix"
 )
 
 // Pollable is the readiness contract for configured streams that are not
@@ -186,13 +185,7 @@ func streamReady(entry *fdEntry, typ byte) bool {
 	if err == nil && info.Mode().IsRegular() {
 		return true
 	}
-	events := int16(unix.POLLIN)
-	if typ == 2 {
-		events = unix.POLLOUT
-	}
-	fds := []unix.PollFd{{Fd: int32(file.Fd()), Events: events}}
-	_, err = unix.Poll(fds, 0)
-	return err == nil && fds[0].Revents != 0
+	return osFileReady(file, typ)
 }
 
 var errPollUnsupported = errors.New("wasi: stream does not implement readiness")
@@ -213,7 +206,7 @@ func (e *Plugin) waitSubscriptions(subs []pollSubscription, delay time.Duration,
 	type waitResult struct{ err error }
 	results := make(chan waitResult, len(subs)+1)
 	hasWaiter := false
-	var files []unix.PollFd
+	var files []pollFile
 	for i := range subs {
 		sub := &subs[i]
 		if sub.clock || sub.code != 0 {
@@ -226,11 +219,7 @@ func (e *Plugin) waitSubscriptions(subs []pollSubscription, delay time.Duration,
 			continue
 		}
 		if file, ok := object.(*os.File); ok {
-			events := int16(unix.POLLIN)
-			if sub.typ == 2 {
-				events = unix.POLLOUT
-			}
-			files = append(files, unix.PollFd{Fd: int32(file.Fd()), Events: events})
+			files = append(files, pollFile{file: file, typ: sub.typ})
 			continue
 		}
 		if object != nil {
@@ -267,22 +256,5 @@ func (e *Plugin) waitSubscriptions(subs []pollSubscription, delay time.Duration,
 			return nil
 		}
 		return waitCtx.Err()
-	}
-}
-
-func waitOSFiles(ctx context.Context, files []unix.PollFd) error {
-	for {
-		ready, err := unix.Poll(files, 50)
-		if err != nil && !errors.Is(err, unix.EINTR) {
-			return err
-		}
-		if ready > 0 {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
 	}
 }

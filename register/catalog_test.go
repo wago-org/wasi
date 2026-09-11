@@ -3,6 +3,7 @@ package register
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -169,7 +170,15 @@ func TestStrictConfigValidation(t *testing.T) {
 			t.Fatalf("ValidateConfig(%s) succeeded", config)
 		}
 	}
-	if err := provider.ValidateConfig(json.RawMessage(`{"stdin":"eof","stdout":"discard","stderr":"discard","env":[],"mounts":[{"guest":"/data","host":"/tmp","read":true}],"maxOpenFiles":3}`)); err != nil {
+	valid, err := json.Marshal(map[string]any{
+		"stdin": "eof", "stdout": "discard", "stderr": "discard", "env": []string{},
+		"mounts":       []p1.Preopen{{GuestPath: "/data", HostPath: filepath.Clean(os.TempDir()), Read: true}},
+		"maxOpenFiles": 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.ValidateConfig(valid); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
 }

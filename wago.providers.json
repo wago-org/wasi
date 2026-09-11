@@ -17,7 +17,9 @@
           "platforms": [
             "darwin/arm64",
             "linux/amd64",
-            "linux/arm64"
+            "linux/arm64",
+            "windows/amd64",
+            "windows/arm64"
           ]
         },
         "provenance": {
@@ -39,7 +41,7 @@
           }
         ]
       },
-      "definitionDigest": "sha256:73d5b1dd4b7284d390cb05db9db5086d93f954cfeae05f6537cb0da54c448574"
+      "definitionDigest": "sha256:4b26ef2d49fc4da737726a55bb3300b537ed86be34c7ad76a9b0f7b6c9454887"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
@@ -58,7 +60,9 @@
             "darwin/amd64",
             "darwin/arm64",
             "linux/amd64",
-            "linux/arm64"
+            "linux/arm64",
+            "windows/amd64",
+            "windows/arm64"
           ]
         },
         "provenance": {
@@ -185,7 +189,7 @@
           "type": "object"
         }
       },
-      "definitionDigest": "sha256:bcc0db7cabf72e149e8c9b51dd05a181a00af9136c5622fef1c9567420bcd7c7"
+      "definitionDigest": "sha256:f62a4eafba6d2b6fbd58d35f56738ea7d10d066154bdb871f9b382c277011c27"
     },
     {
       "importPath": "github.com/wago-org/wasi/register",
@@ -203,7 +207,9 @@
           "platforms": [
             "darwin/arm64",
             "linux/amd64",
-            "linux/arm64"
+            "linux/arm64",
+            "windows/amd64",
+            "windows/arm64"
           ]
         },
         "provenance": {
@@ -353,7 +359,7 @@
           }
         ]
       },
-      "definitionDigest": "sha256:96dd10067d9d55720261745a55696bdee9f60d661d2cd08f60c2ecbbac1ec8ce"
+      "definitionDigest": "sha256:735cd1335c637be4ca5ec8baabff65fb0aa3ddd59d5168828f8406bfa2a84f62"
     }
   ]
 }

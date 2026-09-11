@@ -242,18 +242,19 @@ the appropriate unsupported, not-a-socket, or bad-descriptor errno; they do not
 receive ambient network or signal access.
 
 Every guest pointer is bounds checked. Preopen path traversal is confined below
-the opened directory using Linux `openat2` resolution rules or a Darwin
-descriptor walk that opens every component with `O_NOFOLLOW`. Darwin rejects
+the opened directory using Linux `openat2` resolution rules, a Darwin
+descriptor walk that opens every component with `O_NOFOLLOW`, or Windows
+root-relative NT handles that reject reparse-point traversal. Darwin rejects
 `path_link` when asked to follow
 the source symlink because the platform has no race-free descriptor-based link
 operation equivalent to Linux `AT_EMPTY_PATH`.
 
 ## Compatibility and testing
 
-Preview 1 supports `linux/amd64`, `linux/arm64`, `darwin/amd64`, and
-`darwin/arm64`. Preview 2, and therefore the root bundle, support
-`darwin/arm64`, `linux/amd64`, and `linux/arm64`. All require Go 1.22 or newer and Wago 0.1.0 or
-newer.
+Preview 1 supports `linux/amd64`, `linux/arm64`, `darwin/amd64`,
+`darwin/arm64`, `windows/amd64`, and `windows/arm64`. Preview 2, and therefore
+the root bundle, supports the same list except `darwin/amd64`. All require Go
+1.22 or newer and Wago 0.1.0 or newer.
 
 ```sh
 go test ./...
