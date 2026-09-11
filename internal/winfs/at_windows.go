@@ -62,10 +62,19 @@ func errno(err error) error {
 // OpenAt opens name relative to root. noReparse rejects reparse points in every
 // path component; noFollow opens a reparse-point leaf itself.
 func OpenAt(root windows.Handle, name string, flags int, mode uint32, directory, noReparse, noFollow bool) (windows.Handle, error) {
+	return openAt(root, name, flags, mode, directory, noReparse, noFollow, 0)
+}
+
+// OpenAtAccess is OpenAt with additional native access rights.
+func OpenAtAccess(root windows.Handle, name string, flags int, mode uint32, directory, noReparse, noFollow bool, additionalAccess uint32) (windows.Handle, error) {
+	return openAt(root, name, flags, mode, directory, noReparse, noFollow, additionalAccess)
+}
+
+func openAt(root windows.Handle, name string, flags int, mode uint32, directory, noReparse, noFollow bool, additionalAccess uint32) (windows.Handle, error) {
 	if name == "" {
 		return windows.InvalidHandle, windows.ERROR_FILE_NOT_FOUND
 	}
-	if name == "." {
+	if name == "." && additionalAccess == 0 {
 		if flags&os.O_CREATE != 0 && flags&os.O_EXCL != 0 {
 			return windows.InvalidHandle, syscall.EEXIST
 		}
@@ -100,6 +109,7 @@ func OpenAt(root windows.Handle, name string, flags int, mode uint32, directory,
 		}
 	}
 	access |= windows.STANDARD_RIGHTS_READ | windows.FILE_READ_ATTRIBUTES | windows.FILE_READ_EA | windows.SYNCHRONIZE
+	access |= additionalAccess
 
 	disposition := uint32(windows.FILE_OPEN)
 	if flags&os.O_CREATE != 0 && flags&os.O_EXCL != 0 {

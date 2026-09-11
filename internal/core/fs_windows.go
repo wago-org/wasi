@@ -218,7 +218,7 @@ func setFileTimes(file *os.File, times []time.Time) error {
 }
 
 func setPathTimes(parent *os.File, leaf string, times []time.Time, noFollow bool) error {
-	h, err := winfs.OpenAt(windows.Handle(parent.Fd()), leaf, os.O_RDONLY, 0, false, false, noFollow)
+	h, err := winfs.OpenAtAccess(windows.Handle(parent.Fd()), leaf, os.O_RDONLY, 0, false, false, noFollow, windows.FILE_WRITE_ATTRIBUTES)
 	if err != nil {
 		return err
 	}
