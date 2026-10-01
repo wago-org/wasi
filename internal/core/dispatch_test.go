@@ -131,7 +131,7 @@ func TestHostDispatchMatchesReference(t *testing.T) {
 			if ref == nil {
 				t.Fatal("missing reference")
 			}
-			c, err := wago.Compile(nil, dispatchTestModule(b.name, b.params, b.results))
+			c, err := wago.Compile(nil, dispatchTestModule(b.name, b.params(), b.results()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -150,11 +150,11 @@ func TestHostDispatchMatchesReference(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer in.Close()
-				p := make([]uint64, len(b.params))
+				p := make([]uint64, len(b.params()))
 				for i := range p {
 					p[i] = value
 				}
-				expected := make([]uint64, len(b.results))
+				expected := make([]uint64, len(b.results()))
 				memory := make([]byte, 65536)
 				var trapped any
 				func() { defer func() { trapped = recover() }(); ref(want, testModule{mem: memory}, p, expected) }()
