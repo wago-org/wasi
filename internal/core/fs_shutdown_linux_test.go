@@ -139,3 +139,30 @@ func BenchmarkFSShutdownStateLifecycle(b *testing.B) {
 		})
 	}
 }
+
+func TestShutdownCancelsEveryStateBeforeWaiting(t *testing.T) {
+	initialCtx, cancelInitial := context.WithCancel(context.Background())
+	defer cancelInitial()
+	otherCtx, cancelOther := context.WithCancel(context.Background())
+	defer cancelOther()
+	initial := &fsState{fds: make(map[uint32]*fdEntry), pollCtx: initialCtx, cancelPoll: cancelInitial}
+	other := &fsState{fds: make(map[uint32]*fdEntry), pollCtx: otherCtx, cancelPoll: cancelOther}
+	p := &Plugin{fs: initial, guard: &fsGuard{states: map[wago.InstanceIdentity]*fsState{{}: other}}}
+	initial.mu.Lock()
+	done := make(chan struct{})
+	go func() { p.closeAll(); close(done) }()
+	canceled := false
+	select {
+	case <-otherCtx.Done():
+		canceled = true
+	case <-time.After(time.Second):
+	}
+	initial.mu.Unlock()
+	<-done
+	if !canceled {
+		t.Fatal("shutdown waited for the initial state before canceling another state's poll")
+	}
+	if !initial.closed || !other.closed || initial.fds != nil || other.fds != nil {
+		t.Fatal("shutdown retained live states")
+	}
+}

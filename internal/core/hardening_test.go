@@ -192,19 +192,32 @@ func (w *waitingInput) Wait(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// invokeTestBinding exercises state admission and the handler directly. Runtime
+// callback integration is covered by the provider shutdown tests.
+func invokeTestBinding(e *Plugin, b binding, m wago.HostModule, params, results []uint64) {
+	state, code := e.stateFor(m)
+	if code != wasiOK {
+		setStateError(results, code)
+		return
+	}
+	defer state.mu.Unlock()
+	current := Plugin{module: e.module, cfg: e.cfg, arguments: e.arguments, fs: state, guard: e.guard}
+	b.handler.call(&current, m, params, results)
+}
+
 func TestStopInterruptsPendingPoll(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	input := &waitingInput{started: make(chan struct{})}
 	e := newTestPlugin(t, Config{Context: ctx, Stdin: input})
 	var pollBinding binding
-	for _, b := range e.bindings() {
+	for _, b := range importBindings {
 		if b.name == "poll_oneoff" {
 			pollBinding = b
 			break
 		}
 	}
-	if pollBinding.fn == nil {
+	if pollBinding.name == "" {
 		t.Fatal("poll_oneoff binding missing")
 	}
 	mem := make([]byte, 512)
@@ -212,7 +225,7 @@ func TestStopInterruptsPendingPoll(t *testing.T) {
 	pollDone := make(chan uint64, 1)
 	go func() {
 		result := make([]uint64, 1)
-		pollBinding.fn(testModule{mem}, []uint64{0, 256, 1, 240}, result)
+		invokeTestBinding(e, pollBinding, testModule{mem}, []uint64{0, 256, 1, 240}, result)
 		pollDone <- result[0]
 	}()
 	select {
@@ -275,7 +288,7 @@ func TestCloseInterruptsPendingPollWithQueuedBinding(t *testing.T) {
 				e.guard.states[identity] = e.fs
 			}
 			var pollBinding, queuedBinding binding
-			for _, b := range e.bindings() {
+			for _, b := range importBindings {
 				switch b.name {
 				case "poll_oneoff":
 					pollBinding = b
@@ -288,7 +301,7 @@ func TestCloseInterruptsPendingPollWithQueuedBinding(t *testing.T) {
 			pollDone := make(chan uint64, 1)
 			go func() {
 				result := make([]uint64, 1)
-				pollBinding.fn(testModule{mem}, []uint64{0, 256, 1, 240}, result)
+				invokeTestBinding(e, pollBinding, testModule{mem}, []uint64{0, 256, 1, 240}, result)
 				pollDone <- result[0]
 			}()
 			select {
@@ -298,7 +311,7 @@ func TestCloseInterruptsPendingPollWithQueuedBinding(t *testing.T) {
 			}
 			queuedDone := make(chan struct{})
 			go func() {
-				queuedBinding.fn(testModule{make([]byte, 512)}, []uint64{0, 128}, make([]uint64, 1))
+				invokeTestBinding(e, queuedBinding, testModule{make([]byte, 512)}, []uint64{0, 128}, make([]uint64, 1))
 				close(queuedDone)
 			}()
 			waitForQueuedFSCall(t)
@@ -325,7 +338,7 @@ func TestCloseInterruptsPendingPollWithQueuedBinding(t *testing.T) {
 			// Calls admitted after guard.mu was released must not use a state
 			// that shutdown has already closed.
 			result := make([]uint64, 1)
-			queuedBinding.fn(testModule{make([]byte, 512)}, []uint64{0, 128}, result)
+			invokeTestBinding(e, queuedBinding, testModule{make([]byte, 512)}, []uint64{0, 128}, result)
 			if result[0] != wasiEBadf {
 				t.Fatalf("binding after close = %d, want EBADF", result[0])
 			}
