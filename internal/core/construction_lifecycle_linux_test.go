@@ -109,8 +109,8 @@ func openOwnedFiles(p *lifecycleTestProvider) []*os.File {
 func requireFilesClosed(t *testing.T, files []*os.File) {
 	t.Helper()
 	for _, f := range files {
-		if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
-			t.Fatalf("owned file remained open: %v", err)
+		if fd := f.Fd(); fd != ^uintptr(0) {
+			t.Fatalf("owned file remained open: descriptor %d", fd)
 		}
 	}
 }
