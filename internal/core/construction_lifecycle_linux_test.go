@@ -361,3 +361,51 @@ func TestConstructionPublicMetadataCopies(t *testing.T) {
 	}
 	t.Fatal("path_open definition missing")
 }
+
+func TestConstructionCleanupDropsInstanceState(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "input"), []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rt, p, err := newOwnedRuntime(t, []Preopen{{GuestPath: "/", HostPath: root, Read: true}}, context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.CloseContext(context.Background())
+	module, err := rt.Compile(ownedCommandBytes(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer module.Close()
+	for epoch := 0; epoch < 4; epoch++ {
+		for i := 0; i < 100; i++ {
+			in, err := rt.Instantiate(context.Background(), module, ownedPolicy())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, callErr := in.Invoke("run")
+			closeErr := in.Close()
+			if callErr != nil || closeErr != nil {
+				t.Fatalf("call=%v close=%v", callErr, closeErr)
+			}
+			p.guard.mu.Lock()
+			remaining := len(p.guard.states)
+			p.guard.mu.Unlock()
+			if remaining != 0 {
+				t.Fatalf("completed instance retained %d states", remaining)
+			}
+		}
+	}
+	if err := rt.CloseContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	p.guard.mu.Lock()
+	closed, states, initial := p.guard.closed, len(p.guard.states), p.fs
+	p.guard.mu.Unlock()
+	if !closed || states != 0 || initial != nil {
+		t.Fatal("runtime shutdown retained provider state")
+	}
+	if p.stream.closes.Load() != 0 {
+		t.Fatal("shutdown closed a borrowed stream")
+	}
+}
