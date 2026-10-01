@@ -7,7 +7,7 @@ import (
 )
 
 func TestCloseFSDropsDescriptorMap(t *testing.T) {
-	s := &fsState{fds: make(map[uint32]*fdEntry)}
+	s := &fsState{cancelPoll: func() {}, fds: make(map[uint32]*fdEntry)}
 	for i := uint32(0); i < 4096; i++ {
 		s.fds[i] = &fdEntry{}
 	}
@@ -25,7 +25,7 @@ func BenchmarkFSTerminalLifecycle(b *testing.B) {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				s := &fsState{fds: make(map[uint32]*fdEntry, count)}
+				s := &fsState{cancelPoll: func() {}, fds: make(map[uint32]*fdEntry, count)}
 				for fd := 0; fd < count; fd++ {
 					s.fds[uint32(fd)] = &fdEntry{}
 				}
@@ -46,7 +46,7 @@ func BenchmarkFSTerminalRetainedHeap(b *testing.B) {
 	runtime.GC()
 	retainedFSStates = make([]*fsState, 8)
 	for i := range retainedFSStates {
-		s := &fsState{fds: make(map[uint32]*fdEntry, 4096)}
+		s := &fsState{cancelPoll: func() {}, fds: make(map[uint32]*fdEntry, 4096)}
 		entry := &fdEntry{}
 		for fd := uint32(0); fd < 4096; fd++ {
 			s.fds[fd] = entry

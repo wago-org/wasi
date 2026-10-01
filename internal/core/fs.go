@@ -256,21 +256,29 @@ func (e *Plugin) closeAll() {
 		return
 	}
 	e.guard.mu.Lock()
-	unique := make(map[*fsState]struct{}, len(e.guard.states)+1)
-	if e.fs != nil {
-		unique[e.fs] = struct{}{}
-	}
-	for _, state := range e.guard.states {
-		unique[state] = struct{}{}
-	}
-	clear(e.guard.states)
+	states, initial := e.guard.states, e.fs
+	e.guard.states = nil
 	e.fs = nil
 	e.guard.closed = true
 	e.guard.mu.Unlock()
-	for state := range unique {
-		state.cancelPoll()
+	// Cancel every state before waiting for any active host call to return.
+	if initial != nil {
+		initial.cancelPoll()
 	}
-	for state := range unique {
+	for _, state := range states {
+		if state != initial {
+			state.cancelPoll()
+		}
+	}
+	if initial != nil {
+		initial.mu.Lock()
+		closeFS(initial)
+		initial.mu.Unlock()
+	}
+	for _, state := range states {
+		if state == initial {
+			continue
+		}
 		state.mu.Lock()
 		closeFS(state)
 		state.mu.Unlock()
