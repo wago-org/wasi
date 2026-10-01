@@ -59,7 +59,7 @@ func ownedCommandBytes(startTrap bool) []byte {
 	return wasmtest.Module(sections...)
 }
 
-func newOwnedRuntime(t *testing.T, mounts []Preopen, ctx context.Context) (*wago.Runtime, *lifecycleTestProvider, error) {
+func newOwnedRuntime(t testing.TB, mounts []Preopen, ctx context.Context) (*wago.Runtime, *lifecycleTestProvider, error) {
 	t.Helper()
 	p := &lifecycleTestProvider{Plugin: Plugin{module: "wasi_snapshot_preview1"}, stream: &countedBorrowedStream{}, ctx: ctx}
 	definition := Definition("test.example/owned-wasi", "Owned test", "lifecycle test", wago.Experimental, p.module)
