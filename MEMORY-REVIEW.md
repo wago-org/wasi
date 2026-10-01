@@ -1,6 +1,6 @@
 # Construction memory review
 
-This updates PR #21 without changing the production table design. The full [Wago memory review](https://github.com/wago-org/wago/blob/perf/setup-cleanup-measured/docs/performance/setup-cleanup/memory-review/README.md) contains source/binary hashes, exact commands, paired raw data, confidence intervals, profiles and script corrections. Wago's dependency pin is unchanged.
+The initial review below kept the production table design. The direct-dispatch follow-up at the end records the later measured host-call fix. The full [Wago memory review](https://github.com/wago-org/wago/blob/perf/setup-cleanup-measured/docs/performance/setup-cleanup/memory-review/README.md) contains source/binary hashes, exact commands, paired raw data, confidence intervals, profiles and script corrections. Wago's dependency pin is unchanged.
 
 The reviewed provider head was `a6169cc6ebf86b5d2a98bd009e672dac02be1542`, with PR base `aef440ccb4368b87f122038cf31295bba1b4bd46`. The historical performance experiment instead used base `6a6684d2ecd2be2d17e5792733d1d0e03b2f2c0e`. Both bases have identical core.go production content; they were built and recorded separately. Current comparisons use the snapshot-fixed Wago source in both provider builds and change only the provider production patch. A separate snapshot comparison fixes the provider revision.
 
@@ -17,3 +17,13 @@ The new `TestConstructionCleanupDropsInstanceState` checks empty instance-state 
 Local full provider race tests and vet passed on Go 1.22.12 and Go 1.27.1 on Linux amd64. The Go 1.22-compatible closed-descriptor test remains intact. CI passed all 14 checks on the new test commit `d6870db`, including ARM64 and Go 1.22. Wago's new 72-case execution allocation screen remains at zero B/op and zero allocs/op. No new all-engine 984-case timing run or local ARM64 execution was performed. Final documentation-head CI status is recorded in the PR update.
 
 Status: lifecycle regression coverage **implemented and verified**; memory diagnosis **completed with no accepted production memory change**; precise RSS attribution and a safe heavy-host-call improvement remain unresolved.
+
+## Direct-dispatch follow-up
+
+Production commit `1cad4801f12ec66e5ab621f5b0832a146052ba6d` passed all 14 CI checks, including ARM64, Windows, Go 1.22 and race coverage.
+
+The new host-call fix keeps the private Plugin copy on the Go stack by replacing indirect handler invocation with bounded direct dispatch. It removes 224 B and one allocation per actual WASI call (288 B / 2 allocations → 64 B / 1 allocation). Twenty matched pairs against the prior PR code improve the direct-call control 12.98% and the 1,024-call control 22.26%, with no measured cjson/tinyxml2 command slowdown. A separate 20-pair comparison against original provider code also improves both host controls.
+
+The allocation regression test fails before the fix and passes after it. Differential tests cover all 46 imports; full provider race/vet checks pass on Go 1.22.12 and 1.27.1, together with Wago corpus/fuzz and all 72 zero-allocation execution cases. The shared definition table remains 4,992 B once per process.
+
+This is not a general RSS fix. Minimal commands show less ordinary heap after 1,000 commands in two sessions, but the raw 4,000-command endpoint has more uncollected heap after a shifted GC cycle. Live heap and RSS do not show a material retained-state increase, and a general RSS decrease is not demonstrated. No GC setting, pool, cleanup rule or permission was changed. The [complete follow-up evidence](https://github.com/wago-org/wago/blob/perf/setup-cleanup-measured/docs/performance/setup-cleanup/direct-dispatch/README.md) preserves every endpoint, including that increase, plus exact hashes, commands and confidence intervals.
