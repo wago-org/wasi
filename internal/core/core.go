@@ -249,6 +249,10 @@ type binding struct {
 
 func (b binding) callback(e *Plugin) wago.CallerHostCallFunc {
 	handler := b.handler
+	switch handler {
+	case dispatchargsSizesGet, dispatchargsGet, dispatchenvironSizesGet, dispatchenvironGet:
+		return argumentCallback(e, handler)
+	}
 	return func(caller wago.Caller, call wago.HostCall) {
 		state, code := e.stateFor(caller)
 		if code != wasiOK {
@@ -259,6 +263,30 @@ func (b binding) callback(e *Plugin) wago.CallerHostCallFunc {
 		current := *e
 		current.fs = state
 		handler.call(&current, caller, call.ParamSlots(), call.ResultSlots())
+	}
+}
+
+func argumentCallback(e *Plugin, handler handlerID) wago.CallerHostCallFunc {
+	return func(caller wago.Caller, call wago.HostCall) {
+		state, code := e.stateFor(caller)
+		if code != wasiOK {
+			setStateError(call.ResultSlots(), code)
+			return
+		}
+		defer state.mu.Unlock()
+		params, results := call.ParamSlots(), call.ResultSlots()
+		switch handler {
+		case dispatchargsSizesGet:
+			e.argsSizesGet(caller.Memory(), params, results)
+		case dispatchargsGet:
+			e.argsGet(caller.Memory(), params, results)
+		case dispatchenvironSizesGet:
+			e.environSizesGet(caller.Memory(), params, results)
+		case dispatchenvironGet:
+			e.environGet(caller.Memory(), params, results)
+		default:
+			panic("invalid WASI argument handler")
+		}
 	}
 }
 
@@ -332,13 +360,13 @@ func (h handlerID) call(e *Plugin, m wago.HostModule, p, r []uint64) {
 	case dispatchprocExit:
 		e.procExit(m, p, r)
 	case dispatchargsSizesGet:
-		e.argsSizesGet(m, p, r)
+		e.argsSizesGet(m.Memory(), p, r)
 	case dispatchargsGet:
-		e.argsGet(m, p, r)
+		e.argsGet(m.Memory(), p, r)
 	case dispatchenvironSizesGet:
-		e.environSizesGet(m, p, r)
+		e.environSizesGet(m.Memory(), p, r)
 	case dispatchenvironGet:
-		e.environGet(m, p, r)
+		e.environGet(m.Memory(), p, r)
 	case dispatchclockTimeGet:
 		e.clockTimeGet(m, p, r)
 	case dispatchclockResGet:
@@ -1004,20 +1032,20 @@ func (e *Plugin) procExit(_ wago.HostModule, p, r []uint64) {
 	panic(wago.HostExit{Code: int32(uint32(p[0]))})
 }
 
-func (e *Plugin) argsSizesGet(m wago.HostModule, p, r []uint64) {
-	r[0] = writeCounts(m.Memory(), uint32(p[0]), uint32(p[1]), e.cfg.Args)
+func (e *Plugin) argsSizesGet(mem []byte, p, r []uint64) {
+	r[0] = writeCounts(mem, uint32(p[0]), uint32(p[1]), e.cfg.Args)
 }
 
-func (e *Plugin) argsGet(m wago.HostModule, p, r []uint64) {
-	r[0] = writeStrings(m.Memory(), uint32(p[0]), uint32(p[1]), e.cfg.Args)
+func (e *Plugin) argsGet(mem []byte, p, r []uint64) {
+	r[0] = writeStrings(mem, uint32(p[0]), uint32(p[1]), e.cfg.Args)
 }
 
-func (e *Plugin) environSizesGet(m wago.HostModule, p, r []uint64) {
-	r[0] = writeCounts(m.Memory(), uint32(p[0]), uint32(p[1]), e.cfg.Env)
+func (e *Plugin) environSizesGet(mem []byte, p, r []uint64) {
+	r[0] = writeCounts(mem, uint32(p[0]), uint32(p[1]), e.cfg.Env)
 }
 
-func (e *Plugin) environGet(m wago.HostModule, p, r []uint64) {
-	r[0] = writeStrings(m.Memory(), uint32(p[0]), uint32(p[1]), e.cfg.Env)
+func (e *Plugin) environGet(mem []byte, p, r []uint64) {
+	r[0] = writeStrings(mem, uint32(p[0]), uint32(p[1]), e.cfg.Env)
 }
 
 // writeCounts writes the item count and the total NUL-terminated byte size.
