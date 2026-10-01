@@ -260,8 +260,12 @@ func (b binding) callback(e *Plugin) wago.CallerHostCallFunc {
 			return
 		}
 		defer state.mu.Unlock()
-		current := *e
+		var current Plugin
+		current.module = e.module
+		current.cfg = e.cfg
+		current.arguments = e.arguments
 		current.fs = state
+		current.guard = e.guard
 		handler.call(&current, caller, call.ParamSlots(), call.ResultSlots())
 	}
 }
