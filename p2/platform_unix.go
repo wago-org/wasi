@@ -28,6 +28,15 @@ var hostFS = filesystemPlatform{
 	O_TRUNC: sysunix.O_TRUNC, O_NOFOLLOW: sysunix.O_NOFOLLOW, O_CLOEXEC: sysunix.O_CLOEXEC, O_WRITE_ATTRIBUTES: 0,
 	AT_REMOVEDIR: sysunix.AT_REMOVEDIR,
 	Dup:          sysunix.Dup, Openat: sysunix.Openat, Mkdirat: sysunix.Mkdirat, Unlinkat: sysunix.Unlinkat,
-	Renameat: sysunix.Renameat, Linkat: sysunix.Linkat, Readlinkat: sysunix.Readlinkat,
+	Renameat: renameat, Linkat: sysunix.Linkat, Readlinkat: sysunix.Readlinkat,
 	Symlinkat: sysunix.Symlinkat,
+}
+
+// renameat(2) permits EEXIST for a non-empty target directory, but WASI expects ENOTEMPTY.
+func renameat(oldDirFD int, oldPath string, newDirFD int, newPath string) error {
+	err := sysunix.Renameat(oldDirFD, oldPath, newDirFD, newPath)
+	if err == sysunix.EEXIST {
+		return sysunix.ENOTEMPTY
+	}
+	return err
 }
