@@ -218,7 +218,7 @@ func closeFS(state *fsState) {
 			_ = entry.file.Close()
 		}
 	}
-	clear(state.fds)
+	state.fds = nil
 }
 
 func (e *Plugin) closeInstance(identity wago.InstanceIdentity) {
@@ -239,18 +239,20 @@ func (e *Plugin) closeAll() {
 		return
 	}
 	e.guard.mu.Lock()
-	unique := make(map[*fsState]struct{}, len(e.guard.states)+1)
-	if e.fs != nil {
-		unique[e.fs] = struct{}{}
-	}
-	for _, state := range e.guard.states {
-		unique[state] = struct{}{}
-	}
-	clear(e.guard.states)
+	states, initial := e.guard.states, e.fs
+	e.guard.states = nil
 	e.fs = nil
 	e.guard.closed = true
 	e.guard.mu.Unlock()
-	for state := range unique {
+	if initial != nil {
+		initial.mu.Lock()
+		closeFS(initial)
+		initial.mu.Unlock()
+	}
+	for _, state := range states {
+		if state == initial {
+			continue
+		}
 		state.mu.Lock()
 		closeFS(state)
 		state.mu.Unlock()
@@ -304,9 +306,22 @@ func (e *Plugin) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
 	if guest == "" || strings.HasPrefix(guest, "/") {
 		return nil, "", wasiENotcapable
 	}
+	if pathEscapes(guest) {
+		return nil, "", wasiENotcapable
+	}
+	return d, path.Clean(guest), wasiOK
+}
+
+func pathEscapes(guest string) bool {
 	depth := 0
-	for _, part := range strings.Split(guest, "/") {
-		switch part {
+	for start := 0; start < len(guest); {
+		end := strings.IndexByte(guest[start:], '/')
+		if end < 0 {
+			end = len(guest)
+		} else {
+			end += start
+		}
+		switch guest[start:end] {
 		case "", ".":
 		case "..":
 			depth--
@@ -314,10 +329,14 @@ func (e *Plugin) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
 			depth++
 		}
 		if depth < 0 {
-			return nil, "", wasiENotcapable
+			return true
 		}
+		if end == len(guest) {
+			break
+		}
+		start = end + 1
 	}
-	return d, path.Clean(guest), wasiOK
+	return false
 }
 
 func capabilityErr(err error) uint64 {
