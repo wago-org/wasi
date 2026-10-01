@@ -234,7 +234,7 @@ func closeFS(state *fsState) {
 			_ = entry.file.Close()
 		}
 	}
-	clear(state.fds)
+	state.fds = nil
 }
 
 func (e *Plugin) closeInstance(identity wago.InstanceIdentity) {
