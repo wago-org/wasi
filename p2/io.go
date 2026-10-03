@@ -259,21 +259,29 @@ type pollableValue struct {
 	wait  func(context.Context) error
 }
 
-func (s *hostState) addError(err error) component.Value {
+func (s *hostState) addError(err error) (component.Value, error) {
 	s.mu.Lock()
+	if uint32(len(s.errors)) >= s.limits.MaxErrors {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("wasi p2: stream error quota exceeded")
+	}
 	rep := s.nextError
 	s.nextError++
 	s.errors[rep] = streamErrorValue{err: err}
 	t := s.resources
 	s.mu.Unlock()
-	return component.VariantValue{Disc: 0, Payload: t.NewOwn(errorResource, rep)}
+	return component.VariantValue{Disc: 0, Payload: t.NewOwn(errorResource, rep)}, nil
 }
 
-func (s *hostState) streamFailure(err error) []component.Value {
+func (s *hostState) streamFailure(err error) ([]component.Value, error) {
 	if errors.Is(err, io.EOF) {
-		return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: 1}}}
+		return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: 1}}}, nil
 	}
-	return []component.Value{component.ResultValue{IsErr: true, Payload: s.addError(err)}}
+	v, quotaErr := s.addError(err)
+	if quotaErr != nil {
+		return nil, quotaErr
+	}
+	return []component.Value{component.ResultValue{IsErr: true, Payload: v}}, nil
 }
 
 func (s *hostState) addPollable(v pollableValue) (uint32, error) {

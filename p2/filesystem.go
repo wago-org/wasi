@@ -111,6 +111,7 @@ type filesystemState struct {
 	mounts     []filesystemMount
 	descs      map[uint32]*descriptorNode
 	streams    map[uint32]*fileStream
+	stdStreams uint32
 	dirs       map[uint32]*directoryStream
 	nextDesc   uint32
 	nextStream uint32
@@ -232,13 +233,29 @@ func (s *filesystemState) desc(rep uint32) (*descriptorNode, error) {
 func (s *filesystemState) addStream(n *fileStream) (uint32, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if uint32(len(s.streams)) >= s.limits.MaxStreams {
+	if uint32(len(s.streams))+s.stdStreams >= s.limits.MaxStreams {
 		return 0, hostFS.EMFILE
 	}
 	rep := s.nextStream
 	s.nextStream++
 	s.streams[rep] = n
 	return rep, nil
+}
+
+func (s *filesystemState) reserveStandardStream() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if uint32(len(s.streams))+s.stdStreams >= s.limits.MaxStreams {
+		return hostFS.EMFILE
+	}
+	s.stdStreams++
+	return nil
+}
+
+func (s *filesystemState) releaseStandardStream() {
+	s.mu.Lock()
+	s.stdStreams--
+	s.mu.Unlock()
 }
 
 func (s *filesystemState) output(rep uint32) io.Writer {
@@ -1146,9 +1163,16 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			}
 			return nil
 		}),
-		component.WithHostResourceDtor(inputStreamResource, func(_ context.Context, rep uint32) error { return s.dropStream(rep) }),
+		component.WithHostResourceDtor(inputStreamResource, func(_ context.Context, rep uint32) error {
+			if rep == stdinRep {
+				s.releaseStandardStream()
+				return nil
+			}
+			return s.dropStream(rep)
+		}),
 		component.WithHostResourceDtor(outputStreamResource, func(_ context.Context, rep uint32) error {
 			if rep == stdoutRep || rep == stderrRep {
+				s.releaseStandardStream()
 				return nil
 			}
 			return s.dropStream(rep)

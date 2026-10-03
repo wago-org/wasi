@@ -89,6 +89,7 @@ type Config struct {
 type Limits struct {
 	MaxDescriptors          uint32 `json:"maxDescriptors,omitempty"`
 	MaxStreams              uint32 `json:"maxStreams,omitempty"`
+	MaxErrors               uint32 `json:"maxErrors,omitempty"`
 	MaxDirectoryStreams     uint32 `json:"maxDirectoryStreams,omitempty"`
 	MaxPollables            uint32 `json:"maxPollables,omitempty"`
 	MaxPollInputs           uint32 `json:"maxPollInputs,omitempty"`
@@ -102,6 +103,9 @@ func (l Limits) normalized() Limits {
 	}
 	if l.MaxStreams == 0 {
 		l.MaxStreams = 256
+	}
+	if l.MaxErrors == 0 {
+		l.MaxErrors = 256
 	}
 	if l.MaxDirectoryStreams == 0 {
 		l.MaxDirectoryStreams = 64
@@ -197,7 +201,7 @@ type pluginConfig struct {
 }
 
 func configSchema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"stdin":{"type":"string","enum":["inherit","eof"]},"stdout":{"type":"string","enum":["inherit","discard"]},"stderr":{"type":"string","enum":["inherit","discard"]},"env":{"type":"array","maxItems":4096,"items":{"type":"string","minLength":2,"maxLength":32768,"pattern":"^[^=\\u0000]+=[^\\u0000]*$"}},"mounts":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["guest","host"],"properties":{"guest":{"type":"string","pattern":"^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$","maxLength":4096},"host":{"type":"string","minLength":1,"maxLength":4096},"read":{"type":"boolean"},"write":{"type":"boolean"},"mutateDirectory":{"type":"boolean"}}}},"limits":{"type":"object","additionalProperties":false,"properties":{"maxDescriptors":{"type":"integer","minimum":1,"maximum":65536},"maxStreams":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryStreams":{"type":"integer","minimum":1,"maximum":65536},"maxPollables":{"type":"integer","minimum":1,"maximum":65536},"maxPollInputs":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryEntryBytes":{"type":"integer","minimum":1,"maximum":16777216},"maxAggregateBufferBytes":{"type":"integer","minimum":1,"maximum":16777216}}}}}`)
+	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"stdin":{"type":"string","enum":["inherit","eof"]},"stdout":{"type":"string","enum":["inherit","discard"]},"stderr":{"type":"string","enum":["inherit","discard"]},"env":{"type":"array","maxItems":4096,"items":{"type":"string","minLength":2,"maxLength":32768,"pattern":"^[^=\\u0000]+=[^\\u0000]*$"}},"mounts":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["guest","host"],"properties":{"guest":{"type":"string","pattern":"^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$","maxLength":4096},"host":{"type":"string","minLength":1,"maxLength":4096},"read":{"type":"boolean"},"write":{"type":"boolean"},"mutateDirectory":{"type":"boolean"}}}},"limits":{"type":"object","additionalProperties":false,"properties":{"maxDescriptors":{"type":"integer","minimum":1,"maximum":65536},"maxStreams":{"type":"integer","minimum":1,"maximum":65536},"maxErrors":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryStreams":{"type":"integer","minimum":1,"maximum":65536},"maxPollables":{"type":"integer","minimum":1,"maximum":65536},"maxPollInputs":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryEntryBytes":{"type":"integer","minimum":1,"maximum":16777216},"maxAggregateBufferBytes":{"type":"integer","minimum":1,"maximum":16777216}}}}}`)
 }
 
 type providerPlugin struct {
@@ -290,7 +294,7 @@ func validateLimits(l Limits) error {
 		name  string
 		value uint64
 		max   uint64
-	}{{"MaxDescriptors", uint64(l.MaxDescriptors), 65536}, {"MaxStreams", uint64(l.MaxStreams), 65536}, {"MaxDirectoryStreams", uint64(l.MaxDirectoryStreams), 65536}, {"MaxPollables", uint64(l.MaxPollables), 65536}, {"MaxPollInputs", uint64(l.MaxPollInputs), 65536}, {"MaxDirectoryEntryBytes", l.MaxDirectoryEntryBytes, 16 << 20}, {"MaxAggregateBufferBytes", l.MaxAggregateBufferBytes, 16 << 20}}
+	}{{"MaxDescriptors", uint64(l.MaxDescriptors), 65536}, {"MaxStreams", uint64(l.MaxStreams), 65536}, {"MaxErrors", uint64(l.MaxErrors), 65536}, {"MaxDirectoryStreams", uint64(l.MaxDirectoryStreams), 65536}, {"MaxPollables", uint64(l.MaxPollables), 65536}, {"MaxPollInputs", uint64(l.MaxPollInputs), 65536}, {"MaxDirectoryEntryBytes", l.MaxDirectoryEntryBytes, 16 << 20}, {"MaxAggregateBufferBytes", l.MaxAggregateBufferBytes, 16 << 20}}
 	for _, v := range values {
 		if v.value > v.max {
 			return fmt.Errorf("wasi p2: %s exceeds %d", v.name, v.max)
@@ -314,6 +318,9 @@ func (p *providerPlugin) Run(ctx context.Context, wasm []byte) error {
 func Run(ctx context.Context, components component.Service, wasm []byte, cfg Config) error {
 	if components == nil {
 		return fmt.Errorf("wasi p2: nil component service")
+	}
+	if err := validateLimits(cfg.Limits); err != nil {
+		return err
 	}
 	if err := validateMounts(cfg.Mounts); err != nil {
 		return err
@@ -423,10 +430,16 @@ func Options(cfg Config) []component.Option {
 
 	getOutput := func(rep uint32) component.HostFunc {
 		return func(context.Context, []component.Value) ([]component.Value, error) {
+			if err := fs.reserveStandardStream(); err != nil {
+				return nil, fmt.Errorf("wasi p2: standard stream quota exceeded: %w", err)
+			}
 			return []component.Value{rep}, nil
 		}
 	}
 	getStdin := func(context.Context, []component.Value) ([]component.Value, error) {
+		if err := fs.reserveStandardStream(); err != nil {
+			return nil, fmt.Errorf("wasi p2: standard stream quota exceeded: %w", err)
+		}
 		return []component.Value{stdinRep}, nil
 	}
 	getArgs := func(context.Context, []component.Value) ([]component.Value, error) {
@@ -514,7 +527,7 @@ func Options(cfg Config) []component.Option {
 		}
 		permit, err := w.CheckWrite()
 		if err != nil {
-			return s.streamFailure(err), nil
+			return s.streamFailure(err)
 		}
 		if permit > limits.ioLimit() {
 			permit = limits.ioLimit()
@@ -550,7 +563,7 @@ func Options(cfg Config) []component.Option {
 			return nil, fmt.Errorf("output-stream.write exceeds check-write permit")
 		}
 		if err := w.TryWrite(buf); err != nil {
-			return s.streamFailure(err), nil
+			return s.streamFailure(err)
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}
@@ -613,7 +626,7 @@ func Options(cfg Config) []component.Option {
 			return nil, err
 		}
 		if err := w.BeginFlush(); err != nil {
-			return s.streamFailure(err), nil
+			return s.streamFailure(err)
 		}
 		if err := w.WaitWritable(ctx); err != nil {
 			return nil, err
@@ -629,7 +642,7 @@ func Options(cfg Config) []component.Option {
 			return nil, fmt.Errorf("output-stream.blocking-flush: self is %T", args[0])
 		}
 		if err := flushWriter(rep); err != nil {
-			return s.streamFailure(err), nil
+			return s.streamFailure(err)
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}
@@ -646,7 +659,7 @@ func Options(cfg Config) []component.Option {
 			return nil, err
 		}
 		if err := w.BeginFlush(); err != nil {
-			return s.streamFailure(err), nil
+			return s.streamFailure(err)
 		}
 		if err := w.WaitWritable(ctx); err != nil {
 			return nil, err
@@ -674,7 +687,7 @@ func Options(cfg Config) []component.Option {
 		if rep != stdinRep {
 			values, err := fs.readStream(rep, n)
 			if err != nil {
-				return s.streamFailure(err), nil
+				return s.streamFailure(err)
 			}
 			return values, nil
 		}
@@ -686,7 +699,7 @@ func Options(cfg Config) []component.Option {
 			return []component.Value{component.ResultValue{Payload: []byte{}}}, nil
 		}
 		if err != nil && got == 0 {
-			return s.streamFailure(err), nil
+			return s.streamFailure(err)
 		}
 		return []component.Value{component.ResultValue{Payload: buf[:got]}}, nil
 	}
