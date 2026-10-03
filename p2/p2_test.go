@@ -38,6 +38,12 @@ type pluginFunc func(*wago.Registrar) error
 
 func (f pluginFunc) Register(r *wago.Registrar) error { return f(r) }
 
+type rejectingComponentService struct{}
+
+func (rejectingComponentService) WithInstance(context.Context, []byte, func(*component.Instance) error, ...component.Option) error {
+	return errors.New("component service should not be called")
+}
+
 type flushBuffer struct {
 	bytes.Buffer
 	flushes int
@@ -142,6 +148,35 @@ func TestRustWASIP2CommandRunsOnWago(t *testing.T) {
 	}
 	if stdout.flushes == 0 || stderr.flushes == 0 {
 		t.Fatalf("flushes = stdout:%d stderr:%d, want both streams flushed", stdout.flushes, stderr.flushes)
+	}
+}
+
+func TestRunRejectsLimitsAboveHardCaps(t *testing.T) {
+	err := p2.Run(context.Background(), rejectingComponentService{}, nil, p2.Config{
+		Limits: p2.Limits{MaxPollInputs: 65537},
+	})
+	if err == nil || !strings.Contains(err.Error(), "MaxPollInputs exceeds 65536") {
+		t.Fatalf("Run with oversized limit = %v, want hard-cap error", err)
+	}
+}
+
+func TestRustWASIP2StandardStreamQuota(t *testing.T) {
+	var ref *wagoplugin.Ref[component.Service]
+	providers := []wago.PluginProvider{component.Provider(), componentConsumer(&ref)}
+	rt := wago.NewRuntime()
+	defer rt.Close()
+	if err := rt.LoadPlugins(context.Background(), pluginSet(t, providers, nil)); err != nil {
+		t.Fatal(err)
+	}
+	err := ref.With(func(service component.Service) error {
+		return p2.Run(context.Background(), service, rustSmoke, p2.Config{
+			Stdin: p2.NewInputStream(strings.NewReader("from-rust-stdin\n")),
+			Args:  []string{"wago", "alpha", "beta"}, Env: []string{"WAGO_FLAVOR=component"},
+			Limits: p2.Limits{MaxStreams: 1},
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "stream quota exceeded") {
+		t.Fatalf("run with one stream slot = %v, want quota error", err)
 	}
 }
 
@@ -407,7 +442,7 @@ func TestDefinitionAndConfigAreStrict(t *testing.T) {
 	if got := d.Consumes; len(got) != 1 || got[0].ID != component.Contract.ID() {
 		t.Fatalf("consumes = %#v", got)
 	}
-	for _, raw := range []json.RawMessage{json.RawMessage(`null`), json.RawMessage(`{"unknown":true}`), json.RawMessage(`{"stdin":"pipe"}`), json.RawMessage(`{"preopens":{"relative":"/tmp"}}`), json.RawMessage(`{"preopens":{"/data":"relative"}}`), json.RawMessage(`{} {}`)} {
+	for _, raw := range []json.RawMessage{json.RawMessage(`null`), json.RawMessage(`{"unknown":true}`), json.RawMessage(`{"stdin":"pipe"}`), json.RawMessage(`{"preopens":{"relative":"/tmp"}}`), json.RawMessage(`{"preopens":{"/data":"relative"}}`), json.RawMessage(`{"limits":{"maxErrors":65537}}`), json.RawMessage(`{} {}`)} {
 		if err := p2.Provider().ValidateConfig(raw); err == nil {
 			t.Fatalf("accepted invalid config %s", raw)
 		}

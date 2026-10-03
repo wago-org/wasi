@@ -270,6 +270,11 @@
                   "minimum": 1,
                   "type": "integer"
                 },
+                "maxErrors": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "maxPollInputs": {
                   "maximum": 65536,
                   "minimum": 1,
@@ -359,7 +364,7 @@
           }
         ]
       },
-      "definitionDigest": "sha256:a68e771477d6716c7bfc62e2e97f51afb8fdc21a76e71284b8d3ed693a91ab6e"
+      "definitionDigest": "sha256:bd147c04177f767248425d359eab1eac2803fb6b0fda68767c8275a9b6202be4"
     }
   ]
 }

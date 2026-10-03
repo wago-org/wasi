@@ -45,6 +45,32 @@ func TestPollableQuota(t *testing.T) {
 	}
 }
 
+func TestStreamAndErrorQuotas(t *testing.T) {
+	limits := Limits{MaxStreams: 2, MaxErrors: 1}.normalized()
+	fs := newFilesystem(nil, limits)
+	if err := fs.reserveStandardStream(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.addStream(&fileStream{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.reserveStandardStream(); err == nil {
+		t.Fatal("standard stream exceeded the shared stream quota")
+	}
+	if _, err := fs.addStream(&fileStream{}); err == nil {
+		t.Fatal("file stream exceeded the shared stream quota")
+	}
+	fs.releaseStandardStream()
+	if err := fs.reserveStandardStream(); err != nil {
+		t.Fatalf("dropped standard stream did not free its slot: %v", err)
+	}
+
+	s := &hostState{errors: map[uint32]streamErrorValue{1: {err: io.ErrUnexpectedEOF}}, limits: limits}
+	if _, err := s.addError(io.ErrClosedPipe); err == nil {
+		t.Fatal("stream error exceeded its quota")
+	}
+}
+
 type blockingWriter struct{ release <-chan struct{} }
 
 func (w blockingWriter) Write(p []byte) (int, error) {
