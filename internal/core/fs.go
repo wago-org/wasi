@@ -1006,8 +1006,21 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	if code == 0 && (p[1]&^uint64(1) != 0 || p[4]&^uint64(15) != 0 || p[7]&^uint64(31) != 0) {
 		code = wasiEInval
 	}
-	if code == 0 && (rights&^d.inheriting != 0 || inheriting&^d.inheriting != 0) {
+	// Language runtimes request broad optional descriptor masks even for a
+	// read-only open (Go also requests write rights in the inheriting mask).
+	// Require the requested data-access mode, then negotiate optional rights
+	// down to the mount for ordinary files. Directory opens keep strict
+	// inheritance checks so attenuated traversal capabilities cannot expand.
+	// Every later operation checks the granted descriptor.
+	if code == 0 && (rights&^allRights != 0 || inheriting&^allRights != 0 || rights&(rightFDRead|rightFDWrite)&^d.inheriting != 0) {
 		code = wasiENotcapable
+	}
+	if code == 0 && oflags&2 != 0 && ((rights|inheriting)&^d.inheriting != 0) {
+		code = wasiENotcapable
+	}
+	if code == 0 {
+		rights &= d.inheriting
+		inheriting &= d.inheriting
 	}
 	if code == 0 && oflags&1 != 0 {
 		code = require(d, rightPathCreateFile)

@@ -241,3 +241,47 @@ func TestPreview1FollowsSymlinksOnlyInsideCapability(t *testing.T) {
 		t.Fatalf("path_filestat_get follow = errno %d type %d", result[0], m.mem[144])
 	}
 }
+
+func TestReadOnlyMountGoReadOpenNegotiatesOptionalRights(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/input.txt", []byte("inside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/", HostPath: root, Read: true}}})
+	m := testModule{mem: make([]byte, 256)}
+	copy(m.mem[32:], "input.txt")
+	result := make([]uint64, 1)
+	// Go's wasip1 os.Open requests the general file mask (also directory and
+	// metadata operations), with write access removed only from the base mask.
+	fileRights := allRights & ^rightSockShutdown
+	readRights := fileRights & ^(rightFDDataSync | rightFDWrite | rightFDAllocate | rightPathFilestatSetSize)
+	e.pathOpen(m, []uint64{3, 1, 32, 9, 0, readRights, fileRights, 0, 16}, result)
+	if result[0] != wasiOK {
+		t.Fatalf("Go read open errno %d", result[0])
+	}
+	fd := binary.LittleEndian.Uint32(m.mem[16:])
+	entry := e.fs.fds[fd]
+	if entry.rights & ^e.fs.fds[3].inheriting != 0 || entry.inheriting & ^e.fs.fds[3].inheriting != 0 {
+		t.Fatal("negotiated rights exceed mount")
+	}
+	buf := make([]byte, 6)
+	if n, err := entry.file.Read(buf); err != nil || n != 6 || string(buf) != "inside" {
+		t.Fatalf("read=%q, %d, %v", buf, n, err)
+	}
+	e.fdFilestatSetSize(m, []uint64{uint64(fd), 0}, result)
+	if result[0] != wasiENotcapable {
+		t.Fatalf("truncate granted: %d", result[0])
+	}
+	e.pathOpen(m, []uint64{3, 1, 32, 9, 0, rightFDWrite, fileRights, 0, 16}, result)
+	if result[0] != wasiENotcapable {
+		t.Fatalf("write open granted: %d", result[0])
+	}
+	e.pathOpen(m, []uint64{3, 1, 32, 9, 8, rightFDRead, fileRights, 0, 16}, result)
+	if result[0] != wasiENotcapable {
+		t.Fatalf("truncate open granted: %d", result[0])
+	}
+	got, err := os.ReadFile(root + "/input.txt")
+	if err != nil || string(got) != "inside" {
+		t.Fatalf("fixture mutated: %q %v", got, err)
+	}
+}
