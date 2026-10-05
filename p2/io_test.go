@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
@@ -99,5 +100,59 @@ func TestOutputAdapterDoesNotBlockGuestOnSlowWriter(t *testing.T) {
 	defer cancel()
 	if err := out.WaitWritable(ctx); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatal(err)
+	}
+}
+
+type flushAfterWriteRecorder struct {
+	started chan struct{}
+	release <-chan struct{}
+	mu      sync.Mutex
+	events  []string
+}
+
+func (w *flushAfterWriteRecorder) Write(p []byte) (int, error) {
+	close(w.started)
+	<-w.release
+	w.mu.Lock()
+	w.events = append(w.events, "write")
+	w.mu.Unlock()
+	return len(p), nil
+}
+
+func (w *flushAfterWriteRecorder) Flush() error {
+	w.mu.Lock()
+	w.events = append(w.events, "flush")
+	w.mu.Unlock()
+	return nil
+}
+
+func TestOutputAdapterQueuesFlushAfterInFlightWrite(t *testing.T) {
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	w := &flushAfterWriteRecorder{started: make(chan struct{}), release: release}
+	out := newOutput(w)
+	if err := out.TryWrite([]byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+	<-w.started
+	if err := out.BeginFlush(); err != nil {
+		t.Fatalf("flush while a prior write is in flight: %v", err)
+	}
+	close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := out.WaitWritable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if got := w.events; len(got) != 2 || got[0] != "write" || got[1] != "flush" {
+		t.Fatalf("operation order = %v, want [write flush]", got)
 	}
 }
