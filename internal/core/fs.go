@@ -335,7 +335,10 @@ func (e *Plugin) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
 	if pathEscapes(guest) {
 		return nil, "", wasiENotcapable
 	}
-	return d, path.Clean(guest), wasiOK
+	// Components must reach the host in lookup order: removing "dir/.."
+	// would erase missing-directory checks and change symlink traversal.
+	// Callers already handle terminal slashes separately.
+	return d, strings.TrimRight(guest, "/"), wasiOK
 }
 
 func pathEscapes(guest string) bool {
@@ -365,6 +368,10 @@ func pathEscapes(guest string) bool {
 	return false
 }
 
+// A component walk retains one directory handle per unresolved parent step.
+// Bound those handles independently of the guest's path length.
+const maxPinnedPathDepth = 64
+
 func capabilityErr(err error) uint64 {
 	if errors.Is(err, hostErrno.EXDEV) {
 		return wasiENotcapable
@@ -374,6 +381,12 @@ func capabilityErr(err error) uint64 {
 
 func openParent(d *fdEntry, name string) (*os.File, string, uint64) {
 	parent, leaf := path.Split(name)
+	if leaf == ".." {
+		// Resolve the parent step through the confined opener first. Passing
+		// native ".." to a later mutation could escape after a directory move.
+		f, code := openAt(d, name, hostOpenReadOnly|hostOpenDirectory, 0)
+		return f, ".", code
+	}
 	parent = strings.TrimSuffix(parent, "/")
 	if parent == "" {
 		parent = "."

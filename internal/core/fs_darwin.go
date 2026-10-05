@@ -40,23 +40,49 @@ func openAtDarwin(d *fdEntry, name string, flags int, mode uint32, symlinks int)
 	if flags&unix.O_CREAT == 0 {
 		mode = 0
 	}
-	rootFD, err := unix.Dup(int(d.file.Fd()))
-	if err != nil {
-		return nil, errno(err)
-	}
-	current := os.NewFile(uintptr(rootFD), d.file.Name())
+	current := (*os.File)(nil)
+	var parentInline [8]*os.File
+	parents := parentInline[:0]
 	defer func() {
 		if current != nil {
 			_ = current.Close()
 		}
+		for _, parent := range parents {
+			_ = parent.Close()
+		}
 	}()
+	rootFD, err := unix.Dup(int(d.file.Fd()))
+	if err != nil {
+		return nil, errno(err)
+	}
+	current = os.NewFile(uintptr(rootFD), d.file.Name())
 	parts := strings.Split(name, "/")
 	resolved := make([]string, 0, len(parts))
+	retainParents := false
+	for _, part := range parts {
+		if part == ".." {
+			retainParents = true
+			break
+		}
+	}
 	for i, part := range parts {
 		if part == "" || part == "." {
 			continue
 		}
+		if part == ".." {
+			if len(parents) == 0 {
+				return nil, wasiENotcapable
+			}
+			_ = current.Close()
+			current = parents[len(parents)-1]
+			parents = parents[:len(parents)-1]
+			resolved = resolved[:len(resolved)-1]
+			continue
+		}
 		last := i == len(parts)-1
+		if retainParents && !last && len(parents) >= maxPinnedPathDepth {
+			return nil, wasiENametoolong
+		}
 		openFlags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
 		openMode := uint32(0)
 		if last {
@@ -74,7 +100,11 @@ func openAtDarwin(d *fdEntry, name string, flags int, mode uint32, symlinks int)
 				current = nil
 				return next, wasiOK
 			}
-			_ = current.Close()
+			if retainParents {
+				parents = append(parents, current)
+			} else {
+				_ = current.Close()
+			}
 			current = next
 			resolved = append(resolved, part)
 			continue
@@ -95,6 +125,12 @@ func openAtDarwin(d *fdEntry, name string, flags int, mode uint32, symlinks int)
 		if code != wasiOK {
 			return nil, code
 		}
+		_ = current.Close()
+		current = nil
+		for _, parent := range parents {
+			_ = parent.Close()
+		}
+		parents = nil
 		return openAtDarwin(d, resolvedName, flags, mode, symlinks+1)
 	}
 	fd, err := unix.Openat(int(current.Fd()), ".", flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, mode)
@@ -123,23 +159,11 @@ func darwinResolveLink(prefix []string, target string, remaining []string) (stri
 	if path.IsAbs(target) {
 		return "", wasiENotcapable
 	}
+	// Keep target components intact; they must be looked up before any
+	// subsequent parent step, including components inside the link target.
 	parts := append([]string(nil), prefix...)
-	for _, part := range strings.Split(target, "/") {
-		switch part {
-		case "", ".":
-		case "..":
-			if len(parts) == 0 {
-				return "", wasiENotcapable
-			}
-			parts = parts[:len(parts)-1]
-		default:
-			parts = append(parts, part)
-		}
-	}
+	parts = append(parts, target)
 	parts = append(parts, remaining...)
-	if len(parts) == 0 {
-		return ".", wasiOK
-	}
 	return strings.Join(parts, "/"), wasiOK
 }
 

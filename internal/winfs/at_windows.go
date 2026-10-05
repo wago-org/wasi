@@ -91,6 +91,27 @@ func ReopenDirectory(root windows.Handle) (windows.Handle, error) {
 	return handle, nil
 }
 
+func reopenDirectoryAccess(root windows.Handle, access uint32) (windows.Handle, error) {
+	// An empty handle-relative name addresses the pinned directory itself.
+	// Explicit directory options avoid ReOpenFile's directory-handle failure
+	// on native Windows, even when backup semantics were requested.
+	var terminator uint16
+	name := windows.NTUnicodeString{MaximumLength: 2, Buffer: &terminator}
+	attrs := windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: root, ObjectName: &name, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err := windows.NtCreateFile(&handle, access|windows.SYNCHRONIZE, &attrs, &status, nil, 0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_FOR_BACKUP_INTENT,
+		0, 0)
+	if err != nil {
+		return windows.InvalidHandle, errno(err)
+	}
+	return handle, nil
+}
+
 func openAt(root windows.Handle, name string, flags int, mode uint32, directory, noReparse, noFollow bool, additionalAccess uint32) (windows.Handle, error) {
 	if name == "" {
 		return windows.InvalidHandle, windows.ERROR_FILE_NOT_FOUND
@@ -101,6 +122,12 @@ func openAt(root windows.Handle, name string, flags int, mode uint32, directory,
 		}
 		if flags&(os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_RDWR) != 0 {
 			return windows.InvalidHandle, syscall.EISDIR
+		}
+		if additionalAccess != 0 {
+			// A duplicate retains the parent's access, which may be read-only
+			// after component traversal. Reopen the pinned directory itself
+			// with the requested access without resolving its pathname again.
+			return reopenDirectoryAccess(root, windows.FILE_GENERIC_READ|additionalAccess)
 		}
 		process := windows.CurrentProcess()
 		var duplicate windows.Handle
