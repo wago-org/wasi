@@ -119,8 +119,9 @@ type fileStream struct {
 }
 
 type directoryStream struct {
-	mu   sync.Mutex
-	file *os.File
+	reader directoryReadState
+	mu     sync.Mutex
+	file   *os.File
 }
 
 type filesystemState struct {
@@ -1274,7 +1275,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			delete(s.dirs, rep)
 			s.mu.Unlock()
 			if d != nil {
-				return d.file.Close()
+				return closeDirectoryStream(d)
 			}
 			return nil
 		}),
