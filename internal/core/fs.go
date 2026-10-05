@@ -1254,7 +1254,7 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 
 func (e *Plugin) pathReadlink(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
-	trailingSlash := strings.HasSuffix(name, "/")
+	trailingSlash := strings.HasSuffix(name, "/") || guestBackslashSeparator && strings.HasSuffix(name, `\`)
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
@@ -1418,7 +1418,7 @@ func renameLeaf(original, leaf string) string {
 func (e *Plugin) pathSymlink(m wago.HostModule, p, r []uint64) {
 	target, code := guestBytes(m.Memory(), uint32(p[0]), uint32(p[1]))
 	name, code2 := guestBytes(m.Memory(), uint32(p[3]), uint32(p[4]))
-	trailingSlash := strings.HasSuffix(name, "/")
+	trailingSlash := strings.HasSuffix(name, "/") || guestBackslashSeparator && strings.HasSuffix(name, `\`)
 	d, name, pathCode := e.resolve(uint32(p[2]), name)
 	for _, c := range []uint64{code2, pathCode} {
 		if code == 0 {
