@@ -271,6 +271,9 @@ func validateConfig(raw json.RawMessage) error {
 }
 
 func validateConfigShape(raw json.RawMessage) error {
+	if err := rejectDuplicateConfigKeys(raw); err != nil {
+		return err
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return fmt.Errorf("wasi p2: config: %w", err)
@@ -332,6 +335,49 @@ func validateConfigShape(raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+// JSON unmarshalling keeps the last occurrence of an object key. Reject
+// duplicates before decoding so the reviewed configuration has one meaning.
+func rejectDuplicateConfigKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var scan func() error
+	scan = func() error {
+		token, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch token {
+		case json.Delim('{'):
+			seen := make(map[string]struct{})
+			for dec.More() {
+				keyToken, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key := keyToken.(string)
+				if _, exists := seen[key]; exists {
+					return fmt.Errorf("wasi p2: duplicate config key %q", key)
+				}
+				seen[key] = struct{}{}
+				if err := scan(); err != nil {
+					return err
+				}
+			}
+			_, err = dec.Token()
+			return err
+		case json.Delim('['):
+			for dec.More() {
+				if err := scan(); err != nil {
+					return err
+				}
+			}
+			_, err = dec.Token()
+			return err
+		}
+		return nil
+	}
+	return scan()
 }
 
 func (p *providerPlugin) Register(reg *wago.Registrar) error {
