@@ -426,12 +426,8 @@ func parentUnder(dir *os.File, name string) (*os.File, string, error) {
 }
 
 func parentUnderRaw(dir *os.File, name string) (*os.File, string, error) {
-	parts, err := splitRelative(name)
-	if err != nil || len(parts) == 0 {
-		if err == nil {
-			err = hostFS.EPERM
-		}
-		return nil, "", err
+	if name == "" || strings.IndexByte(name, 0) >= 0 || path.IsAbs(name) {
+		return nil, "", hostFS.EPERM
 	}
 	// Keep the original parent path until it has been resolved. Cleaning it
 	// first would turn missing/../file into file and skip the missing entry.
@@ -439,6 +435,9 @@ func parentUnderRaw(dir *os.File, name string) (*os.File, string, error) {
 	leafIndex := len(rawParts) - 1
 	for leafIndex >= 0 && (rawParts[leafIndex] == "" || rawParts[leafIndex] == ".") {
 		leafIndex--
+	}
+	if leafIndex < 0 || rawParts[leafIndex] == ".." {
+		return nil, "", hostFS.EPERM
 	}
 	parent := strings.Join(rawParts[:leafIndex], "/")
 	leaf := strings.Join(rawParts[leafIndex:], "/")
