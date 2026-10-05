@@ -69,19 +69,16 @@ func TestAsyncInputPreservesFinalReadError(t *testing.T) {
 					}
 					return
 				}
-				// A non-EOF failure is delivered once; a later read can resume.
+				// A reported stream failure closes the WASI input stream.
 				if err := in.WaitReadable(ctx); err != nil {
 					t.Fatal(err)
 				}
 				var next [4]byte
-				if n, err := in.TryRead(next[:]); n != 4 || err != nil || string(next[:]) != "next" {
-					t.Fatalf("read after reported error = %q, %d, %v; want next, 4, nil", next, n, err)
-				}
 				if n, err := in.TryRead(next[:]); n != 0 || err != io.EOF {
-					t.Fatalf("read after second payload = %d, %v; want EOF", n, err)
+					t.Fatalf("read after reported error = %d, %v; want EOF", n, err)
 				}
-				if got := r.calls.Load(); got != 2 {
-					t.Fatalf("resuming made %d underlying reads, want 2", got)
+				if got := r.calls.Load(); got != 1 {
+					t.Fatalf("closed stream made %d underlying reads, want 1", got)
 				}
 			})
 		}

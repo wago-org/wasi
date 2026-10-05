@@ -300,13 +300,17 @@ func (s *hostState) readStdinLocked(dst []byte) (int, error) {
 			if len(dst) == 0 {
 				return 0, nil // An open zero read must preserve a deferred error.
 			}
-			s.stdinReadError = nil
+			s.stdinReadError = io.EOF
 		}
 		return 0, err
 	}
 	n, err := s.stdin.TryRead(dst)
-	if errors.Is(err, io.EOF) {
-		s.stdinReadError = err
+	if err != nil && !errors.Is(err, ErrWouldBlock) {
+		if n > 0 && !errors.Is(err, io.EOF) {
+			s.stdinReadError = err // Deliver bytes, then the failure, then closed.
+		} else {
+			s.stdinReadError = io.EOF
+		}
 	}
 	return n, err
 }
@@ -319,7 +323,16 @@ func (s *hostState) waitStdin(ctx context.Context) error {
 	}
 	in := s.stdin
 	s.stdinMu.Unlock()
-	return in.WaitReadable(ctx)
+	err := in.WaitReadable(ctx)
+	if err != nil && ctx.Err() == nil {
+		s.stdinMu.Lock()
+		if s.stdinReadError == nil {
+			s.stdinReadError = err
+		}
+		s.stdinMu.Unlock()
+		return nil // A stream failure makes its pollable ready.
+	}
+	return err
 }
 
 func inputReady(s *hostState) bool {

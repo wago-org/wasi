@@ -918,8 +918,8 @@ func instanceOptions(cfg Config) []component.Option {
 					var err error
 					if !s.stdinBuffered && s.stdinReadError == nil {
 						err = s.stdin.WaitReadable(ctx)
-						if errors.Is(err, io.EOF) {
-							s.stdinReadError = err
+						if err != nil && ctx.Err() == nil {
+							s.stdinReadError = io.EOF
 						}
 					}
 					s.stdinMu.Unlock()

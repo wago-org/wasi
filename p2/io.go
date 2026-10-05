@@ -137,7 +137,7 @@ func (s *asyncInput) TryRead(dst []byte) (int, error) {
 		return n, nil
 	}
 	err := s.result.err
-	if errors.Is(err, io.EOF) {
+	if err != nil && (errors.Is(err, io.EOF) || n == 0) {
 		s.closed = true
 	} else if n > 0 && err != nil {
 		// Deliver the bytes first, retaining the error for the next read.
@@ -388,8 +388,8 @@ func (s *hostState) waitStdinReadable(ctx context.Context) ([]component.Value, e
 		return nil, nil
 	}
 	err := s.stdin.WaitReadable(ctx)
-	if errors.Is(err, io.EOF) {
-		s.stdinReadError = err
+	if err != nil && ctx.Err() == nil {
+		s.stdinReadError = io.EOF
 	}
 	s.stdinMu.Unlock()
 	if err != nil {

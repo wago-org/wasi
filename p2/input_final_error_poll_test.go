@@ -61,14 +61,11 @@ func TestAsyncInputFinalErrorSurvivesReadiness(t *testing.T) {
 				t.Fatal(err)
 			}
 			var next [4]byte
-			if n, err := state.readStdin(next[:]); n != 4 || err != nil || string(next[:]) != "next" {
-				t.Fatalf("read after reported error = %q, %d, %v; want next", next, n, err)
-			}
 			if n, err := state.readStdin(next[:]); n != 0 || err != io.EOF {
-				t.Fatalf("read after next payload = %d, %v; want EOF", n, err)
+				t.Fatalf("read after reported error = %d, %v; want EOF", n, err)
 			}
-			if calls := r.calls.Load(); calls != 2 {
-				t.Fatalf("resuming made %d underlying reads, want 2", calls)
+			if calls := r.calls.Load(); calls != 1 {
+				t.Fatalf("closed stream made %d underlying reads, want 1", calls)
 			}
 		})
 	}

@@ -88,16 +88,19 @@ func TestInputReadinessPreservesCustomReadError(t *testing.T) {
 						}
 						return
 					}
-					if n, err := s.readStdin(dst[:]); n != 0 || err != ErrWouldBlock {
-						t.Errorf("read after consumed error = %d, %v, want would-block", n, err)
+					if n, err := s.readStdin(dst[:]); n != 0 || !errors.Is(err, io.EOF) {
+						t.Errorf("read after reported error = %d, %v, want closed", n, err)
 					}
-					// A consumed non-EOF error does not prevent later input.
+					// A reported stream failure permanently closes the guest stream.
 					in.consumed, in.withByte, in.err = false, true, nil
 					if !inputReady(s) {
-						t.Fatal("later input did not become ready")
+						t.Fatal("closed input stopped being ready")
 					}
-					if n, err := s.readStdin(dst[:]); n != 1 || err != nil || dst[0] != 'x' {
-						t.Errorf("later input = %q, %d, %v", dst, n, err)
+					if n, err := s.readStdin(dst[:]); n != 0 || !errors.Is(err, io.EOF) {
+						t.Errorf("closed input = %d, %v, want EOF", n, err)
+					}
+					if in.calls != 1 {
+						t.Errorf("closed input made %d host reads, want 1", in.calls)
 					}
 				})
 			}
