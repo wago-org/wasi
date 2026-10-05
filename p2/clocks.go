@@ -232,6 +232,11 @@ func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, 
 func (s *hostState) readStdin(dst []byte) (int, error) {
 	s.stdinMu.Lock()
 	defer s.stdinMu.Unlock()
+	return s.readStdinLocked(dst)
+}
+
+// readStdinLocked requires stdinMu to be held by the caller.
+func (s *hostState) readStdinLocked(dst []byte) (int, error) {
 	if s.stdinBuffered {
 		n := copy(dst, s.stdinProbe[:])
 		if n != 0 {
@@ -242,11 +247,18 @@ func (s *hostState) readStdin(dst []byte) (int, error) {
 	if s.stdinReadError != nil {
 		err := s.stdinReadError
 		if !errors.Is(err, io.EOF) {
+			if len(dst) == 0 {
+				return 0, nil // An open zero read must preserve a deferred error.
+			}
 			s.stdinReadError = nil
 		}
 		return 0, err
 	}
-	return s.stdin.TryRead(dst)
+	n, err := s.stdin.TryRead(dst)
+	if errors.Is(err, io.EOF) {
+		s.stdinReadError = err
+	}
+	return n, err
 }
 
 func (s *hostState) waitStdin(ctx context.Context) error {

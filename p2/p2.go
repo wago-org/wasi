@@ -771,9 +771,6 @@ func instanceOptions(cfg Config) []component.Option {
 		if n > limits.ioLimit() {
 			n = limits.ioLimit()
 		}
-		if n == 0 {
-			return []component.Value{component.ResultValue{Payload: []byte{}}}, nil
-		}
 		if rep != stdinRep {
 			values, err := fs.readStream(rep, n)
 			if err != nil {
@@ -781,8 +778,14 @@ func instanceOptions(cfg Config) []component.Option {
 			}
 			return values, nil
 		}
+		s.stdinMu.Lock()
+		if !s.stdinBuffered && errors.Is(s.stdinReadError, io.EOF) {
+			s.stdinMu.Unlock()
+			return s.streamFailure(io.EOF)
+		}
 		buf := make([]byte, int(n))
-		got, err := s.readStdin(buf)
+		got, err := s.readStdinLocked(buf)
+		s.stdinMu.Unlock()
 		if errors.Is(err, ErrWouldBlock) {
 			return []component.Value{component.ResultValue{Payload: []byte{}}}, nil
 		}

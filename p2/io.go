@@ -109,6 +109,18 @@ func (s *asyncInput) TryRead(dst []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.collect()
+	if len(dst) == 0 {
+		// A zero-length read reports known closure without starting a read or
+		// consuming buffered input (including a deferred non-EOF error).
+		if s.result != nil && len(s.result.b) == 0 && errors.Is(s.result.err, io.EOF) {
+			s.result = nil
+			s.closed = true
+		}
+		if s.closed {
+			return 0, io.EOF
+		}
+		return 0, nil
+	}
 	if s.result == nil {
 		if s.closed {
 			return 0, io.EOF

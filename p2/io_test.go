@@ -253,3 +253,98 @@ func TestWritePermitConsumption(t *testing.T) {
 		t.Fatalf("successful permit consumption allocates %.0f times, want0", allocs)
 	}
 }
+
+type zeroReadControlReader struct{}
+
+func (zeroReadControlReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+func TestAsyncInputZeroReadState(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		result             *readResult
+		closed, wantClosed bool
+	}{
+		{name: "open"}, {name: "closed", closed: true, wantClosed: true},
+		{name: "pending-EOF", result: &readResult{err: io.EOF}, wantClosed: true},
+		{name: "buffered-EOF", result: &readResult{b: []byte{'x'}, err: io.EOF}},
+		{name: "pending-error", result: &readResult{err: io.ErrUnexpectedEOF}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &asyncInput{r: zeroReadControlReader{}, result: tc.result, closed: tc.closed}
+			n, err := s.TryRead(nil)
+			if n != 0 || errors.Is(err, io.EOF) != tc.wantClosed {
+				t.Fatalf("zero read=%d,%v, wantClosed=%v", n, err, tc.wantClosed)
+			}
+			if s.waiting != nil {
+				t.Fatal("zero read started asynchronous input")
+			}
+			if !tc.wantClosed && s.result != tc.result {
+				t.Fatal("zero read consumed pending input/error")
+			}
+			allocs := testing.AllocsPerRun(8, func() { s.TryRead(nil) })
+			if allocs != 0 {
+				t.Fatalf("zero read allocates %.0f times", allocs)
+			}
+		})
+	}
+}
+
+type byteAndEOFInput struct{ calls int }
+
+func (s *byteAndEOFInput) TryRead(p []byte) (int, error) {
+	s.calls++
+	if len(p) == 0 {
+		return 0, nil
+	}
+	p[0] = 'x'
+	return 1, io.EOF
+}
+func (*byteAndEOFInput) WaitReadable(context.Context) error { return nil }
+func TestInputReadyPreservesBufferedEOF(t *testing.T) {
+	source := &byteAndEOFInput{}
+	s := &hostState{stdin: source}
+	if !inputReady(s) {
+		t.Fatal("last byte was not ready")
+	}
+	if n, err := s.readStdin(nil); n != 0 || err != nil {
+		t.Fatalf("buffered zero read=%d,%v", n, err)
+	}
+	var b [1]byte
+	if n, err := s.readStdin(b[:]); n != 1 || err != nil || b[0] != 'x' {
+		t.Fatalf("last-byte read=%d,%v,%q", n, err, b)
+	}
+	if !inputReady(s) || !errors.Is(s.stdinReadError, io.EOF) {
+		t.Fatal("consumed EOF was not recorded as closed readiness")
+	}
+	if source.calls != 1 {
+		t.Fatalf("closed source was probed %d times", source.calls)
+	}
+}
+
+func TestReadStdinZeroPreservesReadinessState(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		buffered bool
+		err      error
+		closed   bool
+	}{
+		{"closed", false, io.EOF, true},
+		{"buffered-EOF", true, io.EOF, false},
+		{"deferred-error", false, io.ErrUnexpectedEOF, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := &byteAndEOFInput{}
+			s := &hostState{stdin: source, stdinBuffered: tc.buffered, stdinReadError: tc.err}
+			s.stdinProbe[0] = 'x'
+			allocs := testing.AllocsPerRun(8, func() {
+				n, err := s.readStdin(nil)
+				if n != 0 || errors.Is(err, io.EOF) != tc.closed || (!tc.closed && err != nil) {
+					t.Fatalf("zero read=%d,%v, wantClosed=%v", n, err, tc.closed)
+				}
+			})
+			if allocs != 0 || source.calls != 0 || s.stdinBuffered != tc.buffered || s.stdinReadError != tc.err {
+				t.Fatalf("zero read altered cached state: allocs=%g calls=%d buffered=%v error=%v", allocs, source.calls, s.stdinBuffered, s.stdinReadError)
+			}
+		})
+	}
+}

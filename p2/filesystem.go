@@ -115,6 +115,7 @@ type fileStream struct {
 	file   *os.File
 	pos    int64
 	read   bool
+	closed bool // EOF observed; guarded by mu
 	append *appendTarget
 }
 
@@ -331,11 +332,14 @@ func (s *filesystemState) readStream(rep uint32, length uint64) ([]component.Val
 	if length > s.limits.ioLimit() {
 		length = s.limits.ioLimit()
 	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.closed {
+		return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: 1}}}, nil
+	}
 	if length == 0 {
 		return []component.Value{component.ResultValue{Payload: []byte{}}}, nil
 	}
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
 	buf := make([]byte, int(length))
 	n, err := stream.file.ReadAt(buf, stream.pos)
 	stream.pos += int64(n)
@@ -343,6 +347,9 @@ func (s *filesystemState) readStream(rep uint32, length uint64) ([]component.Val
 		return nil, fmt.Errorf("input-stream.read: %w", err)
 	}
 	if n == 0 {
+		// Only cache closure when it is returned to the guest. A partial
+		// ReadAt may return EOF before another writer appends more bytes.
+		stream.closed = true
 		return []component.Value{component.ResultValue{IsErr: true, Payload: component.VariantValue{Disc: 1}}}, nil
 	}
 	return []component.Value{component.ResultValue{Payload: buf[:n]}}, nil
