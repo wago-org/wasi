@@ -21,6 +21,7 @@ const (
 	hostOpenReadOnly           = unix.O_RDONLY
 	hostOpenDirectory          = unix.O_DIRECTORY
 	hostOpenNoFollow           = unix.O_NOFOLLOW
+	hostOpenNonblock           = unix.O_NONBLOCK
 	hostOpenWriteAttributes    = 0
 	hostOpenCanCreateDirectory = false
 )
