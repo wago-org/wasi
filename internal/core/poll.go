@@ -105,8 +105,12 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 
 	started := time.Now()
 	ready := readySubscriptions(subs, 0)
-	if len(ready) == 0 {
-		if err := e.waitSubscriptions(subs, earliest, hasDeadline); err != nil {
+	for len(ready) == 0 {
+		remaining := earliest - time.Since(started)
+		if hasDeadline && remaining < 0 {
+			remaining = 0
+		}
+		if err := e.waitSubscriptions(subs, remaining, hasDeadline); err != nil {
 			switch {
 			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 				r[0] = wasiEIntr
