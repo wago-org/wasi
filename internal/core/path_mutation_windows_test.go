@@ -73,7 +73,7 @@ func TestWindowsMutationParentLeaf(t *testing.T) {
 }
 
 func TestWindowsMutationRejectsRootedNames(t *testing.T) {
-	for _, name := range []string{`\created`, `\sub\created`, `C:\created`, `C:created`, `\\server\share\created`, `sub/\`, `sub\C:created`} {
+	for _, name := range []string{`\created`, `\sub\created`, `C:\created`, `C:created`, `\\server\share\created`, `sub\C:created`} {
 		t.Run(name, func(t *testing.T) {
 			root, e := windowsMutationFixture(t)
 			mem, result := []byte(name), []uint64{999}
@@ -110,6 +110,38 @@ func TestWindowsDirectoryMutationTerminalBackslash(t *testing.T) {
 				t.Fatalf("directory remains: %v", err)
 			}
 		})
+	}
+}
+
+func TestWindowsDirectoryMutationMixedTerminalSeparators(t *testing.T) {
+	for _, name := range []string{`new/\`, `new\/`} {
+		t.Run(name, func(t *testing.T) {
+			root, e := windowsMutationFixture(t)
+			mem, result := []byte(name), []uint64{999}
+			e.pathCreateDirectory(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+			if result[0] != wasiOK {
+				t.Fatalf("mkdir %q: errno %d, want OK", name, result[0])
+			}
+			if info, err := os.Stat(filepath.Join(root, "new")); err != nil || !info.IsDir() {
+				t.Fatalf("created directory = %v, %v", info, err)
+			}
+			e.pathRemoveDirectory(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+			if result[0] != wasiOK {
+				t.Fatalf("rmdir %q: errno %d, want OK", name, result[0])
+			}
+			if _, err := os.Stat(filepath.Join(root, "new")); !os.IsNotExist(err) {
+				t.Fatalf("directory remains after rmdir: %v", err)
+			}
+		})
+	}
+	root, e := windowsMutationFixture(t)
+	mem, result := []byte(`sub/\`), []uint64{999}
+	e.pathCreateDirectory(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+	if result[0] != wasiEExist {
+		t.Fatalf("mkdir existing sub/\\: errno %d, want EEXIST", result[0])
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "sub", "nested")); err != nil || string(data) != "keep" {
+		t.Fatalf("existing directory contents changed: %q, %v", data, err)
 	}
 }
 
