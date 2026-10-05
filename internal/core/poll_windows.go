@@ -81,6 +81,11 @@ func waitOSFiles(ctx context.Context, files []pollFile) error {
 	defer ticker.Stop()
 	for {
 		for _, file := range files {
+			// A file closed after the initial readiness check cannot become
+			// readable again. Wake poll_oneoff so it can report the error event.
+			if _, err := file.file.Stat(); err != nil {
+				return nil
+			}
 			if osFileReady(file.file, file.typ) {
 				return nil
 			}
