@@ -190,7 +190,7 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 }
 
 func blockPollable(ctx context.Context, p pollableValue) error {
-	if !p.ready() {
+	for !p.ready() {
 		err := p.wait(ctx)
 		if canceled := ctx.Err(); canceled != nil {
 			return canceled
@@ -203,10 +203,12 @@ func blockPollable(ctx context.Context, p pollableValue) error {
 }
 
 func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, error) {
-	ready := readyIndexes(ps)
-	if len(ready) == 0 {
+	for {
+		ready := readyIndexes(ps)
+		if len(ready) != 0 {
+			return ready, nil
+		}
 		waitCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
 		ch := make(chan error, len(ps))
 		for _, p := range ps {
 			go func(p pollableValue) { ch <- p.wait(waitCtx) }(p)
@@ -224,9 +226,9 @@ func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, 
 		if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("wasi:io/poll.poll: waiter returned before readiness")
+		// Readiness can be consumed by another caller between a successful
+		// wait and this check. Keep waiting until a pollable is ready now.
 	}
-	return ready, nil
 }
 
 func (s *hostState) readStdin(dst []byte) (int, error) {

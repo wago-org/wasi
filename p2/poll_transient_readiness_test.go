@@ -3,7 +3,6 @@ package p2
 import (
 	"context"
 	"testing"
-
 )
 
 func TestBlockRetriesWhenReadinessIsConsumedBeforeRecheck(t *testing.T) {
