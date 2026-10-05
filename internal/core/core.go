@@ -606,6 +606,10 @@ func putLe64(mem []byte, off uint32, v uint64) bool {
 	return true
 }
 
+func validMemoryRange(mem []byte, off, size uint32) bool {
+	return uint64(off)+uint64(size) <= uint64(len(mem))
+}
+
 // --- fd_* ---
 
 func (e *Plugin) fdWrite(m wago.HostModule, p, r []uint64) {
@@ -626,6 +630,10 @@ func (e *Plugin) fdWrite(m wago.HostModule, p, r []uint64) {
 	bufs, code := e.iovecs(mem, iovs, n)
 	if code != 0 {
 		r[0] = code
+		return
+	}
+	if !validMemoryRange(mem, nwrittenPtr, 4) {
+		r[0] = wasiEFault
 		return
 	}
 	var total uint32
@@ -678,6 +686,10 @@ func (e *Plugin) fdRead(m wago.HostModule, p, r []uint64) {
 	bufs, code := e.iovecs(mem, iovs, n)
 	if code != 0 {
 		r[0] = code
+		return
+	}
+	if !validMemoryRange(mem, nreadPtr, 4) {
+		r[0] = wasiEFault
 		return
 	}
 	var total uint32
@@ -751,6 +763,9 @@ func (e *Plugin) fdSeek(m wago.HostModule, p, r []uint64) {
 	whence := int(p[2])
 	if code == 0 && (whence < 0 || whence > 2) {
 		code = wasiEInval
+	}
+	if code == 0 && !validMemoryRange(m.Memory(), uint32(p[3]), 8) {
+		code = wasiEFault
 	}
 	if code == 0 {
 		off, err := f.file.Seek(int64(p[1]), whence)

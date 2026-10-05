@@ -263,6 +263,20 @@ func TestInvalidResultPointersDoNotPerformDescriptorIO(t *testing.T) {
 	if r[0] != wasiEFault || err != nil || position != 0 {
 		t.Fatalf("fd_seek with bad output pointer = errno %d, position %d, %v", r[0], position, err)
 	}
+	e.fs.fds[3].rights |= rightFDWrite
+	e.fdPwrite(m, []uint64{3, 0, 1, 0, 255}, r)
+	info, err := f.Stat()
+	if r[0] != wasiEFault || err != nil || info.Size() != 0 {
+		t.Fatalf("fd_pwrite with bad count pointer = errno %d, size %v, %v", r[0], info, err)
+	}
+
+	root := t.TempDir()
+	e = newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
+	copy(mem[96:], "new")
+	e.pathOpen(m, []uint64{3, 0, 96, 3, 1, rightFDWrite, 0, 0, 255}, r)
+	if _, err := os.Stat(root + "/new"); r[0] != wasiEFault || !os.IsNotExist(err) {
+		t.Fatalf("path_open with bad fd pointer = errno %d, stat error %v", r[0], err)
+	}
 }
 
 func TestDirectoryIterationDoesNotTruncateLargeDirectory(t *testing.T) {

@@ -595,6 +595,9 @@ func (e *Plugin) readAt(m wago.HostModule, p, r []uint64) {
 	if code == 0 && f.file == nil {
 		code = wasiEBadf
 	}
+	if code == 0 && !validMemoryRange(m.Memory(), uint32(p[4]), 4) {
+		code = wasiEFault
+	}
 	for _, b := range bufs {
 		if code != 0 {
 			break
@@ -632,6 +635,9 @@ func (e *Plugin) writeAt(m wago.HostModule, p, r []uint64) {
 	if code == 0 && f.file == nil {
 		code = wasiEBadf
 	}
+	if code == 0 && !validMemoryRange(m.Memory(), uint32(p[4]), 4) {
+		code = wasiEFault
+	}
 	for _, b := range bufs {
 		if code != 0 {
 			break
@@ -667,6 +673,9 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 	buf, bufLen := uint32(p[1]), uint32(p[2])
 	mem := m.Memory()
 	if code == 0 && uint64(buf)+uint64(bufLen) > uint64(len(mem)) {
+		code = wasiEFault
+	}
+	if code == 0 && !validMemoryRange(mem, uint32(p[4]), 4) {
 		code = wasiEFault
 	}
 	var used uint32
@@ -1014,6 +1023,9 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	}
 	if code == 0 && oflags&8 != 0 {
 		code = require(d, rightPathFilestatSetSize)
+	}
+	if code == 0 && !validMemoryRange(m.Memory(), uint32(p[8]), 4) {
+		code = wasiEFault
 	}
 	flags := 0
 	read, write := rights&rightFDRead != 0, rights&rightFDWrite != 0
