@@ -392,6 +392,12 @@ func setFileTimes(file *os.File, times []time.Time) error {
 	return windows.SetFileTime(windows.Handle(file.Fd()), nil, &atime, &mtime)
 }
 
+func openPathTimesAt(d *fdEntry, name string) (*os.File, uint64) {
+	// SetFileTime needs this access on the pinned handle. A read-only
+	// metadata handle is insufficient on native Windows.
+	return openAt(d, name, hostOpenReadOnly|hostOpenWriteAttributes, 0)
+}
+
 func setPathTimes(parent *os.File, leaf string, times []time.Time, noFollow bool) error {
 	h, err := winfs.OpenAtAccess(windows.Handle(parent.Fd()), leaf, os.O_RDONLY, 0, false, false, noFollow, windows.FILE_WRITE_ATTRIBUTES)
 	if err != nil {
