@@ -552,7 +552,10 @@ func fsFailure(err error) []component.Value {
 }
 
 func descriptorKind(info fs.FileInfo) uint32 {
-	m := info.Mode()
+	return descriptorModeKind(info.Mode())
+}
+
+func descriptorModeKind(m fs.FileMode) uint32 {
 	switch {
 	case m.IsDir():
 		return descriptorDirectory
