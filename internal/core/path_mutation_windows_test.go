@@ -369,3 +369,30 @@ func TestWindowsSymbolicLinkMixedTerminalSeparators(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsUnlinkMixedTerminalSeparators(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want uint64
+	}{
+		{`file/\`, wasiENotdir},
+		{`file\/`, wasiENotdir},
+		{`sub/\`, wasiEIsdir},
+		{`sub\/`, wasiEIsdir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, e := windowsMutationFixture(t)
+			mem, result := []byte(tc.name), []uint64{999}
+			e.pathUnlinkFile(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+			if result[0] != tc.want {
+				t.Fatalf("unlink %q: errno %d, want %d", tc.name, result[0], tc.want)
+			}
+			if data, err := os.ReadFile(filepath.Join(root, "file")); err != nil || string(data) != "keep" {
+				t.Fatalf("failed unlink changed file: %q, %v", data, err)
+			}
+			if info, err := os.Stat(filepath.Join(root, "sub")); err != nil || !info.IsDir() {
+				t.Fatalf("failed unlink changed directory: %v, %v", info, err)
+			}
+		})
+	}
+}
