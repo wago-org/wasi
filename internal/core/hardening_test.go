@@ -151,6 +151,66 @@ func TestPerInstanceStateLocksDoNotBlockEachOther(t *testing.T) {
 	}
 }
 
+type waitingInput struct{ started chan struct{} }
+
+func (*waitingInput) Read([]byte) (int, error) { return 0, nil }
+func (*waitingInput) Ready() bool              { return false }
+func (w *waitingInput) Wait(ctx context.Context) error {
+	close(w.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestStopInterruptsPendingPoll(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	input := &waitingInput{started: make(chan struct{})}
+	e := newTestPlugin(t, Config{Context: ctx, Stdin: input})
+	var pollBinding binding
+	for _, b := range e.bindings() {
+		if b.name == "poll_oneoff" {
+			pollBinding = b
+			break
+		}
+	}
+	if pollBinding.fn == nil {
+		t.Fatal("poll_oneoff binding missing")
+	}
+	mem := make([]byte, 512)
+	putFDSubscription(mem, 0, 1, 1, 0)
+	pollDone := make(chan uint64, 1)
+	go func() {
+		result := make([]uint64, 1)
+		pollBinding.fn(testModule{mem}, []uint64{0, 256, 1, 240}, result)
+		pollDone <- result[0]
+	}()
+	select {
+	case <-input.started:
+	case <-time.After(time.Second):
+		t.Fatal("poll did not start waiting")
+	}
+	stopDone := make(chan struct{})
+	go func() {
+		_ = e.stop(context.Background())
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		cancel()
+		<-stopDone
+		t.Fatal("stop blocked behind pending poll")
+	}
+	select {
+	case code := <-pollDone:
+		if code != wasiEIntr {
+			t.Fatalf("poll after stop = %d, want EINTR", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("poll did not stop")
+	}
+}
+
 func setIOVec(mem []byte, table, data uint32, value string) {
 	binary.LittleEndian.PutUint32(mem[table:], data)
 	binary.LittleEndian.PutUint32(mem[table+4:], uint32(len(value)))
