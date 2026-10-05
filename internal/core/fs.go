@@ -820,12 +820,16 @@ func positionDirectory(f *fdEntry, cookie uint64) uint64 {
 	if cookie > 2 {
 		remaining = cookie - 2
 	}
+	return skipDirectoryEntries(f, remaining)
+}
+
+func skipDirectoryEntries(f *fdEntry, remaining uint64) uint64 {
 	for remaining > 0 {
 		step := remaining
 		if step > 1024 {
 			step = 1024
 		}
-		entries, err := dir.ReadDir(int(step))
+		entries, err := f.dirIter.ReadDir(int(step))
 		f.dirCookie += uint64(len(entries))
 		remaining -= uint64(len(entries))
 		if errors.Is(err, io.EOF) || len(entries) == 0 {
