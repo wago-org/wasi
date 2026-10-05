@@ -1,0 +1,29 @@
+package p2
+
+import (
+	"errors"
+	"io"
+
+	component "github.com/wago-org/component-model"
+)
+
+func (d *directoryStream) readEntry(maxNameBytes uint64) []component.Value {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entries, readErr := d.file.ReadDir(1)
+	if errors.Is(readErr, io.EOF) || len(entries) == 0 {
+		return ok(nil)
+	}
+	if readErr != nil {
+		return fsFailure(readErr)
+	}
+	entry := entries[0]
+	if uint64(len(entry.Name())) > maxNameBytes {
+		return fsFailure(hostFS.ENAMETOOLONG)
+	}
+	i, e := entry.Info()
+	if e != nil {
+		return fsFailure(e)
+	}
+	return ok([]component.Value{descriptorKind(i), entry.Name()})
+}
