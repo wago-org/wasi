@@ -482,6 +482,11 @@ func fsError(err error) uint32 {
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, hostFS.ENOENT) {
 		return fsErrNoEntry
 	}
+	// Unix EPERM also matches fs.ErrPermission, but WASI distinguishes it
+	// from access denied (EACCES).
+	if errors.Is(err, hostFS.EPERM) {
+		return fsErrNotPermitted
+	}
 	if errors.Is(err, fs.ErrPermission) || errors.Is(err, hostFS.EACCES) {
 		return fsErrAccess
 	}
@@ -534,8 +539,6 @@ func fsError(err error) uint32 {
 		return fsErrNoTTY
 	case errors.Is(err, hostFS.ENXIO):
 		return fsErrNoSuchDevice
-	case errors.Is(err, hostFS.EPERM):
-		return fsErrNotPermitted
 	case errors.Is(err, hostFS.EROFS):
 		return fsErrReadOnly
 	case errors.Is(err, hostFS.EXDEV):
