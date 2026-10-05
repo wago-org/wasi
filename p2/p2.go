@@ -435,7 +435,7 @@ func Run(ctx context.Context, components component.Service, wasm []byte, cfg Con
 			}
 		}
 		return fmt.Errorf("wasi p2: component does not export wasi:cli/run")
-	}, Options(cfg)...)
+	}, instanceOptions(cfg)...)
 }
 
 func validateMounts(mounts []Preopen) error {
@@ -479,8 +479,19 @@ type hostState struct {
 }
 
 // Options returns Component Model host options for the Preview 2 command
-// interfaces. Interface patch versions are matched by the component runtime.
+// interfaces. The returned options can be reused across instances; each
+// instantiation creates its own resource tables, quotas, and host state.
+// Configured streams and other caller-supplied capabilities retain their identity.
+// Interface patch versions are matched by the component runtime.
 func Options(cfg Config) []component.Option {
+	// Preserve the preopen snapshot formerly taken while building the options.
+	cfg.Mounts = append([]Preopen(nil), cfg.Mounts...)
+	return []component.Option{component.WithOptionsFactory(func() []component.Option {
+		return instanceOptions(cfg)
+	})}
+}
+
+func instanceOptions(cfg Config) []component.Option {
 	limits := cfg.Limits.normalized()
 	stdin := cfg.Stdin
 	if stdin == nil {
