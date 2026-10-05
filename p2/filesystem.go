@@ -859,7 +859,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		i, e := n.file.Stat()
+		i, e := statFile(n.file)
 		if e != nil {
 			return fsFailure(e), nil
 		}
