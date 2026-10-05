@@ -34,13 +34,18 @@ type readResult struct {
 	err error
 }
 
+type pendingInputRead struct {
+	ready  chan struct{}
+	result readResult
+}
+
 // asyncInput adapts a synchronous reader without consuming it before component
 // execution. At most one bounded read is in flight.
 type asyncInput struct {
 	r       io.Reader
 	mu      sync.Mutex
 	result  *readResult
-	waiting chan readResult
+	waiting *pendingInputRead
 	closed  bool
 }
 
@@ -62,8 +67,8 @@ func (s *asyncInput) start() {
 	if s.waiting != nil || s.result != nil || s.closed {
 		return
 	}
-	ch := make(chan readResult, 1)
-	s.waiting = ch
+	read := &pendingInputRead{ready: make(chan struct{})}
+	s.waiting = read
 	go func() {
 		buf := make([]byte, 64<<10)
 		n, err := s.r.Read(buf)
@@ -72,7 +77,10 @@ func (s *asyncInput) start() {
 		} else {
 			buf = nil
 		}
-		ch <- readResult{b: buf, err: err}
+		read.result = readResult{b: buf, err: err}
+		// Publishing the result before closing the channel wakes every waiter.
+		// The close also orders their reads of the completed result.
+		close(read.ready)
 	}()
 }
 
@@ -81,9 +89,9 @@ func (s *asyncInput) collect() {
 		return
 	}
 	select {
-	case result := <-s.waiting:
+	case <-s.waiting.ready:
+		s.result = &s.waiting.result
 		s.waiting = nil
-		s.result = &result
 	default:
 	}
 }
@@ -138,14 +146,14 @@ func (s *asyncInput) WaitReadable(ctx context.Context) error {
 		return nil
 	}
 	s.start()
-	ch := s.waiting
+	read := s.waiting
 	s.mu.Unlock()
 	select {
-	case result := <-ch:
+	case <-read.ready:
 		s.mu.Lock()
-		if s.waiting == ch {
+		if s.waiting == read {
 			s.waiting = nil
-			s.result = &result
+			s.result = &read.result
 		}
 		s.mu.Unlock()
 		return nil
