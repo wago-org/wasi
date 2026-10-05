@@ -11,11 +11,14 @@ func (d *directoryStream) readEntry(maxNameBytes uint64) []component.Value {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	entries, readErr := d.file.ReadDir(1)
-	if errors.Is(readErr, io.EOF) || len(entries) == 0 {
-		return ok(nil)
-	}
 	if readErr != nil {
+		if errors.Is(readErr, io.EOF) {
+			return ok(nil)
+		}
 		return fsFailure(readErr)
+	}
+	if len(entries) == 0 {
+		return ok(nil)
 	}
 	entry := entries[0]
 	if uint64(len(entry.Name())) > maxNameBytes {
