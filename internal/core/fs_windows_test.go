@@ -247,6 +247,48 @@ func TestWindowsOpenAtAcceptsSymlinkPreopen(t *testing.T) {
 	file.Close()
 }
 
+func TestWindowsPinnedMountRemainsUsableAfterHostRename(t *testing.T) {
+	base := t.TempDir()
+	root, moved := filepath.Join(base, "root"), filepath.Join(base, "moved")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "file"), []byte("retained"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
+	defer e.closeAll()
+	mem := make([]byte, 128)
+	copy(mem[32:], "sub")
+	result := []uint64{999}
+	e.pathOpen(testModule{mem}, []uint64{3, 0, 32, 3, 2, rightFDRead, 0, 0, 16}, result)
+	if result[0] != wasiOK {
+		t.Fatalf("open child directory: errno %d", result[0])
+	}
+	childFD := binary.LittleEndian.Uint32(mem[16:])
+	if err := os.Rename(root, moved); err != nil {
+		t.Skipf("host cannot rename open mount directory: %v", err)
+	}
+	for _, tc := range []struct {
+		entry *fdEntry
+		name  string
+	}{
+		{e.fs.fds[3], "sub/file"},
+		{e.fs.fds[childFD], "file"},
+	} {
+		f, code := openAt(tc.entry, tc.name, hostOpenReadOnly, 0)
+		if code != wasiOK {
+			t.Errorf("open %q through moved pinned mount: errno %d", tc.name, code)
+			continue
+		}
+		data, err := io.ReadAll(f)
+		_ = f.Close()
+		if err != nil || string(data) != "retained" {
+			t.Errorf("opened %q = %q, %v", tc.name, data, err)
+		}
+	}
+}
+
 func TestWindowsOpenAtCreateAppendIsAppendOnly(t *testing.T) {
 	root := t.TempDir()
 	preopen, err := openPreopen(root, true)
