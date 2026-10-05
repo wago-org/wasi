@@ -26,6 +26,7 @@ const (
 	wasiENoent       = 44
 	wasiENomem       = 48
 	wasiENospc       = 51
+	wasiENosys       = 52
 	wasiENotdir      = 54
 	wasiENotempty    = 55
 	wasiENotsock     = 57
