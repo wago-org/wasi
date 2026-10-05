@@ -79,6 +79,46 @@ func directoryTestRoot(t testing.TB) string {
 	return t.TempDir()
 }
 
+func TestDirectoryEntryStreamAcrossRefills(t *testing.T) {
+	root := t.TempDir()
+	const count = 257
+	want := make(map[string]bool, count)
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("entry-%03d-%080d", i, i)
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		want[name] = true
+	}
+	base, err := openPreopenDirectory(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	file, err := newDirectoryStreamFile(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := &directoryStream{file: file}
+	defer closeDirectoryStream(stream)
+	for range count {
+		result := stream.readEntry(255)[0].(component.ResultValue)
+		if result.IsErr || result.Payload == nil {
+			t.Fatalf("entry = %#v, want %d remaining names", result, len(want))
+		}
+		entry := result.Payload.([]component.Value)
+		name := entry[1].(string)
+		if !want[name] || entry[0] != descriptorRegularFile {
+			t.Fatalf("entry = %#v, want an unread regular file", entry)
+		}
+		delete(want, name)
+	}
+	result := stream.readEntry(255)[0].(component.ResultValue)
+	if result.IsErr || result.Payload != nil {
+		t.Fatalf("final entry = %#v, want EOF", result)
+	}
+}
+
 func BenchmarkReadDirectoryEntries(b *testing.B) {
 	root := directoryTestRoot(b)
 	const entries = 32
@@ -103,10 +143,10 @@ func BenchmarkReadDirectoryEntries(b *testing.B) {
 		for j := 0; j < entries; j++ {
 			result := stream.readEntry(1 << 20)[0].(component.ResultValue)
 			if result.IsErr || result.Payload == nil {
-				f.Close()
+				closeDirectoryStream(stream)
 				b.Fatalf("read entry = %#v", result)
 			}
 		}
-		f.Close()
+		closeDirectoryStream(stream)
 	}
 }

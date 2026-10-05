@@ -37,6 +37,12 @@ jobs:
       - run: go build ./...
       - name: Test
         run: go test -race ./...
+      - name: Legacy Darwin directory controls
+        if: matrix.os == 'macos-14' && matrix.go == '1.22.x'
+        run: >-
+          go test -race ./p2
+          -run '^(TestDarwinDirectoryRecordBounds|TestDarwinUnknownDirectoryEntryUsesPinnedDescriptor|TestDirectory.*)$'
+          -count=1 -v
 
   windows-arm64:
     name: Windows arm64
