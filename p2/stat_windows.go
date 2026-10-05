@@ -16,12 +16,16 @@ const metadataHandleFlag = 1 << 27
 const metadataOpenFlags = metadataHandleFlag
 
 func hostStat(info fs.FileInfo) (nlink uint64, atime, mtime, ctime time.Time, dev, ino uint64) {
+	nlink = 1
+	if native, ok := info.(windowsFileStat); ok {
+		nlink = native.links
+	}
 	mtime = info.ModTime()
 	if st, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
-		return 1, filetimeTime(st.LastAccessTime), filetimeTime(st.LastWriteTime),
+		return nlink, filetimeTime(st.LastAccessTime), filetimeTime(st.LastWriteTime),
 			filetimeTime(st.CreationTime), 0, 0
 	}
-	return 1, mtime, mtime, mtime, 0, 0
+	return nlink, mtime, mtime, mtime, 0, 0
 }
 
 func setFileTimes(f *os.File, atime, mtime time.Time) error {

@@ -10,7 +10,7 @@ func platformStatUnderPathFlags(dir *os.File, name string, follow bool) (os.File
 		return nil, err
 	}
 	defer f.Close()
-	return f.Stat()
+	return statFile(f)
 }
 
 func statMetadataLeaf(dir *os.File, name string) (os.FileInfo, error) {
@@ -20,5 +20,5 @@ func statMetadataLeaf(dir *os.File, name string) (os.FileInfo, error) {
 	}
 	f := os.NewFile(uintptr(fd), name)
 	defer f.Close()
-	return f.Stat()
+	return statFile(f)
 }
