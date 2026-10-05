@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -329,7 +328,7 @@ func (e *Plugin) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
 	if !st.IsDir() {
 		return nil, "", wasiENotdir
 	}
-	if guest == "" || strings.HasPrefix(guest, "/") {
+	if guest == "" || strings.HasPrefix(guest, "/") || guestBackslashSeparator && (strings.HasPrefix(guest, `\`) || filepath.VolumeName(guest) != "") {
 		return nil, "", wasiENotcapable
 	}
 	if pathEscapes(guest) {
@@ -344,11 +343,18 @@ func (e *Plugin) resolve(fd uint32, guest string) (*fdEntry, string, uint64) {
 func pathEscapes(guest string) bool {
 	depth := 0
 	for start := 0; start < len(guest); {
-		end := strings.IndexByte(guest[start:], '/')
-		if end < 0 {
-			end = len(guest)
+		end := start
+		if guestBackslashSeparator {
+			for end < len(guest) && guest[end] != '/' && guest[end] != '\\' {
+				end++
+			}
 		} else {
-			end += start
+			end = strings.IndexByte(guest[start:], '/')
+			if end < 0 {
+				end = len(guest)
+			} else {
+				end += start
+			}
 		}
 		switch guest[start:end] {
 		case "", ".":
@@ -380,16 +386,37 @@ func capabilityErr(err error) uint64 {
 }
 
 func openParent(d *fdEntry, name string) (*os.File, string, uint64) {
-	parent, leaf := path.Split(name)
-	if leaf == ".." {
+	search := name
+	if guestBackslashSeparator {
+		// Keep terminal backslashes in the leaf passed to the host: they
+		// require a directory there, but are not a parent separator.
+		search = strings.TrimRight(name, `\`)
+	}
+	separator := strings.LastIndexByte(search, '/')
+	if guestBackslashSeparator {
+		if backslash := strings.LastIndexByte(search, '\\'); backslash > separator {
+			separator = backslash
+		}
+	}
+	parent, leaf := ".", name
+	if separator >= 0 {
+		parent, leaf = name[:separator], name[separator+1:]
+		if parent == "" {
+			parent = "."
+		}
+	}
+	if guestBackslashSeparator && (strings.HasPrefix(leaf, `\`) || filepath.VolumeName(leaf) != "") {
+		return nil, "", wasiENotcapable
+	}
+	step := leaf
+	if guestBackslashSeparator {
+		step = strings.TrimRight(step, `\`)
+	}
+	if step == ".." {
 		// Resolve the parent step through the confined opener first. Passing
 		// native ".." to a later mutation could escape after a directory move.
 		f, code := openAt(d, name, hostOpenReadOnly|hostOpenDirectory, 0)
 		return f, ".", code
-	}
-	parent = strings.TrimSuffix(parent, "/")
-	if parent == "" {
-		parent = "."
 	}
 	f, code := openAt(d, parent, hostOpenReadOnly|hostOpenDirectory, 0)
 	return f, leaf, code

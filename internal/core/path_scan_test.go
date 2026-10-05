@@ -7,6 +7,9 @@ import (
 )
 
 func splitPathEscapes(guest string) bool {
+	if guestBackslashSeparator {
+		guest = strings.ReplaceAll(guest, `\`, "/")
+	}
 	depth := 0
 	for _, part := range strings.Split(guest, "/") {
 		switch part {
@@ -24,7 +27,11 @@ func splitPathEscapes(guest string) bool {
 }
 
 func TestPathComponentScan(t *testing.T) {
-	for _, s := range []string{"a/b/c", "a//b", "./a", "a/../b", "../a", "a/../../b", strings.Repeat("./", 4096) + "a", strings.Repeat("a/", 4096), "a/", "", "/", "../a/..", "a/../../../a"} {
+	cases := []string{"a/b/c", "a//b", "./a", "a/../b", "../a", "a/../../b", strings.Repeat("./", 4096) + "a", strings.Repeat("a/", 4096), "a/", "", "/", "../a/..", "a/../../../a"}
+	if guestBackslashSeparator {
+		cases = append(cases, `a\b\c`, `a\..\b`, `..\a`, `a\..\..\b`, `a/..\..`, `a\..\b/..`)
+	}
+	for _, s := range cases {
 		if got, want := pathEscapes(s), splitPathEscapes(s); got != want {
 			t.Fatalf("path %q: %v != %v", s, got, want)
 		}
@@ -32,7 +39,11 @@ func TestPathComponentScan(t *testing.T) {
 }
 
 func TestPathComponentScanAllocations(t *testing.T) {
-	for _, s := range []string{"a/b/c", strings.Repeat("a/", 4096), strings.Repeat("./", 4096) + "a"} {
+	cases := []string{"a/b/c", strings.Repeat("a/", 4096), strings.Repeat("./", 4096) + "a"}
+	if guestBackslashSeparator {
+		cases = append(cases, `a\b\c`, `a\..\b`)
+	}
+	for _, s := range cases {
 		if n := testing.AllocsPerRun(100, func() { pathScanSink = pathEscapes(s) }); n != 0 {
 			t.Fatalf("depth scan allocates %v", n)
 		}
