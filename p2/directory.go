@@ -3,6 +3,7 @@ package p2
 import (
 	"errors"
 	"io"
+	"unicode/utf8"
 
 	component "github.com/wago-org/component-model"
 )
@@ -22,6 +23,9 @@ func (d *directoryStream) readEntry(maxNameBytes uint64) []component.Value {
 	}
 	if uint64(len(name)) > maxNameBytes {
 		return fsFailure(hostFS.ENAMETOOLONG)
+	}
+	if !utf8.ValidString(name) {
+		return fsFailure(hostFS.EILSEQ)
 	}
 	return ok([]component.Value{kind, name})
 }
