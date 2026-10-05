@@ -227,6 +227,18 @@ func (p *prefixedInput) WaitReadable(ctx context.Context) error {
 func inputReady(s *hostState) bool {
 	s.stdinMu.Lock()
 	defer s.stdinMu.Unlock()
+	for {
+		prefix, ok := s.stdin.(*prefixedInput)
+		if !ok {
+			break
+		}
+		if len(prefix.prefix) != 0 {
+			return true
+		}
+		// Drop consumed prefixes before probing the underlying stream. This
+		// keeps polling from retaining a chain of empty wrappers.
+		s.stdin = prefix.next
+	}
 	buf := make([]byte, 1)
 	n, err := s.stdin.TryRead(buf)
 	if n > 0 {

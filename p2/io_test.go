@@ -35,6 +35,31 @@ func TestAsyncInputWaitHonorsCancellation(t *testing.T) {
 	close(release)
 }
 
+func TestInputReadyDoesNotAccumulatePrefixes(t *testing.T) {
+	s := &hostState{stdin: &prefixedInput{prefix: []byte{'x'}, next: newInput(nil)}}
+	for i := 0; i < 64; i++ {
+		if !inputReady(s) {
+			t.Fatalf("readiness check %d reported no buffered byte", i)
+		}
+	}
+	depth := 0
+	for in := s.stdin; in != nil; {
+		prefix, ok := in.(*prefixedInput)
+		if !ok {
+			break
+		}
+		depth++
+		in = prefix.next
+	}
+	if depth != 1 {
+		t.Fatalf("64 readiness checks grew %d prefix wrappers, want 1", depth)
+	}
+	buf := make([]byte, 1)
+	if n, err := s.stdin.TryRead(buf); n != 1 || err != nil || buf[0] != 'x' {
+		t.Fatalf("buffered read = %q, %d, %v", buf, n, err)
+	}
+}
+
 func TestPollableQuota(t *testing.T) {
 	s := &hostState{pollables: map[uint32]pollableValue{}, nextPollable: 1, limits: Limits{MaxPollables: 1}.normalized()}
 	if _, err := s.addPollable(pollableValue{}); err != nil {
