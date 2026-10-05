@@ -797,20 +797,38 @@ func instanceOptions(cfg Config) []component.Option {
 	blockingRead := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) == 2 {
 			if rep, ok := args[0].(uint32); ok && rep == stdinRep {
-				s.stdinMu.Lock()
-				var err error
-				if !s.stdinBuffered && s.stdinReadError == nil {
-					err = s.stdin.WaitReadable(ctx)
-					if errors.Is(err, io.EOF) {
-						s.stdinReadError = err
+				for {
+					s.stdinMu.Lock()
+					var err error
+					if !s.stdinBuffered && s.stdinReadError == nil {
+						err = s.stdin.WaitReadable(ctx)
+						if errors.Is(err, io.EOF) {
+							s.stdinReadError = err
+						}
 					}
-				}
-				s.stdinMu.Unlock()
-				if err != nil {
-					if canceled := ctx.Err(); canceled != nil {
-						return nil, canceled
+					s.stdinMu.Unlock()
+					if err != nil {
+						if canceled := ctx.Err(); canceled != nil {
+							return nil, canceled
+						}
+						return s.streamFailure(err)
 					}
-					return s.streamFailure(err)
+					values, err := read(ctx, args)
+					if err != nil || len(values) != 1 {
+						return values, err
+					}
+					result := values[0].(component.ResultValue)
+					length, valid := args[1].(uint64)
+					if result.IsErr || (valid && length == 0) {
+						return values, nil
+					}
+					buf, err := bytesValue(result.Payload)
+					if err != nil {
+						return nil, err
+					}
+					if len(buf) != 0 {
+						return values, nil
+					}
 				}
 			}
 		}
