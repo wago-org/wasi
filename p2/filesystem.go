@@ -330,10 +330,6 @@ func dupFile(f *os.File) (*os.File, error) {
 	return os.NewFile(uintptr(fd), f.Name()), nil
 }
 
-func newDirectoryStreamFile(dir *os.File) (*os.File, error) {
-	return dupFile(dir)
-}
-
 func splitRelative(name string) ([]string, error) {
 	if strings.IndexByte(name, 0) >= 0 || path.IsAbs(name) {
 		return nil, hostFS.EPERM

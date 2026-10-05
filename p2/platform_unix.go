@@ -10,6 +10,10 @@ import (
 
 func openPreopenDirectory(path string, _ bool) (*os.File, error) { return os.Open(path) }
 
+func newDirectoryStreamFile(dir *os.File) (*os.File, error) {
+	return openUnder(dir, ".", hostFS.O_RDONLY|hostFS.O_DIRECTORY, 0)
+}
+
 func platformFilesystemError(error) (uint32, bool) { return 0, false }
 
 var hostFS = filesystemPlatform{

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/wago-org/wasi/internal/winfs"
@@ -79,6 +80,17 @@ func duplicateFileHandle(fd int) (int, error) {
 		return 0, err
 	}
 	return int(duplicate), nil
+}
+
+func newDirectoryStreamFile(dir *os.File) (*os.File, error) {
+	// DuplicateHandle shares the native enumeration cursor. A native reopen
+	// creates a new file object for the same pinned directory.
+	handle, err := winfs.ReopenDirectory(windows.Handle(dir.Fd()))
+	runtime.KeepAlive(dir)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), dir.Name()), nil
 }
 
 func openFileAt(fd int, name string, flags int, mode uint32) (int, error) {
