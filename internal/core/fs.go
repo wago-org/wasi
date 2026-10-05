@@ -1319,7 +1319,7 @@ func (e *Plugin) pathRemoveDirectory(m wago.HostModule, p, r []uint64) {
 
 func (e *Plugin) pathUnlinkFile(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
-	if code == 0 && strings.HasSuffix(name, "/") {
+	if code == 0 && (strings.HasSuffix(name, "/") || guestBackslashSeparator && strings.HasSuffix(name, `\`)) {
 		d, clean, pathCode := e.resolve(uint32(p[0]), name)
 		if pathCode != 0 {
 			r[0] = pathCode
