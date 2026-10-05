@@ -67,7 +67,11 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 				return
 			}
 			now, _, err := clockValue(e.cfg.Clocks, clockID)
-			if err != nil {
+			if errors.Is(err, errClockOverflow) && flags&1 != 0 {
+				r[0] = wasiEOverflow
+				return
+			}
+			if err != nil && !errors.Is(err, errClockOverflow) {
 				r[0] = wasiENotsup
 				return
 			}
