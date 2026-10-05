@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	guestBackslashSeparator    = true
 	hostOpenReadOnly           = os.O_RDONLY
 	hostOpenDirectory          = 1 << 24
 	hostOpenNoFollow           = 1 << 25

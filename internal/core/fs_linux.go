@@ -17,6 +17,7 @@ func hostMountRoot(_ *os.File, host string) (string, error) { return host, nil }
 const secureResolve = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS
 
 const (
+	guestBackslashSeparator    = false
 	hostOpenReadOnly           = unix.O_RDONLY
 	hostOpenDirectory          = unix.O_DIRECTORY
 	hostOpenNoFollow           = unix.O_NOFOLLOW

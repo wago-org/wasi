@@ -59,7 +59,7 @@ func TestWindowsMutationParentLookup(t *testing.T) {
 
 func TestWindowsMutationParentLeaf(t *testing.T) {
 	_, e := windowsMutationFixture(t)
-	for _, name := range []string{"file", `sub\nested`, `sub\..\file`, `sub/..\file`, `sub\..`} {
+	for _, name := range []string{"file", `sub\nested`, `sub\..\file`, `sub/..\file`, `sub\..`, `sub\..\`} {
 		t.Run(name, func(t *testing.T) {
 			parent, leaf, code := openParent(e.fs.fds[3], name)
 			if parent != nil {
@@ -67,6 +67,114 @@ func TestWindowsMutationParentLeaf(t *testing.T) {
 			}
 			if code != wasiOK || leaf == ".." || strings.ContainsAny(leaf, `/\`) {
 				t.Fatalf("parent %q: leaf %q, errno %d; want a confined single component", name, leaf, code)
+			}
+		})
+	}
+}
+
+func TestWindowsMutationRejectsRootedNames(t *testing.T) {
+	for _, name := range []string{`\created`, `\sub\created`, `C:\created`, `C:created`, `\\server\share\created`, `sub/\`, `sub\C:created`} {
+		t.Run(name, func(t *testing.T) {
+			root, e := windowsMutationFixture(t)
+			mem, result := []byte(name), []uint64{999}
+			e.pathCreateDirectory(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+			if result[0] != wasiENotcapable {
+				t.Fatalf("mkdir rooted %q: errno %d, want ENOTCAPABLE", name, result[0])
+			}
+			for _, candidate := range []string{"created", "sub/created"} {
+				if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(candidate))); !os.IsNotExist(err) {
+					t.Fatalf("rooted path mutated %q: %v", candidate, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsDirectoryMutationTerminalBackslash(t *testing.T) {
+	for _, name := range []string{`new\`, `sub\new\`} {
+		t.Run(name, func(t *testing.T) {
+			root, e := windowsMutationFixture(t)
+			mem, result := []byte(name), []uint64{999}
+			e.pathCreateDirectory(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+			if result[0] != wasiOK {
+				t.Fatalf("mkdir %q: errno %d", name, result[0])
+			}
+			if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); err != nil || !info.IsDir() {
+				t.Fatalf("created directory: %v, %v", info, err)
+			}
+			e.pathRemoveDirectory(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+			if result[0] != wasiOK {
+				t.Fatalf("remove-directory %q: errno %d", name, result[0])
+			}
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); !os.IsNotExist(err) {
+				t.Fatalf("directory remains: %v", err)
+			}
+		})
+	}
+}
+
+func TestWindowsRenameDirectoryWithTerminalBackslash(t *testing.T) {
+	root, e := windowsMutationFixture(t)
+	if err := os.Mkdir(filepath.Join(root, "source"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldName, newName := `source\`, "target"
+	mem, result := []byte(oldName+newName), []uint64{999}
+	e.pathRename(testModule{mem}, []uint64{3, 0, uint64(len(oldName)), 3, uint64(len(oldName)), uint64(len(newName))}, result)
+	if result[0] != wasiOK {
+		t.Fatalf("rename directory with terminal backslash: errno %d", result[0])
+	}
+	if info, err := os.Stat(filepath.Join(root, "target")); err != nil || !info.IsDir() {
+		t.Fatalf("target directory: %v, %v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "source")); !os.IsNotExist(err) {
+		t.Fatalf("source remains: %v", err)
+	}
+}
+
+func TestWindowsFileMutationRejectsTerminalBackslash(t *testing.T) {
+	root, e := windowsMutationFixture(t)
+	oldName, newName := `file\`, "target"
+	mem, result := []byte(oldName+newName), []uint64{999}
+	e.pathUnlinkFile(testModule{mem}, []uint64{3, 0, uint64(len(oldName))}, result)
+	if result[0] == wasiOK {
+		t.Fatal("unlink accepted file with terminal backslash")
+	}
+	e.pathRename(testModule{mem}, []uint64{3, 0, uint64(len(oldName)), 3, uint64(len(oldName)), uint64(len(newName))}, result)
+	if result[0] == wasiOK {
+		t.Fatal("rename accepted file with terminal backslash")
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "file")); err != nil || string(content) != "keep" {
+		t.Fatalf("file changed: %q, %v", content, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "target")); !os.IsNotExist(err) {
+		t.Fatalf("target created: %v", err)
+	}
+}
+
+func TestWindowsTerminalParentStepCannotMutateMountRoot(t *testing.T) {
+	for _, name := range []string{`sub\..`, `sub\..\`} {
+		t.Run(name, func(t *testing.T) {
+			root, e := windowsMutationFixture(t)
+			mem, result := []byte(name), []uint64{999}
+			e.pathRemoveDirectory(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+			if result[0] == wasiOK {
+				t.Fatal("removed mount root")
+			}
+			newName := "moved"
+			mem = []byte(name + newName)
+			e.pathRename(testModule{mem}, []uint64{3, 0, uint64(len(name)), 3, uint64(len(name)), uint64(len(newName))}, result)
+			if result[0] == wasiOK {
+				t.Fatal("renamed mount root")
+			}
+			if _, err := os.Stat(root); err != nil {
+				t.Fatalf("mount root missing: %v", err)
+			}
+			if content, err := os.ReadFile(filepath.Join(root, "file")); err != nil || string(content) != "keep" {
+				t.Fatalf("mount contents changed: %q, %v", content, err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "moved")); !os.IsNotExist(err) {
+				t.Fatalf("unexpected rename target: %v", err)
 			}
 		})
 	}
