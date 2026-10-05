@@ -667,6 +667,11 @@ func requestedTimes(access, modification component.Value, info fs.FileInfo, now 
 }
 
 func syncDescriptor(n *descriptorNode, dataOnly bool) error {
+	// WASI requires both sync operations to succeed without effect when the
+	// descriptor was not opened for writing, even if the host cannot sync it.
+	if n.flags&2 == 0 {
+		return nil
+	}
 	if dataOnly {
 		return syncFileData(n.file)
 	}
