@@ -2,8 +2,10 @@ package p2_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	component "github.com/wago-org/component-model"
 	"github.com/wago-org/wasi/p2"
@@ -16,6 +18,34 @@ type transientBlockingInput struct{ waits, reads int }
 func (in *transientBlockingInput) WaitReadable(context.Context) error {
 	in.waits++
 	return nil
+}
+
+type neverReadyBlockingInput struct{ waits int }
+
+func (in *neverReadyBlockingInput) WaitReadable(ctx context.Context) error {
+	in.waits++
+	return ctx.Err()
+}
+
+func (*neverReadyBlockingInput) TryRead([]byte) (int, error) { return 0, p2.ErrWouldBlock }
+
+func TestBlockingInputRepeatedLostReadinessBacksOff(t *testing.T) {
+	input := &neverReadyBlockingInput{}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	err := withBlockingInput(t, ctx, input, func(in *component.Instance) error {
+		_, err := in.Call(ctx, "read", uint64(1))
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("blocking read error=%v, want context deadline", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.waits > 100 {
+		t.Fatalf("blocking read retried %d times in 40ms; want bounded retries", input.waits)
+	}
 }
 
 func (in *transientBlockingInput) TryRead(dst []byte) (int, error) {
