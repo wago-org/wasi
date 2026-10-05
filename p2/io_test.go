@@ -229,3 +229,35 @@ func TestOutputAdapterQueuesFlushAfterInFlightWrite(t *testing.T) {
 		t.Fatalf("operation order = %v, want [write flush]", got)
 	}
 }
+
+func TestWritePermitConsumption(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		permit, length uint64
+		wantError      bool
+	}{
+		{"success", 32, 32, false}, {"zero-length", 32, 0, false},
+		{"over-permit", 16, 17, true}, {"over-limit", 64, 33, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &hostState{permits: map[uint32]uint64{stdoutRep: tc.permit}, limits: Limits{MaxAggregateBufferBytes: 32}.normalized()}
+			err := s.consumeWritePermit(stdoutRep, tc.length)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("write permit error=%v, wantError=%v", err, tc.wantError)
+			}
+			if err := s.consumeWritePermit(stdoutRep, 0); err == nil {
+				t.Fatal("write left a reusable permit")
+			}
+		})
+	}
+	s := &hostState{permits: map[uint32]uint64{}, limits: Limits{MaxAggregateBufferBytes: 32}.normalized()}
+	allocs := testing.AllocsPerRun(8, func() {
+		s.permits[stdoutRep] = 32
+		if err := s.consumeWritePermit(stdoutRep, 32); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("successful permit consumption allocates %.0f times, want0", allocs)
+	}
+}

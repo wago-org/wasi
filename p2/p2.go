@@ -646,14 +646,8 @@ func instanceOptions(cfg Config) []component.Option {
 		if err != nil {
 			return nil, err
 		}
-		s.mu.Lock()
-		permit, granted := s.permits[rep]
-		if granted {
-			delete(s.permits, rep)
-		}
-		s.mu.Unlock()
-		if !granted || uint64(len(buf)) > permit {
-			return nil, fmt.Errorf("output-stream.write exceeds check-write permit")
+		if err := s.consumeWritePermit(rep, uint64(len(buf))); err != nil {
+			return nil, err
 		}
 		if err := w.TryWrite(buf); err != nil {
 			return s.streamFailure(err)
@@ -832,7 +826,7 @@ func instanceOptions(cfg Config) []component.Option {
 			return []component.Value{component.ResultValue{Payload: uint64(len(buf))}}, nil
 		}
 	}
-	writeZeroes := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+	writeZeroes := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("output-stream.write-zeroes: expected self and len")
 		}
@@ -840,7 +834,23 @@ func instanceOptions(cfg Config) []component.Option {
 		if !ok || n > maxIOSize {
 			return nil, fmt.Errorf("output-stream.write-zeroes: invalid len")
 		}
-		return write(ctx, []component.Value{args[0], make([]byte, int(n))})
+		rep, ok := args[0].(uint32)
+		if !ok {
+			return nil, fmt.Errorf("output-stream.write: self is %T", args[0])
+		}
+		w, err := writer(rep)
+		if err != nil {
+			return nil, err
+		}
+		// Validate and consume the same one-shot permit as write before allocating
+		// the scalar request's contents, including when the request is rejected.
+		if err := s.consumeWritePermit(rep, n); err != nil {
+			return nil, err
+		}
+		if err := w.TryWrite(make([]byte, int(n))); err != nil {
+			return s.streamFailure(err)
+		}
+		return []component.Value{component.ResultValue{}}, nil
 	}
 	blockingWriteZeroes := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 2 {

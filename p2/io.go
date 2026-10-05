@@ -324,3 +324,18 @@ func (s *hostState) addPollable(v pollableValue) (uint32, error) {
 	s.pollables[rep] = v
 	return rep, nil
 }
+
+// consumeWritePermit applies write's one-shot permit to scalar requests before
+// allocating their contents. Rejected writes consume the prior grant too.
+func (s *hostState) consumeWritePermit(rep uint32, length uint64) error {
+	s.mu.Lock()
+	permit, granted := s.permits[rep]
+	if granted {
+		delete(s.permits, rep)
+	}
+	s.mu.Unlock()
+	if !granted || length > permit || length > s.limits.ioLimit() {
+		return fmt.Errorf("output-stream.write exceeds check-write permit")
+	}
+	return nil
+}
