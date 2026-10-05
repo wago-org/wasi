@@ -615,10 +615,12 @@ func instanceOptions(cfg Config) []component.Option {
 	if stdout == nil {
 		stdout = newOutput(nil)
 	}
+	stdout = &pollSafeOutput{stream: stdout}
 	stderr := cfg.Stderr
 	if stderr == nil {
 		stderr = newOutput(nil)
 	}
+	stderr = &pollSafeOutput{stream: stderr}
 	wall := cfg.WallClock
 	if wall == nil {
 		wall = time.Now

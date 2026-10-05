@@ -189,6 +189,98 @@ type outputRequest struct {
 	done  chan struct{}
 }
 
+// pollSafeOutput keeps a readiness probe from consuming a custom stream's
+// one-shot permit or error before the guest can observe it.
+type pollSafeOutput struct {
+	stream  OutputStream
+	mu      sync.Mutex
+	permit  uint64
+	pending error
+}
+
+func (s *pollSafeOutput) takePending() (uint64, error) {
+	s.mu.Lock()
+	permit := s.permit
+	err := s.pending
+	s.permit = 0
+	s.pending = nil
+	s.mu.Unlock()
+	return permit, err
+}
+
+func (s *pollSafeOutput) CheckWrite() (uint64, error) {
+	if permit, err := s.takePending(); err != nil {
+		return 0, err
+	} else if permit != 0 {
+		return permit, nil
+	}
+	return s.stream.CheckWrite()
+}
+
+func (s *pollSafeOutput) TryWrite(p []byte) error {
+	if _, err := s.takePending(); err != nil {
+		return err
+	}
+	return s.stream.TryWrite(p)
+}
+
+func (s *pollSafeOutput) BeginFlush() error {
+	if _, err := s.takePending(); err != nil {
+		return err
+	}
+	return s.stream.BeginFlush()
+}
+
+func (s *pollSafeOutput) WaitWritable(ctx context.Context) error {
+	s.mu.Lock()
+	permit, err := s.permit, s.pending
+	if err != nil {
+		s.pending = nil
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if permit != 0 {
+		return nil
+	}
+	return s.stream.WaitWritable(ctx)
+}
+
+func (s *pollSafeOutput) pollReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending != nil || s.permit != 0 {
+		return true
+	}
+	n, err := s.stream.CheckWrite()
+	if err != nil {
+		s.pending = err
+	} else if n != 0 {
+		s.permit = n
+	}
+	return err != nil || n > 0
+}
+
+func (s *pollSafeOutput) pollWait(ctx context.Context) error {
+	s.mu.Lock()
+	pending := s.pending != nil || s.permit != 0
+	s.mu.Unlock()
+	if pending {
+		return nil
+	}
+	err := s.stream.WaitWritable(ctx)
+	if err != nil && ctx.Err() == nil {
+		s.mu.Lock()
+		if s.pending == nil {
+			s.pending = err
+		}
+		s.mu.Unlock()
+		return nil
+	}
+	return err
+}
+
 func newOutput(w io.Writer) OutputStream {
 	if w == nil {
 		w = io.Discard

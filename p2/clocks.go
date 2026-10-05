@@ -172,12 +172,18 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 				if s.outputClosed(rep) {
 					return true
 				}
+				if wrapped, ok := out.(*pollSafeOutput); ok {
+					return wrapped.pollReady()
+				}
 				n, err := out.CheckWrite()
 				return err != nil || n > 0
 			},
 			wait: func(ctx context.Context) error {
 				if s.outputClosed(rep) {
 					return nil
+				}
+				if wrapped, ok := out.(*pollSafeOutput); ok {
+					return wrapped.pollWait(ctx)
 				}
 				return out.WaitWritable(ctx)
 			},
