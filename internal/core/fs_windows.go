@@ -79,7 +79,7 @@ func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) 
 		}
 	}
 	if flags&os.O_TRUNC != 0 {
-		if err := f.Truncate(0); err != nil {
+		if err := setFileSize(f, 0); err != nil {
 			_ = f.Close()
 			return nil, errno(err)
 		}
@@ -242,6 +242,18 @@ func setPathTimes(parent *os.File, leaf string, times []time.Time, noFollow bool
 	return setFileTimes(f, times)
 }
 
+var reopenFileProc = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
+
+func reopenWindowsFile(file *os.File, access uint32) (windows.Handle, error) {
+	h, _, err := reopenFileProc.Call(uintptr(file.Fd()), uintptr(access),
+		uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE),
+		uintptr(windows.FILE_FLAG_BACKUP_SEMANTICS))
+	if windows.Handle(h) == windows.InvalidHandle {
+		return windows.InvalidHandle, err
+	}
+	return windows.Handle(h), nil
+}
+
 func setHostFileFlags(entry *fdEntry, file *os.File, flags uint16) error {
 	if flags&4 != 0 {
 		return hostErrno.EINVAL
@@ -253,22 +265,22 @@ func setHostFileFlags(entry *fdEntry, file *os.File, flags uint16) error {
 	if entry.rights&rightFDRead != 0 {
 		access |= windows.GENERIC_READ
 	}
-	if entry.rights&rightFDWrite != 0 {
+	if entry.rights&(rightFDWrite|rightFDAllocate|rightFDFilestatSetSize) != 0 {
 		if flags&1 != 0 {
 			access |= windows.FILE_APPEND_DATA | windows.FILE_WRITE_ATTRIBUTES | windows.FILE_WRITE_EA | windows.SYNCHRONIZE
 		} else {
 			access |= windows.GENERIC_WRITE
 		}
 	}
-	position, _ := file.Seek(0, os.SEEK_CUR)
-	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
-	h, _, callErr := proc.Call(uintptr(file.Fd()), uintptr(access),
-		uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE),
-		uintptr(windows.FILE_FLAG_BACKUP_SEMANTICS))
-	if windows.Handle(h) == windows.InvalidHandle {
-		return callErr
+	if entry.rights&rightFDFilestatSetTimes != 0 {
+		access |= windows.FILE_WRITE_ATTRIBUTES
 	}
-	reopened := os.NewFile(h, file.Name())
+	position, _ := file.Seek(0, os.SEEK_CUR)
+	h, err := reopenWindowsFile(file, access)
+	if err != nil {
+		return err
+	}
+	reopened := os.NewFile(uintptr(h), file.Name())
 	if position >= 0 {
 		_, _ = reopened.Seek(position, os.SEEK_SET)
 	}
@@ -334,5 +346,21 @@ func allocateFile(file *os.File, offset, length int64) error {
 	if info.Size() >= end {
 		return nil
 	}
-	return file.Truncate(end)
+	return setFileSize(file, end)
+}
+
+func setFileSize(file *os.File, size int64) error {
+	err := file.Truncate(size)
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return err
+	}
+	// APPEND handles intentionally lack FILE_WRITE_DATA so concurrent writes
+	// append atomically. Reopen this same file for the size change without
+	// replacing the append handle or disturbing its current position.
+	h, err := reopenWindowsFile(file, windows.GENERIC_WRITE)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	return windows.Ftruncate(h, size)
 }

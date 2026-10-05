@@ -563,7 +563,7 @@ func (e *Plugin) fdFilestatSetSize(_ wago.HostModule, p, r []uint64) {
 		code = wasiEOverflow
 	}
 	if code == 0 {
-		code = errno(f.file.Truncate(int64(p[1])))
+		code = errno(setFileSize(f.file, int64(p[1])))
 	}
 	r[0] = code
 }
@@ -1098,9 +1098,10 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	}
 	flags := 0
 	read, write := rights&rightFDRead != 0, rights&rightFDWrite != 0
-	if read && write {
+	hostWrite := write || rights&(rightFDAllocate|rightFDFilestatSetSize) != 0 || oflags&8 != 0
+	if read && hostWrite {
 		flags = os.O_RDWR
-	} else if write {
+	} else if hostWrite {
 		flags = os.O_WRONLY
 	} else {
 		flags = os.O_RDONLY
@@ -1132,6 +1133,19 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	var f *os.File
 	if code == 0 {
 		f, code = openAt(d, name, flags, 0o666)
+		if code != 0 && hostWrite && !write && oflags&(1|4|8) == 0 {
+			// A directory may be opened with requested file-only rights,
+			// which are removed below. Preserve that behavior without
+			// granting write access to a regular file.
+			readFlags := flags &^ (os.O_WRONLY | os.O_RDWR | os.O_APPEND)
+			if candidate, retryCode := openAt(d, name, readFlags, 0); retryCode == wasiOK {
+				if info, err := candidate.Stat(); err == nil && info.IsDir() {
+					f, code = candidate, wasiOK
+				} else {
+					_ = candidate.Close()
+				}
+			}
+		}
 	}
 	if code == 0 {
 		st, err := f.Stat()

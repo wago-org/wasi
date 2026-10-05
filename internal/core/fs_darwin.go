@@ -342,3 +342,5 @@ func requireDarwinBacking(file *os.File, offset, end, size int64) error {
 	}
 	return nil
 }
+
+func setFileSize(file *os.File, size int64) error { return file.Truncate(size) }
