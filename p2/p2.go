@@ -723,6 +723,7 @@ func instanceOptions(cfg Config) []component.Option {
 		if err != nil {
 			return nil, err
 		}
+		retryDelay := time.Millisecond
 		for len(buf) > 0 {
 			if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
 				return values, err
@@ -737,8 +738,12 @@ func instanceOptions(cfg Config) []component.Option {
 			}
 			permit := rv.Payload.(uint64)
 			if permit == 0 {
+				if err := waitTransientStreamRetry(ctx, &retryDelay); err != nil {
+					return nil, err
+				}
 				continue
 			}
+			retryDelay = time.Millisecond
 			n := len(buf)
 			if uint64(n) > permit {
 				n = int(permit)
@@ -1096,6 +1101,23 @@ func instanceOptions(cfg Config) []component.Option {
 		terminalOption(ifaceTermStderr, "get-terminal-stderr", terminalOutResource, none),
 	)
 	return opts
+}
+
+func waitTransientStreamRetry(ctx context.Context, delay *time.Duration) error {
+	timer := time.NewTimer(*delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if *delay < 50*time.Millisecond {
+		*delay *= 2
+		if *delay > 50*time.Millisecond {
+			*delay = 50 * time.Millisecond
+		}
+	}
+	return nil
 }
 
 func terminalOption(iface, name string, resource uint32, fn component.HostFunc) component.Option {
