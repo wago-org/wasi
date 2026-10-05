@@ -167,7 +167,21 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 		if out == nil {
 			return nil, fmt.Errorf("output-stream.subscribe: unknown rep %d", rep)
 		}
-		p := pollableValue{ready: func() bool { n, err := out.CheckWrite(); return err != nil || n > 0 }, wait: out.WaitWritable}
+		p := pollableValue{
+			ready: func() bool {
+				if s.outputClosed(rep) {
+					return true
+				}
+				n, err := out.CheckWrite()
+				return err != nil || n > 0
+			},
+			wait: func(ctx context.Context) error {
+				if s.outputClosed(rep) {
+					return nil
+				}
+				return out.WaitWritable(ctx)
+			},
+		}
 		newRep, err := s.addPollable(p)
 		if err != nil {
 			return nil, err

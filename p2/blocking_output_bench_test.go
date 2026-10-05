@@ -22,7 +22,7 @@ func BenchmarkBlockingOutputWait(b *testing.B) {
 	b.Run("stream-error-boundary", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if values, err := state.waitWritable(ctx, out); values != nil || err != nil {
+			if values, err := state.waitWritable(ctx, stdoutRep, out); values != nil || err != nil {
 				b.Fatalf("unexpected wait result: %v, %v", values, err)
 			}
 		}
