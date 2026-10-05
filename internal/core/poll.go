@@ -54,7 +54,8 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 	var earliest time.Duration
 	hasDeadline := false
 	for i := uint32(0); i < n; i++ {
-		raw := mem[in+i*48 : in+(i+1)*48]
+		start := uint64(in) + uint64(i)*48
+		raw := mem[start : start+48]
 		sub := pollSubscription{userdata: binary.LittleEndian.Uint64(raw), typ: raw[8]}
 		switch sub.typ {
 		case 0:
@@ -119,7 +120,7 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 		ready = readySubscriptions(subs, time.Since(started))
 	}
 
-	clear(mem[out : out+n*32])
+	clear(mem[uint64(out) : uint64(out)+uint64(n)*32])
 	for i, index := range ready {
 		sub := subs[index]
 		b := mem[out+uint32(i)*32:]

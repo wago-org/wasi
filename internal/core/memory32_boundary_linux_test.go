@@ -117,10 +117,10 @@ func TestMemory32EndBoundary(t *testing.T) {
 	})
 	t.Run("strings cannot wrap", func(t *testing.T) {
 		boundaryCall(t, func() {
-		mem[0] = 0x7b
-		code := writeStrings(mem, 64, uint32(end-1), []string{"", "x"})
-		if code != wasiEFault || mem[0] != 0x7b {
-			t.Fatalf("writeStrings = %d, sentinel = %#x", code, mem[0])
+			mem[0] = 0x7b
+			code := writeStrings(mem, 64, uint32(end-1), []string{"", "x"})
+			if code != wasiEFault || mem[0] != 0x7b {
+				t.Fatalf("writeStrings = %d, sentinel = %#x", code, mem[0])
 			}
 		})
 	})

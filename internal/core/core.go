@@ -859,14 +859,14 @@ func validateMount(mount Preopen) error {
 // Go panic that would abort the whole instance) ---
 
 func le32(mem []byte, off uint32) (uint32, bool) {
-	if int(off)+4 > len(mem) {
+	if !validMemoryRange(mem, off, 4) {
 		return 0, false
 	}
 	return binary.LittleEndian.Uint32(mem[off:]), true
 }
 
 func putLe32(mem []byte, off, v uint32) bool {
-	if int(off)+4 > len(mem) {
+	if !validMemoryRange(mem, off, 4) {
 		return false
 	}
 	binary.LittleEndian.PutUint32(mem[off:], v)
@@ -874,7 +874,7 @@ func putLe32(mem []byte, off, v uint32) bool {
 }
 
 func putLe64(mem []byte, off uint32, v uint64) bool {
-	if int(off)+8 > len(mem) {
+	if !validMemoryRange(mem, off, 8) {
 		return false
 	}
 	binary.LittleEndian.PutUint64(mem[off:], v)
@@ -1073,7 +1073,7 @@ func (e *Plugin) fdFdstatGet(m wago.HostModule, p, r []uint64) {
 		return
 	}
 	mem := m.Memory()
-	if int(buf)+24 > len(mem) {
+	if !validMemoryRange(mem, buf, 24) {
 		r[0] = wasiEFault
 		return
 	}
@@ -1101,10 +1101,10 @@ func (e *Plugin) fdPrestatGet(m wago.HostModule, p, r []uint64) {
 	}
 	if code == 0 {
 		mem, ptr := m.Memory(), uint32(p[1])
-		if uint64(ptr)+8 > uint64(len(mem)) {
+		if !validMemoryRange(mem, ptr, 8) {
 			code = wasiEFault
 		} else {
-			clear(mem[ptr : ptr+8])
+			clear(mem[uint64(ptr) : uint64(ptr)+8])
 			binary.LittleEndian.PutUint32(mem[ptr+4:], uint32(len(f.preopen)))
 		}
 	}
@@ -1165,17 +1165,16 @@ func writeCounts(mem []byte, countPtr, sizePtr uint32, items []string) uint64 {
 
 // writeStrings writes the pointer array then the packed NUL-terminated strings.
 func writeStrings(mem []byte, ptrArray, buf uint32, items []string) uint64 {
-	cur := buf
+	cur := uint64(buf)
 	for i, s := range items {
-		if !putLe32(mem, ptrArray+uint32(i)*4, cur) {
+		entry := uint64(ptrArray) + uint64(i)*4
+		if entry+4 > uint64(len(mem)) || cur+uint64(len(s))+1 > uint64(len(mem)) || cur > uint64(^uint32(0)) {
 			return wasiEFault
 		}
-		if int(cur)+len(s)+1 > len(mem) {
-			return wasiEFault
-		}
+		binary.LittleEndian.PutUint32(mem[entry:], uint32(cur))
 		copy(mem[cur:], s)
-		mem[cur+uint32(len(s))] = 0
-		cur += uint32(len(s)) + 1
+		mem[cur+uint64(len(s))] = 0
+		cur += uint64(len(s)) + 1
 	}
 	return wasiOK
 }
@@ -1219,7 +1218,7 @@ func (e *Plugin) clockResGet(m wago.HostModule, p, r []uint64) {
 func (e *Plugin) randomGet(m wago.HostModule, p, r []uint64) {
 	buf, n := uint32(p[0]), uint32(p[1])
 	mem := m.Memory()
-	if int(buf)+int(n) > len(mem) {
+	if !validMemoryRange(mem, buf, n) {
 		r[0] = wasiEFault
 		return
 	}
@@ -1227,7 +1226,7 @@ func (e *Plugin) randomGet(m wago.HostModule, p, r []uint64) {
 	if src == nil {
 		src = rand.Reader
 	}
-	if _, err := io.ReadFull(src, mem[buf:buf+n]); err != nil {
+	if _, err := io.ReadFull(src, mem[uint64(buf):uint64(buf)+uint64(n)]); err != nil {
 		r[0] = wasiEIo
 		return
 	}

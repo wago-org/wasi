@@ -304,7 +304,7 @@ func guestBytes(mem []byte, ptr, n uint32) (string, uint64) {
 	if uint64(ptr)+uint64(n) > uint64(len(mem)) {
 		return "", wasiEFault
 	}
-	b := mem[ptr : ptr+n]
+	b := mem[uint64(ptr) : uint64(ptr)+uint64(n)]
 	if strings.IndexByte(string(b), 0) >= 0 {
 		return "", wasiEInval
 	}
@@ -429,7 +429,7 @@ func (e *Plugin) iovecs(mem []byte, ptr, count uint32) ([][]byte, uint64) {
 		if total > uint64(^uint32(0)) {
 			return nil, wasiEOverflow
 		}
-		bufs = append(bufs, mem[base:base+n])
+		bufs = append(bufs, mem[uint64(base):uint64(base)+uint64(n)])
 	}
 	return bufs, wasiOK
 }
@@ -438,7 +438,7 @@ func writeFilestat(mem []byte, ptr uint32, info os.FileInfo) uint64 {
 	if uint64(ptr)+64 > uint64(len(mem)) {
 		return wasiEFault
 	}
-	b := mem[ptr : ptr+64]
+	b := mem[uint64(ptr) : uint64(ptr)+64]
 	clear(b)
 	dev, ino, nlink, atim, ctim := hostFileStat(info)
 	binary.LittleEndian.PutUint64(b[0:], dev)
@@ -1262,7 +1262,7 @@ func (e *Plugin) pathReadlink(m wago.HostModule, p, r []uint64) {
 		if used > int(n) {
 			used = int(n)
 		}
-		copy(m.Memory()[buf:buf+uint32(used)], target[:used])
+		copy(m.Memory()[uint64(buf):uint64(buf)+uint64(used)], target[:used])
 		if !putLe32(m.Memory(), uint32(p[5]), uint32(used)) {
 			code = wasiEFault
 		}
