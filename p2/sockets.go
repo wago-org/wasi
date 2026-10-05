@@ -2,6 +2,7 @@ package p2
 
 import (
 	"context"
+	"fmt"
 
 	component "github.com/wago-org/component-model"
 )
@@ -18,13 +19,35 @@ const (
 
 const socketAccessDenied uint32 = 1
 
+func (s *hostState) acquireNetwork() ([]component.Value, error) {
+	s.mu.Lock()
+	if s.networks >= s.limits.MaxNetworkHandles {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("wasi p2: network handle quota exceeded")
+	}
+	s.networks++
+	s.mu.Unlock()
+	return []component.Value{uint32(1)}, nil
+}
+
+func (s *hostState) releaseNetwork(rep uint32) {
+	if rep != 1 {
+		return
+	}
+	s.mu.Lock()
+	if s.networks != 0 {
+		s.networks--
+	}
+	s.mu.Unlock()
+}
+
 // socketOptions deliberately contains no net.Conn, net.Dialer, listener, or
 // resolver. It implements the socket capability boundary while networking is
 // disabled: attempts become ordinary WASI access-denied results, not missing
 // import traps and not ambient host network access.
-func socketOptions() []component.Option {
+func socketOptions(s *hostState) []component.Option {
 	instanceNetwork := func(context.Context, []component.Value) ([]component.Value, error) {
-		return []component.Value{uint32(1)}, nil
+		return s.acquireNetwork()
 	}
 	denied := func(context.Context, []component.Value) ([]component.Value, error) {
 		return []component.Value{component.ResultValue{IsErr: true, Payload: socketAccessDenied}}, nil
@@ -38,6 +61,10 @@ func socketOptions() []component.Option {
 	}
 	opts := []component.Option{
 		component.WithResourceTag(ifaceNetwork, "network", networkResource),
+		component.WithHostResourceDtor(networkResource, func(_ context.Context, rep uint32) error {
+			s.releaseNetwork(rep)
+			return nil
+		}),
 		component.WithResourceTag("wasi:sockets/tcp@0.2.0", "tcp-socket", tcpSocketResource),
 		component.WithResourceTag("wasi:sockets/udp@0.2.0", "udp-socket", udpSocketResource),
 		component.WithResourceTag(ifaceIPNameLookup, "resolve-address-stream", resolveStreamResource),

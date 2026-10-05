@@ -275,6 +275,11 @@
                   "minimum": 1,
                   "type": "integer"
                 },
+                "maxNetworkHandles": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "maxPollInputs": {
                   "maximum": 65536,
                   "minimum": 1,
@@ -364,7 +369,7 @@
           }
         ]
       },
-      "definitionDigest": "sha256:bd147c04177f767248425d359eab1eac2803fb6b0fda68767c8275a9b6202be4"
+      "definitionDigest": "sha256:84aef065c6a19121c43e4bf39b73e94f5817026ee255469cf9af9c0bf3428318"
     }
   ]
 }
