@@ -1153,6 +1153,11 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	if code == 0 && !validMemoryRange(m.Memory(), uint32(p[8]), 4) {
 		code = wasiEFault
 	}
+	// O_CREAT and O_TRUNC can change the host filesystem during openAt. The
+	// guest descriptor limit must be checked before either flag reaches it.
+	if code == 0 && uint32(len(e.fs.fds)) >= e.fs.maxFDs {
+		code = wasiEMfile
+	}
 	flags := 0
 	read, write := rights&rightFDRead != 0, rights&rightFDWrite != 0
 	hostWrite := write || rights&(rightFDAllocate|rightFDFilestatSetSize) != 0 || oflags&8 != 0
