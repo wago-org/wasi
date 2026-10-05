@@ -750,11 +750,14 @@ func (e *Plugin) fdReaddir(m wago.HostModule, p, r []uint64) {
 			info, err = f.file.Stat()
 		} else {
 			entries, readErr := f.dirIter.ReadDir(1)
-			if errors.Is(readErr, io.EOF) || len(entries) == 0 {
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				code = errno(readErr)
 				break
 			}
-			if readErr != nil {
-				code = errno(readErr)
+			if len(entries) == 0 {
 				break
 			}
 			f.dirCookie = i + 1
@@ -820,19 +823,26 @@ func positionDirectory(f *fdEntry, cookie uint64) uint64 {
 	if cookie > 2 {
 		remaining = cookie - 2
 	}
+	return skipDirectoryEntries(f, remaining)
+}
+
+func skipDirectoryEntries(f *fdEntry, remaining uint64) uint64 {
 	for remaining > 0 {
 		step := remaining
 		if step > 1024 {
 			step = 1024
 		}
-		entries, err := dir.ReadDir(int(step))
+		entries, err := f.dirIter.ReadDir(int(step))
 		f.dirCookie += uint64(len(entries))
 		remaining -= uint64(len(entries))
-		if errors.Is(err, io.EOF) || len(entries) == 0 {
-			return wasiOK
-		}
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return wasiOK
+			}
 			return errno(err)
+		}
+		if len(entries) == 0 {
+			return wasiOK
 		}
 	}
 	return wasiOK
