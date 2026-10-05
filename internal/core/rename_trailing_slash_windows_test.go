@@ -31,3 +31,27 @@ func TestWindowsRenameTrailingSlashExistingDirectoryFailsClosed(t *testing.T) {
 		t.Fatalf("destination changed: %v, %v", entries, err)
 	}
 }
+
+func TestWindowsRenameMixedTerminalSeparators(t *testing.T) {
+	for _, tc := range []struct{ source, destination string }{
+		{`source/\`, "target"},
+		{`source\/`, "target"},
+		{"source", `target/\`},
+		{"source", `target\/`},
+	} {
+		t.Run(tc.source+"_to_"+tc.destination, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "source"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
+			defer e.closeAll()
+			if code := callRenameForTest(e, 3, tc.source, 3, tc.destination); code != wasiOK {
+				t.Fatalf("rename %q -> %q = %d, want OK", tc.source, tc.destination, code)
+			}
+			if info, err := os.Stat(filepath.Join(root, "target")); err != nil || !info.IsDir() {
+				t.Fatalf("target directory = %v, %v", info, err)
+			}
+		})
+	}
+}
