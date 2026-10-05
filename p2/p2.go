@@ -618,16 +618,10 @@ func instanceOptions(cfg Config) []component.Option {
 		if err != nil {
 			return nil, err
 		}
-		permit, err := w.CheckWrite()
+		permit, err := s.probeWritePermit(rep, w)
 		if err != nil {
 			return s.streamFailure(err)
 		}
-		if permit > limits.ioLimit() {
-			permit = limits.ioLimit()
-		}
-		s.mu.Lock()
-		s.permits[rep] = permit
-		s.mu.Unlock()
 		return []component.Value{component.ResultValue{Payload: permit}}, nil
 	}
 	write := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -687,8 +681,8 @@ func instanceOptions(cfg Config) []component.Option {
 			return nil, err
 		}
 		for len(buf) > 0 {
-			if err := w.WaitWritable(ctx); err != nil {
-				return nil, err
+			if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+				return values, err
 			}
 			values, err := checkWrite(ctx, []component.Value{rep})
 			if err != nil {
@@ -715,14 +709,17 @@ func instanceOptions(cfg Config) []component.Option {
 			}
 			buf = buf[n:]
 		}
-		if err := w.WaitWritable(ctx); err != nil {
-			return nil, err
+		if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+			return values, err
 		}
 		if err := w.BeginFlush(); err != nil {
 			return s.streamFailure(err)
 		}
-		if err := w.WaitWritable(ctx); err != nil {
-			return nil, err
+		if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+			return values, err
+		}
+		if _, err := s.probeWritePermit(rep, w); err != nil {
+			return s.streamFailure(err)
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}
@@ -748,14 +745,17 @@ func instanceOptions(cfg Config) []component.Option {
 		if err != nil {
 			return nil, err
 		}
-		if err := w.WaitWritable(ctx); err != nil {
-			return nil, err
+		if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+			return values, err
 		}
 		if err := w.BeginFlush(); err != nil {
 			return s.streamFailure(err)
 		}
-		if err := w.WaitWritable(ctx); err != nil {
-			return nil, err
+		if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+			return values, err
+		}
+		if _, err := s.probeWritePermit(rep, w); err != nil {
+			return s.streamFailure(err)
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}

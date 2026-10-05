@@ -3,6 +3,8 @@
 This small component calls each blocking output operation through the Canonical
 ABI and returns the result and stream-error discriminators. It verifies that
 ordinary asynchronous write/flush failures reach the guest as a typed result.
+The additional `flush-and-write` export checks that the post-flush probe replaces
+the earlier write permit, including shrinking capacity and failed probes.
 The checked-in binary is built from the adjacent WAT source:
 
 ```sh

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	component "github.com/wago-org/component-model"
@@ -150,5 +151,72 @@ func TestBlockingOutputChecksCompletedFlushError(t *testing.T) {
 				t.Fatalf("completed flush = %#x, %v; want typed last-operation-failed", got, err)
 			}
 		})
+	}
+}
+
+// CheckWrite grants a smaller capacity after flush. The host must replace the
+// earlier grant even when the blocking operation itself writes no bytes.
+type shrinkingOutput struct {
+	err     error
+	flushed bool
+	after   uint64
+	writes  int
+	bytes   int
+}
+
+func (o *shrinkingOutput) CheckWrite() (uint64, error) {
+	if o.flushed {
+		return o.after, o.err
+	}
+	return 64, nil
+}
+func (o *shrinkingOutput) TryWrite(p []byte) error          { o.writes++; o.bytes += len(p); return nil }
+func (o *shrinkingOutput) BeginFlush() error                { o.flushed = true; return nil }
+func (*shrinkingOutput) WaitWritable(context.Context) error { return nil }
+
+func TestBlockingOutputRefreshesWritePermit(t *testing.T) {
+	for operation, name := range []string{"empty-write-and-flush", "empty-write-zeroes-and-flush", "flush"} {
+		for _, tc := range []struct {
+			name       string
+			capacity   uint64
+			length     uint32
+			rejected   bool
+			probeError bool
+		}{
+			{"shrinking", 3, 4, true, false},
+			{"zero-capacity", 0, 1, true, false},
+			{"current-capacity", 3, 3, false, false},
+			{"io-limit", 4096, 33, true, false},
+			{"probe-error", 0, 1, true, true},
+		} {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				_, ref := optionsTestService(t)
+				out := &shrinkingOutput{after: tc.capacity}
+				if tc.probeError {
+					out.err = errors.New("probe failed")
+				}
+				err := ref.With(func(service component.Service) error {
+					return service.WithInstance(context.Background(), blockingOutputErrorsComponent, func(in *component.Instance) error {
+						_, err := in.Call(context.Background(), "flush-and-write", uint32(operation), tc.length)
+						if tc.rejected {
+							if err == nil || !strings.Contains(err.Error(), "permit") {
+								return fmt.Errorf("write exceeding current permit = %v, want permit trap", err)
+							}
+							if out.writes != 0 {
+								return fmt.Errorf("stale permit reached writer: %d writes/%d bytes", out.writes, out.bytes)
+							}
+							return nil
+						}
+						if err == nil && (out.writes != 1 || out.bytes != int(tc.length)) {
+							return fmt.Errorf("current permit write = %d writes/%d bytes", out.writes, out.bytes)
+						}
+						return err
+					}, p2.Options(p2.Config{Stdout: out, Limits: p2.Limits{MaxAggregateBufferBytes: 32}})...)
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
 	}
 }
