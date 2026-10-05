@@ -779,9 +779,7 @@ func instanceOptions(cfg Config) []component.Option {
 			return values, nil
 		}
 		buf := make([]byte, int(n))
-		s.stdinMu.Lock()
-		got, err := s.stdin.TryRead(buf)
-		s.stdinMu.Unlock()
+		got, err := s.readStdin(buf)
 		if errors.Is(err, ErrWouldBlock) {
 			return []component.Value{component.ResultValue{Payload: []byte{}}}, nil
 		}

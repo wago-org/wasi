@@ -246,6 +246,13 @@ func (p *prefixedInput) WaitReadable(ctx context.Context) error {
 	}
 	return p.next.WaitReadable(ctx)
 }
+
+func (s *hostState) readStdin(dst []byte) (int, error) {
+	s.stdinMu.Lock()
+	defer s.stdinMu.Unlock()
+	return s.stdin.TryRead(dst)
+}
+
 func inputReady(s *hostState) bool {
 	s.stdinMu.Lock()
 	defer s.stdinMu.Unlock()
