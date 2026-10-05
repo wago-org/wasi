@@ -1310,6 +1310,7 @@ func (e *Plugin) pathUnlinkFile(m wago.HostModule, p, r []uint64) {
 func (e *Plugin) pathRename(m wago.HostModule, p, r []uint64) {
 	oldName, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
 	newName, code2 := guestBytes(m.Memory(), uint32(p[4]), uint32(p[5]))
+	oldRaw, newRaw := oldName, newName
 	od, oldName, c1 := e.resolve(uint32(p[0]), oldName)
 	nd, newName, c2 := e.resolve(uint32(p[3]), newName)
 	for _, c := range []uint64{code2, c1, c2} {
@@ -1333,13 +1334,35 @@ func (e *Plugin) pathRename(m wago.HostModule, p, r []uint64) {
 			newParent, newLeaf, newCode := openParent(nd, newName)
 			code = newCode
 			if code == 0 {
-				code = errno(renameAt(oldParent, oldLeaf, newParent, newLeaf))
+				code = renameAt(oldParent, renameLeaf(oldRaw, oldLeaf), newParent, renameLeaf(newRaw, newLeaf))
 				_ = newParent.Close()
 			}
 			_ = oldParent.Close()
 		}
 	}
 	r[0] = code
+}
+
+// Retain the directory requirement after resolve removes terminal slashes.
+// Borrow a slash from the original path rather than allocating a new leaf.
+// A terminal parent step is pinned with leaf "." and remains a directory.
+func renameLeaf(original, leaf string) string {
+	if !strings.HasSuffix(original, "/") {
+		return leaf
+	}
+	if leaf == "." {
+		return "./"
+	}
+	for end := len(original) - 1; end > 0; {
+		start := strings.LastIndexByte(original[:end], '/') + 1
+		if original[start:end] == leaf {
+			return original[start : end+1]
+		}
+		end = start - 1
+	}
+	// Preserve the requirement if a future caller supplies a leaf that was
+	// not produced by resolve. Valid guest paths always use the borrowed slice.
+	return leaf + "/"
 }
 
 func (e *Plugin) pathSymlink(m wago.HostModule, p, r []uint64) {

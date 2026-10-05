@@ -196,11 +196,20 @@ func MkdirAt(root windows.Handle, name string) error {
 }
 
 func openForMutation(root windows.Handle, name string, directory int, access uint32) (windows.Handle, error) {
-	oa, err := objectAttributes(root, name, false)
+	return openForMutationChecked(root, name, directory, access, false)
+}
+
+func openForMutationChecked(root windows.Handle, name string, directory int, access uint32, noReparse bool) (windows.Handle, error) {
+	oa, err := objectAttributes(root, name, noReparse)
 	if err != nil {
 		return windows.InvalidHandle, err
 	}
 	options := uint32(windows.FILE_OPEN_REPARSE_POINT | windows.FILE_OPEN_FOR_BACKUP_INTENT | windows.FILE_SYNCHRONOUS_IO_NONALERT)
+	if noReparse {
+		// Let OBJ_DONT_REPARSE reject a link before reparse processing. Opening
+		// the reparse point itself could accept a directory link as a directory.
+		options &^= windows.FILE_OPEN_REPARSE_POINT
+	}
 	if directory > 0 {
 		options |= windows.FILE_DIRECTORY_FILE
 	} else if directory == 0 {
@@ -211,6 +220,10 @@ func openForMutation(root windows.Handle, name string, directory int, access uin
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		windows.FILE_OPEN, options, 0, 0)
 	if err != nil {
+		if noReparse && directory > 0 && err == windows.STATUS_NOT_A_DIRECTORY {
+			// syscall.ENOTDIR aliases ERROR_PATH_NOT_FOUND on Windows.
+			return windows.InvalidHandle, windows.ERROR_DIRECTORY
+		}
 		return windows.InvalidHandle, errno(err)
 	}
 	return handle, nil
@@ -300,7 +313,19 @@ type linkInformation struct {
 }
 
 func RenameAt(oldRoot windows.Handle, oldName string, newRoot windows.Handle, newName string) error {
-	h, err := openForMutation(oldRoot, oldName, -1, windows.DELETE)
+	return RenameAtDirectories(oldRoot, oldName, newRoot, newName, false, false)
+}
+
+// RenameAtDirectories retains POSIX trailing-slash requirements. Requiring a
+// directory source also prevents a regular file being moved to a new name with
+// a trailing slash. The source handle pins the object through the mutation.
+func RenameAtDirectories(oldRoot windows.Handle, oldName string, newRoot windows.Handle, newName string, oldDirectory, newDirectory bool) error {
+	requireDirectory := oldDirectory || newDirectory
+	directory := -1
+	if requireDirectory {
+		directory = 1
+	}
+	h, err := openForMutationChecked(oldRoot, oldName, directory, windows.DELETE, requireDirectory)
 	if err != nil {
 		return err
 	}
@@ -309,10 +334,49 @@ func RenameAt(oldRoot windows.Handle, oldName string, newRoot windows.Handle, ne
 	if err != nil || len(name) > windows.MAX_PATH {
 		return syscall.EINVAL
 	}
+	if newDirectory {
+		if err := renameDirectoryTarget(newRoot, name); err != nil {
+			return err
+		}
+	}
 	info := renameInformation{ReplaceIfExists: 1, RootDirectory: newRoot, FileNameLength: uint32((len(name) - 1) * 2)}
+	if newDirectory {
+		// The destination preflight is not atomic with the rename. Refuse any
+		// target that appears or changes after it, including a file or link.
+		// Native rename cannot replace an existing directory atomically with
+		// a type check, so trailing-destination renames fail closed there.
+		info.ReplaceIfExists = 0
+	}
 	copy(info.FileName[:], name)
 	err = windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), fileRenameInformation)
 	return errno(err)
+}
+
+var renameNtCreateFile = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtCreateFile")
+
+func renameDirectoryTarget(root windows.Handle, name []uint16) error {
+	// Reuse the rename's UTF-16 name, with stack-only native metadata structs.
+	unicodeName := windows.NTUnicodeString{Length: uint16((len(name) - 1) * 2), MaximumLength: uint16(len(name) * 2), Buffer: &name[0]}
+	attrs := windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: root, ObjectName: &unicodeName, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	// Keep a missing optional destination as a numeric NTSTATUS. The typed
+	// NtCreateFile wrapper boxes that expected status into a heap error.
+	result, _, _ := syscall.SyscallN(renameNtCreateFile.Addr(), uintptr(unsafe.Pointer(&handle)),
+		windows.SYNCHRONIZE, uintptr(unsafe.Pointer(&attrs)), uintptr(unsafe.Pointer(&status)), 0, 0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	if ntStatus := windows.NTStatus(result); ntStatus != 0 {
+		if ntStatus == windows.STATUS_OBJECT_NAME_NOT_FOUND || ntStatus == windows.STATUS_NO_SUCH_FILE {
+			return nil // A directory source may be moved to a nonexistent leaf.
+		}
+		if ntStatus == windows.STATUS_NOT_A_DIRECTORY {
+			return windows.ERROR_DIRECTORY
+		}
+		return errno(ntStatus)
+	}
+	return windows.CloseHandle(handle)
 }
 
 func LinkAt(oldRoot windows.Handle, oldName string, newRoot windows.Handle, newName string) error {

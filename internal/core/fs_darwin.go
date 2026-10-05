@@ -267,13 +267,40 @@ func removeAt(parent *os.File, name string, directory bool) error {
 	return unix.Unlinkat(int(parent.Fd()), name, flags)
 }
 
-func renameAt(oldParent *os.File, oldName string, newParent *os.File, newName string) error {
+func renameAt(oldParent *os.File, oldName string, newParent *os.File, newName string) uint64 {
+	if strings.HasSuffix(oldName, "/") || strings.HasSuffix(newName, "/") {
+		return renameTrailingAtDarwin(int(oldParent.Fd()), oldName, int(newParent.Fd()), newName, unix.RenameatxNp)
+	}
 	err := unix.Renameat(int(oldParent.Fd()), oldName, int(newParent.Fd()), newName)
 	// renameat(2) permits EEXIST for a non-empty target directory, but WASI expects ENOTEMPTY.
 	if err == unix.EEXIST {
-		return unix.ENOTEMPTY
+		return wasiENotempty
 	}
-	return err
+	return errno(err)
+}
+
+func renameTrailingAtDarwin(oldFD int, oldName string, newFD int, newName string, rename func(int, string, int, string, uint32) error) uint64 {
+	// Classic Darwin rename follows directory symlinks with a trailing slash.
+	// Require the kernel's no-follow flag so the pinned parent remains the
+	// capability boundary. Older kernels without this flag return ENOTSUP;
+	// there is no unflagged retry or metadata-check/mutation race fallback.
+	err := rename(oldFD, oldName, newFD, newName, unix.RENAME_NOFOLLOW_ANY)
+	if err == unix.ENOTSUP {
+		return wasiENotsup
+	}
+	if err == unix.EINVAL || err == unix.ENOSYS {
+		// EINVAL can also describe a supported, invalid rename (such as '.').
+		// Invalid descriptors and empty paths provide a non-mutating probe:
+		// kernels reject unsupported flags before resolving either pathname.
+		probe := rename(-1, "", -1, "", unix.RENAME_NOFOLLOW_ANY)
+		if probe == unix.EINVAL || probe == unix.ENOSYS || probe == unix.ENOTSUP {
+			return wasiENotsup
+		}
+	}
+	if err == unix.EEXIST {
+		return wasiENotempty
+	}
+	return errno(err)
 }
 
 func symlinkAt(target string, parent *os.File, name string) error {

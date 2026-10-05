@@ -475,8 +475,10 @@ func removeAt(parent *os.File, name string, directory bool) error {
 	return winfs.DeleteAt(windows.Handle(parent.Fd()), name, directory)
 }
 
-func renameAt(oldParent *os.File, oldName string, newParent *os.File, newName string) error {
-	return winfs.RenameAt(windows.Handle(oldParent.Fd()), oldName, windows.Handle(newParent.Fd()), newName)
+func renameAt(oldParent *os.File, oldName string, newParent *os.File, newName string) uint64 {
+	oldDirectory, newDirectory := strings.HasSuffix(oldName, "/"), strings.HasSuffix(newName, "/")
+	return errno(winfs.RenameAtDirectories(windows.Handle(oldParent.Fd()), strings.TrimSuffix(oldName, "/"),
+		windows.Handle(newParent.Fd()), strings.TrimSuffix(newName, "/"), oldDirectory, newDirectory))
 }
 
 func symlinkAt(target string, parent *os.File, name string) error {

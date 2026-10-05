@@ -224,13 +224,13 @@ func removeAt(parent *os.File, name string, directory bool) error {
 	return unix.Unlinkat(int(parent.Fd()), name, flags)
 }
 
-func renameAt(oldParent *os.File, oldName string, newParent *os.File, newName string) error {
+func renameAt(oldParent *os.File, oldName string, newParent *os.File, newName string) uint64 {
 	err := unix.Renameat(int(oldParent.Fd()), oldName, int(newParent.Fd()), newName)
 	// renameat(2) permits EEXIST for a non-empty target directory, but WASI expects ENOTEMPTY.
 	if err == unix.EEXIST {
-		return unix.ENOTEMPTY
+		return wasiENotempty
 	}
-	return err
+	return errno(err)
 }
 
 func symlinkAt(target string, parent *os.File, name string) error {

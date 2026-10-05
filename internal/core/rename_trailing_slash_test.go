@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -16,14 +17,17 @@ func callRenameForTest(e *Plugin, oldFD uint32, oldName string, newFD uint32, ne
 }
 
 func TestPathRenameTrailingSlashRejectsRegularFiles(t *testing.T) {
-	for _, tc := range []struct{ name, oldName, newName, destination string }{
-		{"source", "source/", "renamed", "missing"},
-		{"destination missing", "source", "renamed/", "missing"},
-		{"destination file", "source", "renamed/", "file"},
-		{"destination directory", "source", "renamed/", "directory"},
-		{"both", "source///", "renamed///", "file"},
-		{"cleaned source", "source/./", "renamed", "missing"},
-		{"cleaned destination", "source", "renamed/./", "file"},
+	for _, tc := range []struct {
+		name, oldName, newName, destination string
+		darwinCode                          uint64
+	}{
+		{"source", "source/", "renamed", "missing", 0},
+		{"destination missing", "source", "renamed/", "missing", wasiENoent},
+		{"destination file", "source", "renamed/", "file", 0},
+		{"destination directory", "source", "renamed/", "directory", wasiEIsdir},
+		{"both", "source///", "renamed///", "file", 0},
+		{"cleaned source", "source/./", "renamed", "missing", 0},
+		{"cleaned destination", "source", "renamed/./", "file", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -41,8 +45,14 @@ func TestPathRenameTrailingSlashRejectsRegularFiles(t *testing.T) {
 			}
 			e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
 			defer e.closeAll()
-			if code := callRenameForTest(e, 3, tc.oldName, 3, tc.newName); code != wasiENotdir {
-				t.Errorf("rename %q -> %q = %d, want ENOTDIR", tc.oldName, tc.newName, code)
+			want := uint64(wasiENotdir)
+			if runtime.GOOS == "darwin" && tc.darwinCode != 0 {
+				// Darwin's no-follow rename resolves a missing destination slash
+				// before the source type, and reports EISDIR for a directory target.
+				want = tc.darwinCode
+			}
+			if code := callRenameForTest(e, 3, tc.oldName, 3, tc.newName); code != want {
+				t.Errorf("rename %q -> %q = %d, want %d", tc.oldName, tc.newName, code, want)
 			}
 			if contents, err := os.ReadFile(filepath.Join(root, "source")); err != nil || string(contents) != "source data" {
 				t.Fatalf("failed rename changed source: %q, %v", contents, err)
@@ -169,10 +179,11 @@ func TestPathRenameTrailingSlashRejectsLeafLinks(t *testing.T) {
 	for _, tc := range []struct {
 		name, oldName, newName string
 		sourceLink             bool
+		darwinCode             uint64
 	}{
-		{"source", "link/", "renamed", true},
-		{"source requires directory destination", "link", "renamed/", true},
-		{"destination", "source", "link/", false},
+		{"source", "link/", "renamed", true, 0},
+		{"source requires directory destination", "link", "renamed/", true, wasiENoent},
+		{"destination", "source", "link/", false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -197,8 +208,9 @@ func TestPathRenameTrailingSlashRejectsLeafLinks(t *testing.T) {
 			}
 			e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
 			defer e.closeAll()
-			if code := callRenameForTest(e, 3, tc.oldName, 3, tc.newName); code != wasiENotdir && code != wasiELoop {
-				t.Fatalf("rename leaf link = %d, want ENOTDIR or ELOOP", code)
+			code := callRenameForTest(e, 3, tc.oldName, 3, tc.newName)
+			if code != wasiENotdir && code != wasiELoop && !(runtime.GOOS == "darwin" && code == tc.darwinCode && tc.darwinCode != 0) {
+				t.Fatalf("rename leaf link = %d, want ENOTDIR, ELOOP, or Darwin errno %d", code, tc.darwinCode)
 			}
 			if link, err := os.Readlink(filepath.Join(root, "link")); err != nil || link != "directory" {
 				t.Fatalf("rename changed link: %q, %v", link, err)
