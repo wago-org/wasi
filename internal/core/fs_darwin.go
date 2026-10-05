@@ -262,17 +262,82 @@ func linkAtFollow(_ *fdEntry, _ string, _ *os.File, _ string) uint64 {
 }
 
 func allocateFile(file *os.File, offset, length int64) error {
-	store := &unix.Fstore_t{Flags: unix.F_ALLOCATEALL, Posmode: unix.F_PEOFPOSMODE, Offset: offset, Length: length}
-	if err := unix.FcntlFstore(file.Fd(), unix.F_PREALLOCATE, store); err != nil {
-		return err
+	if offset < 0 || length < 0 || offset > int64(maxInt64Value)-length {
+		return unix.EINVAL
 	}
 	end := offset + length
-	info, err := file.Stat()
+	var info unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &info); err != nil {
+		return err
+	}
+	if info.Mode&unix.S_IFMT != unix.S_IFREG {
+		store := unix.Fstore_t{Flags: unix.F_ALLOCATEALL, Posmode: unix.F_PEOFPOSMODE, Length: end}
+		return unix.FcntlFstore(file.Fd(), unix.F_PREALLOCATE, &store)
+	}
+	flags, err := unix.FcntlInt(file.Fd(), unix.F_GETFL, 0)
 	if err != nil {
 		return err
 	}
-	if info.Size() < end {
+	if flags&unix.O_ACCMODE == unix.O_RDONLY {
+		return unix.EBADF
+	}
+	if info.Blocks < 0 || info.Blocks > int64(maxInt64Value)/512 {
+		return unix.EOVERFLOW
+	}
+	// st_blocks counts allocated 512-byte blocks, including preallocation.
+	// Logical size cannot measure physical EOF: a sparse file may be much larger.
+	allocated := info.Blocks * 512
+	// Aggregate block counts can include reservations past logical EOF, so they
+	// cannot prove that the existing portion of this range has no holes.
+	if err := requireDarwinBacking(file, offset, end, info.Size); err != nil {
+		return err
+	}
+	if end > allocated {
+		// F_PEOFPOSMODE requires offset zero and adds Length to physical EOF.
+		// Request only the missing capacity, so repeated calls do not grow it.
+		store := unix.Fstore_t{Flags: unix.F_ALLOCATEALL, Posmode: unix.F_PEOFPOSMODE, Length: end - allocated}
+		if err := unix.FcntlFstore(file.Fd(), unix.F_PREALLOCATE, &store); err != nil {
+			return err
+		}
+	}
+	if info.Size < end {
 		return file.Truncate(end)
+	}
+	return nil
+}
+
+// requireDarwinBacking conservatively accepts only existing ranges for which
+// the filesystem reports no holes. SEEK_HOLE may report unwritten allocated
+// extents as holes; reject these too rather than infer backing from st_blocks.
+// F_PREALLOCATE cannot select an arbitrary existing hole without changing data.
+func requireDarwinBacking(file *os.File, offset, end, size int64) error {
+	if offset >= size || offset == end {
+		return nil
+	}
+	existingEnd := end
+	if existingEnd > size {
+		existingEnd = size
+	}
+	fd := int(file.Fd())
+	original, err := unix.Seek(fd, 0, unix.SEEK_CUR)
+	if err != nil {
+		return err
+	}
+	hole, queryErr := unix.Seek(fd, offset, unix.SEEK_HOLE)
+	// Both successful and failed queries must leave the caller's offset intact.
+	if _, err := unix.Seek(fd, original, unix.SEEK_SET); err != nil {
+		return err
+	}
+	if queryErr != nil {
+		switch queryErr {
+		case unix.EINVAL, unix.EOPNOTSUPP, unix.ENOTTY, unix.ENOSYS:
+			return unix.EOPNOTSUPP
+		default:
+			return queryErr
+		}
+	}
+	if hole < existingEnd {
+		return unix.EOPNOTSUPP
 	}
 	return nil
 }
