@@ -19,13 +19,16 @@ func hostStat(info fs.FileInfo) (nlink uint64, atime, mtime, ctime time.Time, de
 	nlink = 1
 	if native, ok := info.(windowsFileStat); ok {
 		nlink = native.links
+		if native.changeTime != 0 {
+			ctime = filetimeTime(syscall.Filetime{LowDateTime: uint32(native.changeTime), HighDateTime: uint32(native.changeTime >> 32)})
+		}
 	}
 	mtime = info.ModTime()
 	if st, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
 		return nlink, filetimeTime(st.LastAccessTime), filetimeTime(st.LastWriteTime),
-			filetimeTime(st.CreationTime), 0, 0
+			ctime, 0, 0
 	}
-	return nlink, mtime, mtime, mtime, 0, 0
+	return nlink, mtime, mtime, ctime, 0, 0
 }
 
 func setFileTimes(f *os.File, atime, mtime time.Time) error {
