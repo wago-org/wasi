@@ -71,6 +71,30 @@ func TestPollableQuota(t *testing.T) {
 	}
 }
 
+func TestPollReportsOutputErrorAsReadiness(t *testing.T) {
+	failed := false
+	ready, err := waitPollables(context.Background(), []pollableValue{{
+		ready: func() bool { return failed },
+		wait: func(context.Context) error {
+			failed = true
+			return io.ErrClosedPipe
+		},
+	}})
+	if err != nil || len(ready) != 1 || ready[0] != uint32(0) {
+		t.Fatalf("poll after output error = %v, %v; want ready index 0", ready, err)
+	}
+}
+
+func TestPollPropagatesWaitErrorWithoutReadiness(t *testing.T) {
+	_, err := waitPollables(context.Background(), []pollableValue{{
+		ready: func() bool { return false },
+		wait:  func(context.Context) error { return context.Canceled },
+	}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("poll wait error = %v, want context cancellation", err)
+	}
+}
+
 func TestStreamAndErrorQuotas(t *testing.T) {
 	limits := Limits{MaxStreams: 2, MaxErrors: 1}.normalized()
 	fs := newFilesystem(nil, limits)
