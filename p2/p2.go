@@ -797,6 +797,7 @@ func instanceOptions(cfg Config) []component.Option {
 	blockingRead := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) == 2 {
 			if rep, ok := args[0].(uint32); ok && rep == stdinRep {
+				retryDelay := time.Millisecond
 				for {
 					s.stdinMu.Lock()
 					var err error
@@ -828,6 +829,21 @@ func instanceOptions(cfg Config) []component.Option {
 					}
 					if len(buf) != 0 {
 						return values, nil
+					}
+					// A competing reader may consume readiness before TryRead.
+					// Bound repeated transient retries and preserve cancellation.
+					timer := time.NewTimer(retryDelay)
+					select {
+					case <-timer.C:
+					case <-ctx.Done():
+						timer.Stop()
+						return nil, ctx.Err()
+					}
+					if retryDelay < 50*time.Millisecond {
+						retryDelay *= 2
+						if retryDelay > 50*time.Millisecond {
+							retryDelay = 50 * time.Millisecond
+						}
 					}
 				}
 			}
