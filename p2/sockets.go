@@ -18,13 +18,19 @@ const (
 
 const socketAccessDenied uint32 = 1
 
+func (s *hostState) acquireNetwork() ([]component.Value, error) {
+	return []component.Value{uint32(1)}, nil
+}
+
+func (s *hostState) releaseNetwork(uint32) {}
+
 // socketOptions deliberately contains no net.Conn, net.Dialer, listener, or
 // resolver. It implements the socket capability boundary while networking is
 // disabled: attempts become ordinary WASI access-denied results, not missing
 // import traps and not ambient host network access.
-func socketOptions() []component.Option {
+func socketOptions(s *hostState) []component.Option {
 	instanceNetwork := func(context.Context, []component.Value) ([]component.Value, error) {
-		return []component.Value{uint32(1)}, nil
+		return s.acquireNetwork()
 	}
 	denied := func(context.Context, []component.Value) ([]component.Value, error) {
 		return []component.Value{component.ResultValue{IsErr: true, Payload: socketAccessDenied}}, nil

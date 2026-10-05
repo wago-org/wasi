@@ -91,6 +91,7 @@ type Limits struct {
 	MaxStreams              uint32 `json:"maxStreams,omitempty"`
 	MaxErrors               uint32 `json:"maxErrors,omitempty"`
 	MaxDirectoryStreams     uint32 `json:"maxDirectoryStreams,omitempty"`
+	MaxNetworkHandles       uint32 `json:"maxNetworkHandles,omitempty"`
 	MaxPollables            uint32 `json:"maxPollables,omitempty"`
 	MaxPollInputs           uint32 `json:"maxPollInputs,omitempty"`
 	MaxDirectoryEntryBytes  uint64 `json:"maxDirectoryEntryBytes,omitempty"`
@@ -109,6 +110,9 @@ func (l Limits) normalized() Limits {
 	}
 	if l.MaxDirectoryStreams == 0 {
 		l.MaxDirectoryStreams = 64
+	}
+	if l.MaxNetworkHandles == 0 {
+		l.MaxNetworkHandles = 256
 	}
 	if l.MaxPollables == 0 {
 		l.MaxPollables = 1024
@@ -201,7 +205,7 @@ type pluginConfig struct {
 }
 
 func configSchema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"stdin":{"type":"string","enum":["inherit","eof"]},"stdout":{"type":"string","enum":["inherit","discard"]},"stderr":{"type":"string","enum":["inherit","discard"]},"env":{"type":"array","maxItems":4096,"items":{"type":"string","minLength":2,"maxLength":32768,"pattern":"^[^=\\u0000]+=[^\\u0000]*$"}},"mounts":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["guest","host"],"properties":{"guest":{"type":"string","pattern":"^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$","maxLength":4096},"host":{"type":"string","minLength":1,"maxLength":4096},"read":{"type":"boolean"},"write":{"type":"boolean"},"mutateDirectory":{"type":"boolean"}}}},"limits":{"type":"object","additionalProperties":false,"properties":{"maxDescriptors":{"type":"integer","minimum":1,"maximum":65536},"maxStreams":{"type":"integer","minimum":1,"maximum":65536},"maxErrors":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryStreams":{"type":"integer","minimum":1,"maximum":65536},"maxPollables":{"type":"integer","minimum":1,"maximum":65536},"maxPollInputs":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryEntryBytes":{"type":"integer","minimum":1,"maximum":16777216},"maxAggregateBufferBytes":{"type":"integer","minimum":1,"maximum":16777216}}}}}`)
+	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"stdin":{"type":"string","enum":["inherit","eof"]},"stdout":{"type":"string","enum":["inherit","discard"]},"stderr":{"type":"string","enum":["inherit","discard"]},"env":{"type":"array","maxItems":4096,"items":{"type":"string","minLength":2,"maxLength":32768,"pattern":"^[^=\\u0000]+=[^\\u0000]*$"}},"mounts":{"type":"array","maxItems":64,"items":{"type":"object","additionalProperties":false,"required":["guest","host"],"properties":{"guest":{"type":"string","pattern":"^/(?:[^/\\u0000]+(?:/[^/\\u0000]+)*)?$","maxLength":4096},"host":{"type":"string","minLength":1,"maxLength":4096},"read":{"type":"boolean"},"write":{"type":"boolean"},"mutateDirectory":{"type":"boolean"}}}},"limits":{"type":"object","additionalProperties":false,"properties":{"maxDescriptors":{"type":"integer","minimum":1,"maximum":65536},"maxStreams":{"type":"integer","minimum":1,"maximum":65536},"maxErrors":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryStreams":{"type":"integer","minimum":1,"maximum":65536},"maxNetworkHandles":{"type":"integer","minimum":1,"maximum":65536},"maxPollables":{"type":"integer","minimum":1,"maximum":65536},"maxPollInputs":{"type":"integer","minimum":1,"maximum":65536},"maxDirectoryEntryBytes":{"type":"integer","minimum":1,"maximum":16777216},"maxAggregateBufferBytes":{"type":"integer","minimum":1,"maximum":16777216}}}}}`)
 }
 
 type providerPlugin struct {
@@ -294,7 +298,7 @@ func validateLimits(l Limits) error {
 		name  string
 		value uint64
 		max   uint64
-	}{{"MaxDescriptors", uint64(l.MaxDescriptors), 65536}, {"MaxStreams", uint64(l.MaxStreams), 65536}, {"MaxErrors", uint64(l.MaxErrors), 65536}, {"MaxDirectoryStreams", uint64(l.MaxDirectoryStreams), 65536}, {"MaxPollables", uint64(l.MaxPollables), 65536}, {"MaxPollInputs", uint64(l.MaxPollInputs), 65536}, {"MaxDirectoryEntryBytes", l.MaxDirectoryEntryBytes, 16 << 20}, {"MaxAggregateBufferBytes", l.MaxAggregateBufferBytes, 16 << 20}}
+	}{{"MaxDescriptors", uint64(l.MaxDescriptors), 65536}, {"MaxStreams", uint64(l.MaxStreams), 65536}, {"MaxErrors", uint64(l.MaxErrors), 65536}, {"MaxDirectoryStreams", uint64(l.MaxDirectoryStreams), 65536}, {"MaxNetworkHandles", uint64(l.MaxNetworkHandles), 65536}, {"MaxPollables", uint64(l.MaxPollables), 65536}, {"MaxPollInputs", uint64(l.MaxPollInputs), 65536}, {"MaxDirectoryEntryBytes", l.MaxDirectoryEntryBytes, 16 << 20}, {"MaxAggregateBufferBytes", l.MaxAggregateBufferBytes, 16 << 20}}
 	for _, v := range values {
 		if v.value > v.max {
 			return fmt.Errorf("wasi p2: %s exceeds %d", v.name, v.max)
@@ -393,6 +397,7 @@ type hostState struct {
 	nextPollable uint32
 	permits      map[uint32]uint64
 	outputs      map[uint32]OutputStream
+	networks     uint32
 	limits       Limits
 }
 
@@ -908,7 +913,7 @@ func Options(cfg Config) []component.Option {
 	}
 	opts = append(opts, clockOptions(s, fs)...)
 	opts = append(opts, filesystemOptions(fs)...)
-	opts = append(opts, socketOptions()...)
+	opts = append(opts, socketOptions(s)...)
 	// Non-TTY is a valid implementation of the terminal discovery interfaces.
 	none := func(context.Context, []component.Value) ([]component.Value, error) {
 		return []component.Value{nil}, nil
