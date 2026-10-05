@@ -201,14 +201,16 @@ func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, 
 		for _, p := range ps {
 			go func(p pollableValue) { ch <- p.wait(waitCtx) }(p)
 		}
-		if err := <-ch; err != nil {
-			return nil, err
-		}
+		err := <-ch
 		cancel()
 		ready = readyIndexes(ps)
-		if len(ready) == 0 {
-			return nil, fmt.Errorf("wasi:io/poll.poll: waiter returned before readiness")
+		if len(ready) != 0 {
+			return ready, nil
 		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("wasi:io/poll.poll: waiter returned before readiness")
 	}
 	return ready, nil
 }
