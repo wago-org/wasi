@@ -149,11 +149,26 @@ func readySubscriptions(subs []pollSubscription, elapsed time.Duration) []int {
 			}
 			continue
 		}
+		if sub.code == 0 {
+			sub.code = streamFileError(sub.entry, sub.typ)
+		}
 		if sub.code != 0 || streamReady(sub.entry, sub.typ) {
 			ready = append(ready, i)
 		}
 	}
 	return ready
+}
+
+func streamFileError(entry *fdEntry, typ byte) uint16 {
+	file, ok := streamObject(entry, typ).(*os.File)
+	if !ok {
+		return 0
+	}
+	_, err := file.Stat()
+	if errors.Is(err, os.ErrClosed) {
+		return wasiEBadf
+	}
+	return uint16(errno(err))
 }
 
 func streamObject(entry *fdEntry, typ byte) any {
