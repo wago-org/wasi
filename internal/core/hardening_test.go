@@ -7,6 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+
+	wago "github.com/wago-org/wago"
 	"syscall"
 	"testing"
 	"time"
@@ -175,6 +179,157 @@ func TestPerInstanceStateLocksDoNotBlockEachOther(t *testing.T) {
 	case <-progress:
 	case <-time.After(time.Second):
 		t.Fatal("an operation in one instance blocked an unrelated instance")
+	}
+}
+
+type waitingInput struct{ started chan struct{} }
+
+func (*waitingInput) Read([]byte) (int, error) { return 0, nil }
+func (*waitingInput) Ready() bool              { return false }
+func (w *waitingInput) Wait(ctx context.Context) error {
+	close(w.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestStopInterruptsPendingPoll(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	input := &waitingInput{started: make(chan struct{})}
+	e := newTestPlugin(t, Config{Context: ctx, Stdin: input})
+	var pollBinding binding
+	for _, b := range e.bindings() {
+		if b.name == "poll_oneoff" {
+			pollBinding = b
+			break
+		}
+	}
+	if pollBinding.fn == nil {
+		t.Fatal("poll_oneoff binding missing")
+	}
+	mem := make([]byte, 512)
+	putFDSubscription(mem, 0, 1, 1, 0)
+	pollDone := make(chan uint64, 1)
+	go func() {
+		result := make([]uint64, 1)
+		pollBinding.fn(testModule{mem}, []uint64{0, 256, 1, 240}, result)
+		pollDone <- result[0]
+	}()
+	select {
+	case <-input.started:
+	case <-time.After(time.Second):
+		t.Fatal("poll did not start waiting")
+	}
+	stopDone := make(chan struct{})
+	go func() {
+		_ = e.stop(context.Background())
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		cancel()
+		<-stopDone
+		t.Fatal("stop blocked behind pending poll")
+	}
+	select {
+	case code := <-pollDone:
+		if code != wasiEIntr {
+			t.Fatalf("poll after stop = %d, want EINTR", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("poll did not stop")
+	}
+}
+
+// Wait until the second binding is blocked in stateFor behind the poll. A
+// goroutine stack provides the ordering without timing assumptions or a test
+// hook in the production host-call path.
+func waitForQueuedFSCall(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	buf := make([]byte, 64<<10)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(buf, true)
+		if strings.Contains(string(buf[:n]), "(*Plugin).stateFor(") {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("second binding did not queue behind the poll")
+}
+
+func TestCloseInterruptsPendingPollWithQueuedBinding(t *testing.T) {
+	for _, instanceOnly := range []bool{false, true} {
+		name := "stop"
+		if instanceOnly {
+			name = "instance"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			input := &waitingInput{started: make(chan struct{})}
+			e := newTestPlugin(t, Config{Context: ctx, Stdin: input})
+			identity := wago.InstanceIdentity{}
+			if instanceOnly {
+				e.guard.states[identity] = e.fs
+			}
+			var pollBinding, queuedBinding binding
+			for _, b := range e.bindings() {
+				switch b.name {
+				case "poll_oneoff":
+					pollBinding = b
+				case "fd_fdstat_get":
+					queuedBinding = b
+				}
+			}
+			mem := make([]byte, 512)
+			putFDSubscription(mem, 0, 1, 1, 0)
+			pollDone := make(chan uint64, 1)
+			go func() {
+				result := make([]uint64, 1)
+				pollBinding.fn(testModule{mem}, []uint64{0, 256, 1, 240}, result)
+				pollDone <- result[0]
+			}()
+			select {
+			case <-input.started:
+			case <-time.After(time.Second):
+				t.Fatal("poll did not start waiting")
+			}
+			queuedDone := make(chan struct{})
+			go func() {
+				queuedBinding.fn(testModule{make([]byte, 512)}, []uint64{0, 128}, make([]uint64, 1))
+				close(queuedDone)
+			}()
+			waitForQueuedFSCall(t)
+			closeDone := make(chan struct{})
+			go func() {
+				if instanceOnly {
+					e.closeInstance(identity)
+				} else {
+					_ = e.stop(context.Background())
+				}
+				close(closeDone)
+			}()
+			select {
+			case <-closeDone:
+			case <-time.After(time.Second):
+				cancel()
+				<-closeDone
+				t.Fatal("close blocked behind queued binding and pending poll")
+			}
+			if code := <-pollDone; code != wasiEIntr {
+				t.Fatalf("poll after close = %d, want EINTR", code)
+			}
+			<-queuedDone
+			// Calls admitted after guard.mu was released must not use a state
+			// that shutdown has already closed.
+			result := make([]uint64, 1)
+			queuedBinding.fn(testModule{make([]byte, 512)}, []uint64{0, 128}, result)
+			if result[0] != wasiEBadf {
+				t.Fatalf("binding after close = %d, want EBADF", result[0])
+			}
+		})
 	}
 }
 

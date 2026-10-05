@@ -191,9 +191,15 @@ func streamReady(entry *fdEntry, typ byte) bool {
 var errPollUnsupported = errors.New("wasi: stream does not implement readiness")
 
 func (e *Plugin) waitSubscriptions(subs []pollSubscription, delay time.Duration, hasDeadline bool) error {
-	ctx := e.cfg.Context
+	var ctx context.Context
+	if e.fs != nil {
+		ctx = e.fs.pollCtx
+	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = e.cfg.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
 	}
 	waitCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
