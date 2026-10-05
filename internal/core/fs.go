@@ -1080,7 +1080,8 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 func (e *Plugin) pathLink(m wago.HostModule, p, r []uint64) {
 	oldName, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
 	newName, code2 := guestBytes(m.Memory(), uint32(p[5]), uint32(p[6]))
-	oldTrailing, newTrailing := strings.HasSuffix(oldName, "/"), strings.HasSuffix(newName, "/")
+	oldTrailing := strings.HasSuffix(oldName, "/") || guestBackslashSeparator && strings.HasSuffix(oldName, `\`)
+	newTrailing := strings.HasSuffix(newName, "/") || guestBackslashSeparator && strings.HasSuffix(newName, `\`)
 	od, oldName, c1 := e.resolve(uint32(p[0]), oldName)
 	nd, newName, c2 := e.resolve(uint32(p[4]), newName)
 	for _, c := range []uint64{code2, c1, c2} {
