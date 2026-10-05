@@ -460,3 +460,19 @@ func TestDefinitionAndConfigAreStrict(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigRejectsMalformedEnvironmentAndExplicitNulls(t *testing.T) {
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"env":["NO_EQUALS"]}`),
+		json.RawMessage(`{"env":["=value"]}`),
+		json.RawMessage(`{"env":["KEY=a\u0000b"]}`),
+		json.RawMessage(`{"env":null}`),
+		json.RawMessage(`{"stdout":null}`),
+		json.RawMessage(`{"limits":{"maxDescriptors":0}}`),
+		json.RawMessage(`{"limits":{"maxDescriptors":null}}`),
+	} {
+		if err := p2.Provider().ValidateConfig(raw); err == nil {
+			t.Errorf("accepted schema-invalid config %s", raw)
+		}
+	}
+}
