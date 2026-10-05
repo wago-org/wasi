@@ -232,6 +232,9 @@ func validateConfig(raw json.RawMessage) error {
 	if !utf8.Valid(raw) {
 		return fmt.Errorf("wasi p2: config is not valid UTF-8")
 	}
+	if err := validateSurrogateEscapes(raw); err != nil {
+		return err
+	}
 	if err := validateConfigShape(raw); err != nil {
 		return err
 	}
@@ -271,6 +274,64 @@ func validateConfig(raw json.RawMessage) error {
 		return fmt.Errorf("wasi p2: config has a trailing JSON value")
 	}
 	return nil
+}
+
+// encoding/json replaces unmatched UTF-16 surrogate escapes with U+FFFD.
+// Reject them so a reviewed config string is not changed while decoding.
+func validateSurrogateEscapes(raw []byte) error {
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString || i+1 >= len(raw) {
+				continue
+			}
+			if raw[i+1] != 'u' {
+				i++ // Escaped quote or backslash cannot change string state.
+				continue
+			}
+			first, ok := jsonEscapeCodeUnit(raw, i)
+			if !ok {
+				continue // The JSON decoder reports malformed escapes.
+			}
+			if first >= 0xd800 && first <= 0xdbff {
+				second, valid := jsonEscapeCodeUnit(raw, i+6)
+				if !valid || second < 0xdc00 || second > 0xdfff {
+					return fmt.Errorf("wasi p2: unpaired JSON surrogate escape")
+				}
+				i += 11
+			} else {
+				if first >= 0xdc00 && first <= 0xdfff {
+					return fmt.Errorf("wasi p2: unpaired JSON surrogate escape")
+				}
+				i += 5
+			}
+		}
+	}
+	return nil
+}
+
+func jsonEscapeCodeUnit(raw []byte, at int) (uint16, bool) {
+	if at+6 > len(raw) || raw[at] != '\\' || raw[at+1] != 'u' {
+		return 0, false
+	}
+	var value uint16
+	for _, digit := range raw[at+2 : at+6] {
+		value <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			value |= uint16(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			value |= uint16(digit-'a') + 10
+		case digit >= 'A' && digit <= 'F':
+			value |= uint16(digit-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 func validateConfigShape(raw json.RawMessage) error {

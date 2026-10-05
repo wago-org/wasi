@@ -21,4 +21,7 @@ func TestConfigRejectsUnpairedSurrogateEscapes(t *testing.T) {
 	if err := p2.Provider().ValidateConfig(json.RawMessage(`{"env":["K=\ud83d\ude00"]}`)); err != nil {
 		t.Fatalf("rejected valid surrogate pair: %v", err)
 	}
+	if err := p2.Provider().ValidateConfig(json.RawMessage(`{"env":["K=\\ud800"]}`)); err != nil {
+		t.Fatalf("rejected literal backslash sequence: %v", err)
+	}
 }
