@@ -261,6 +261,8 @@ func platformFilesystemError(err error) (uint32, bool) {
 		return fsErrIsDirectory, true
 	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
 		return fsErrAccess, true
+	case errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD):
+		return fsErrNotPermitted, true
 	case errors.Is(err, windows.ERROR_FILE_NOT_FOUND), errors.Is(err, windows.ERROR_PATH_NOT_FOUND):
 		return fsErrNoEntry, true
 	case errors.Is(err, windows.ERROR_ALREADY_EXISTS), errors.Is(err, windows.ERROR_FILE_EXISTS):
