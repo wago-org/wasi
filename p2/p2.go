@@ -229,6 +229,9 @@ func validateConfig(raw json.RawMessage) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
+	if !utf8.Valid(raw) {
+		return fmt.Errorf("wasi p2: config is not valid UTF-8")
+	}
 	if err := validateConfigShape(raw); err != nil {
 		return err
 	}
