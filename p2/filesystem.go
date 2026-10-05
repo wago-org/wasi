@@ -491,9 +491,12 @@ func setDescriptorTimes(file *os.File, access, modification component.Value, now
 	if err != nil {
 		return err
 	}
-	at, mt, _, err := requestedTimes(access, modification, info, now)
+	at, mt, changed, err := requestedTimes(access, modification, info, now)
 	if err != nil {
 		return err
+	}
+	if !changed {
+		return nil
 	}
 	return setFileTimes(file, at, mt)
 }
