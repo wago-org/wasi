@@ -968,7 +968,7 @@ func (e *Plugin) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op fu
 
 func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
-	trailingSlash := strings.HasSuffix(name, "/")
+	trailingSlash := strings.HasSuffix(name, "/") || guestBackslashSeparator && strings.HasSuffix(name, `\`)
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
@@ -1002,7 +1002,7 @@ func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 
 func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
-	trailingSlash := strings.HasSuffix(name, "/")
+	trailingSlash := strings.HasSuffix(name, "/") || guestBackslashSeparator && strings.HasSuffix(name, `\`)
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
