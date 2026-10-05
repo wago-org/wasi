@@ -971,56 +971,76 @@ func instanceOptions(cfg Config) []component.Option {
 			if !ok {
 				return nil, fmt.Errorf("output-stream.splice: invalid len")
 			}
+			var out OutputStream
 			if blocking {
-				out, err := writer(outRep)
+				var err error
+				out, err = writer(outRep)
 				if err != nil {
 					return nil, err
 				}
-				if values, err := s.waitWritable(ctx, out); values != nil || err != nil {
-					return values, err
-				}
 			}
-			check, err := checkWrite(ctx, []component.Value{outRep})
-			if err != nil {
-				return nil, err
-			}
-			cr := check[0].(component.ResultValue)
-			if cr.IsErr {
-				return check, nil
-			}
-			permit := cr.Payload.(uint64)
-			if n > permit {
-				n = permit
-			}
-			if blocking {
-				if srcRep, ok := args[1].(uint32); ok && srcRep == stdinRep {
-					values, err := s.waitStdinReadable(ctx)
-					if values != nil || err != nil {
+			retryDelay := time.Millisecond
+			for {
+				if blocking {
+					if values, err := s.waitWritable(ctx, out); values != nil || err != nil {
 						return values, err
 					}
 				}
+				check, err := checkWrite(ctx, []component.Value{outRep})
+				if err != nil {
+					return nil, err
+				}
+				cr := check[0].(component.ResultValue)
+				if cr.IsErr {
+					return check, nil
+				}
+				permit := cr.Payload.(uint64)
+				if blocking && n > 0 && permit == 0 {
+					if err := waitSpliceRetry(ctx, &retryDelay); err != nil {
+						return nil, err
+					}
+					continue
+				}
+				readLen := n
+				if readLen > permit {
+					readLen = permit
+				}
+				if blocking {
+					if srcRep, ok := args[1].(uint32); ok && srcRep == stdinRep {
+						values, err := s.waitStdinReadable(ctx)
+						if values != nil || err != nil {
+							return values, err
+						}
+					}
+				}
+				got, err := read(ctx, []component.Value{args[1], readLen})
+				if err != nil {
+					return nil, err
+				}
+				rr := got[0].(component.ResultValue)
+				if rr.IsErr {
+					return got, nil
+				}
+				buf, err := bytesValue(rr.Payload)
+				if err != nil {
+					return nil, err
+				}
+				if blocking && n > 0 && len(buf) == 0 {
+					if err := waitSpliceRetry(ctx, &retryDelay); err != nil {
+						return nil, err
+					}
+					continue
+				}
+				written, err := write(ctx, []component.Value{outRep, buf})
+				if err != nil {
+					return nil, err
+				}
+				wr := written[0].(component.ResultValue)
+				if wr.IsErr {
+					return written, nil
+				}
+				return []component.Value{component.ResultValue{Payload: uint64(len(buf))}}, nil
 			}
-			got, err := read(ctx, []component.Value{args[1], n})
-			if err != nil {
-				return nil, err
-			}
-			rr := got[0].(component.ResultValue)
-			if rr.IsErr {
-				return got, nil
-			}
-			buf, e := bytesValue(rr.Payload)
-			if e != nil {
-				return nil, e
-			}
-			written, err := write(ctx, []component.Value{outRep, buf})
-			if err != nil {
-				return nil, err
-			}
-			wr := written[0].(component.ResultValue)
-			if wr.IsErr {
-				return written, nil
-			}
-			return []component.Value{component.ResultValue{Payload: uint64(len(buf))}}, nil
 		}
 	}
 	getRandom := func(name string) component.HostFunc {
@@ -1186,6 +1206,22 @@ func writeZeroesDesc(t *component.TypeTable) component.FuncDesc {
 }
 func spliceDesc(t *component.TypeTable) component.FuncDesc {
 	return t.Func([]component.TypeRef{t.Borrow(outputStreamResource), t.Borrow(inputStreamResource), component.Prim("u64")}, t.Result(component.Prim("u64"), streamError(t)))
+}
+func waitSpliceRetry(ctx context.Context, delay *time.Duration) error {
+	timer := time.NewTimer(*delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if *delay < 50*time.Millisecond {
+		*delay *= 2
+		if *delay > 50*time.Millisecond {
+			*delay = 50 * time.Millisecond
+		}
+	}
+	return nil
 }
 func bytesValue(v component.Value) ([]byte, error) {
 	if b, ok := v.([]byte); ok {
