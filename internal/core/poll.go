@@ -22,7 +22,7 @@ type pollSubscription struct {
 	userdata uint64
 	typ      byte
 	entry    *fdEntry
-	due      time.Duration
+	due      uint64
 	clock    bool
 	code     uint16
 }
@@ -52,7 +52,7 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 	}
 
 	subs := make([]pollSubscription, 0, n)
-	var earliest time.Duration
+	var earliest uint64
 	hasDeadline := false
 	for i := uint32(0); i < n; i++ {
 		start := uint64(in) + uint64(i)*48
@@ -84,12 +84,8 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 					remaining = 0
 				}
 			}
-			if remaining > uint64(^uint64(0)>>1) {
-				r[0] = wasiEOverflow
-				return
-			}
 			sub.clock = true
-			sub.due = time.Duration(remaining)
+			sub.due = remaining
 			if !hasDeadline || sub.due < earliest {
 				earliest, hasDeadline = sub.due, true
 			}
@@ -108,14 +104,20 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 		subs = append(subs, sub)
 	}
 
-	started := time.Now()
+	measuredAt := time.Now()
+	var elapsed uint64
 	ready := readySubscriptions(subs, 0)
 	for len(ready) == 0 {
-		remaining := earliest - time.Since(started)
-		if hasDeadline && remaining < 0 {
-			remaining = 0
+		var delay time.Duration
+		if hasDeadline {
+			remaining := earliest - elapsed
+			if remaining > uint64(^uint64(0)>>1) {
+				delay = time.Duration(^uint64(0) >> 1)
+			} else {
+				delay = time.Duration(remaining)
+			}
 		}
-		if err := e.waitSubscriptions(subs, remaining, hasDeadline); err != nil {
+		if err := e.waitSubscriptions(subs, delay, hasDeadline); err != nil {
 			switch {
 			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 				r[0] = wasiEIntr
@@ -126,14 +128,15 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 			}
 			return
 		}
-		ready = readySubscriptions(subs, time.Since(started))
+		elapsed, measuredAt = pollElapsed(elapsed, measuredAt)
+		ready = readySubscriptions(subs, elapsed)
 		if len(ready) == 0 {
 			// Another consumer may drain a stream between its wake and the
 			// readiness check. Bound retries even if a waiter repeatedly wakes.
 			pause := time.Millisecond
 			if hasDeadline {
-				if remaining := earliest - time.Since(started); remaining < pause {
-					pause = remaining
+				if remaining := earliest - elapsed; remaining < uint64(pause) {
+					pause = time.Duration(remaining)
 				}
 			}
 			if pause > 0 {
@@ -152,6 +155,8 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 				}
 				timer.Stop()
 			}
+			elapsed, measuredAt = pollElapsed(elapsed, measuredAt)
+			ready = readySubscriptions(subs, elapsed)
 		}
 	}
 
@@ -173,6 +178,18 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 	r[0] = wasiOK
 }
 
+func pollElapsed(elapsed uint64, measuredAt time.Time) (uint64, time.Time) {
+	now := time.Now()
+	if interval := now.Sub(measuredAt); interval > 0 {
+		if uint64(interval) > ^uint64(0)-elapsed {
+			elapsed = ^uint64(0)
+		} else {
+			elapsed += uint64(interval)
+		}
+	}
+	return elapsed, now
+}
+
 func readableRegularFileBytes(entry *fdEntry) uint64 {
 	if entry == nil || entry.file == nil {
 		return 0
@@ -188,7 +205,7 @@ func readableRegularFileBytes(entry *fdEntry) uint64 {
 	return uint64(info.Size() - offset)
 }
 
-func readySubscriptions(subs []pollSubscription, elapsed time.Duration) []int {
+func readySubscriptions(subs []pollSubscription, elapsed uint64) []int {
 	ready := make([]int, 0, len(subs))
 	for i := range subs {
 		sub := &subs[i]
