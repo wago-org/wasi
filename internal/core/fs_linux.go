@@ -197,3 +197,5 @@ func linkAtFollow(oldDirectory *fdEntry, oldName string, newParent *os.File, new
 func allocateFile(file *os.File, offset, length int64) error {
 	return unix.Fallocate(int(file.Fd()), 0, offset, length)
 }
+
+func setFileSize(file *os.File, size int64) error { return file.Truncate(size) }

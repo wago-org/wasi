@@ -187,6 +187,9 @@ func TestPathOpenSizeRightWorksWithoutWriteRight(t *testing.T) {
 	if err := os.WriteFile(root+"/file", []byte("payload"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(root+"/dir", 0o700); err != nil {
+		t.Fatal(err)
+	}
 	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true}}})
 	m := testModule{mem: make([]byte, 128)}
 	copy(m.mem[32:], "file")
@@ -209,6 +212,13 @@ func TestPathOpenSizeRightWorksWithoutWriteRight(t *testing.T) {
 	if r[0] != wasiENotcapable {
 		t.Fatalf("fd_write recovered ungranted write right: errno %d", r[0])
 	}
+	copy(m.mem[32:], "dir")
+	e.pathOpen(m, []uint64{3, 0, 32, 3, 2, rightFDFilestatSetSize, 0, 0, 20}, r)
+	if r[0] != wasiOK {
+		t.Fatalf("path_open directory with file-only right: errno %d", r[0])
+	}
+	dirFD := uint64(binary.LittleEndian.Uint32(m.mem[20:]))
+	e.fdClose(m, []uint64{dirFD}, r)
 }
 
 func TestPreview1RejectsCapabilityEscape(t *testing.T) {

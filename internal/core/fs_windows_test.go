@@ -4,6 +4,7 @@ package core
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -266,5 +267,119 @@ func TestWindowsPathOpenTrailingSlashRequiresDirectoryCreationRight(t *testing.T
 	e.fdClose(m, []uint64{fd}, r)
 	if info, err := os.Stat(filepath.Join(root, "allowed")); err != nil || !info.IsDir() {
 		t.Fatalf("authorized directory=%v, %v", info, err)
+	}
+}
+
+func TestWindowsSizeRightsSurviveAppendFlags(t *testing.T) {
+	for _, right := range []uint64{rightFDFilestatSetSize, rightFDAllocate} {
+		for _, initialAppend := range []uint64{0, 1} {
+			t.Run(fmt.Sprintf("right%d/append%d", right, initialAppend), func(t *testing.T) {
+				root := t.TempDir()
+				if err := os.WriteFile(filepath.Join(root, "file"), []byte("payload"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true}}})
+				defer closeFS(e.fs)
+				m := testModule{mem: make([]byte, 128)}
+				copy(m.mem[32:], "file")
+				r := make([]uint64, 1)
+				e.pathOpen(m, []uint64{3, 0, 32, 4, 0, right | rightFDStatSetFlags, 0, initialAppend, 16}, r)
+				if r[0] != wasiOK {
+					t.Fatalf("path_open: %d", r[0])
+				}
+				fd := uint64(binary.LittleEndian.Uint32(m.mem[16:]))
+				for index, flags := range []uint64{initialAppend, 1 - initialAppend, initialAppend} {
+					e.fdFdstatSetFlags(m, []uint64{fd, flags}, r)
+					if r[0] != wasiOK {
+						t.Fatalf("set flags %d: %d", flags, r[0])
+					}
+					if right == rightFDFilestatSetSize {
+						e.fdFilestatSetSize(m, []uint64{fd, 2}, r)
+					} else {
+						e.fdAllocate(m, []uint64{fd, 0, uint64(16 + index)}, r)
+					}
+					if r[0] != wasiOK {
+						t.Fatalf("size operation with flags %d: %d", flags, r[0])
+					}
+					info, err := os.Stat(filepath.Join(root, "file"))
+					want := int64(2)
+					if right == rightFDAllocate {
+						want = int64(16 + index)
+					}
+					if err != nil || info.Size() != want {
+						t.Fatalf("size=%v, %v; want %d", info, err, want)
+					}
+					e.fdWrite(m, []uint64{fd, 64, 0, 80}, r)
+					if r[0] != wasiENotcapable {
+						t.Fatalf("ungranted write right: %d", r[0])
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestWindowsSizeChangeRetainsAtomicAppendHandle(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "file")
+	if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true}}})
+	defer closeFS(e.fs)
+	m := testModule{mem: make([]byte, 128)}
+	copy(m.mem[32:], "file")
+	r := make([]uint64, 1)
+	e.pathOpen(m, []uint64{3, 0, 32, 4, 0, rightFDWrite | rightFDFilestatSetSize | rightFDStatSetFlags | rightFDSeek, 0, 1, 16}, r)
+	if r[0] != wasiOK {
+		t.Fatalf("path_open: %d", r[0])
+	}
+	fd := uint64(binary.LittleEndian.Uint32(m.mem[16:]))
+	original := e.fs.fds[uint32(fd)].file
+	e.fdFilestatSetSize(m, []uint64{fd, 2}, r)
+	if r[0] != wasiOK {
+		t.Fatalf("set_size with APPEND: %d", r[0])
+	}
+	if e.fs.fds[uint32(fd)].file != original {
+		t.Fatal("size operation replaced append handle")
+	}
+	if _, err := original.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	binary.LittleEndian.PutUint32(m.mem[64:], 96)
+	binary.LittleEndian.PutUint32(m.mem[68:], 1)
+	m.mem[96] = 'x'
+	e.fdWrite(m, []uint64{fd, 64, 1, 80}, r)
+	if r[0] != wasiOK {
+		t.Fatalf("append write after size change: %d", r[0])
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "pax" {
+		t.Fatalf("append data=%q, %v; want pax", data, err)
+	}
+}
+
+func TestWindowsPathOpenAppendTruncWithoutWriteRight(t *testing.T) {
+	for _, rights := range []uint64{rightFDRead, rightFDFilestatSetSize} {
+		t.Run(fmt.Sprintf("rights%d", rights), func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "file")
+			if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true}}})
+			defer closeFS(e.fs)
+			m := testModule{mem: make([]byte, 128)}
+			copy(m.mem[32:], "file")
+			r := make([]uint64, 1)
+			e.pathOpen(m, []uint64{3, 0, 32, 4, 8, rights, 0, 1, 16}, r)
+			if r[0] != wasiOK {
+				t.Fatalf("APPEND|TRUNC without FD_WRITE: %d", r[0])
+			}
+			info, err := os.Stat(path)
+			if err != nil || info.Size() != 0 {
+				t.Fatalf("size=%v, %v; want 0", info, err)
+			}
+		})
 	}
 }
