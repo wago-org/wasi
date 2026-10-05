@@ -416,6 +416,10 @@ func statUnder(dir *os.File, name string) (os.FileInfo, error) {
 	return f.Stat()
 }
 
+func statUnderPathFlags(dir *os.File, name string, _ uint32) (os.FileInfo, error) {
+	return statUnder(dir, name)
+}
+
 func readlinkUnder(dir *os.File, path string) (string, error) {
 	p, name, err := parentUnder(dir, path)
 	if err != nil {
@@ -795,7 +799,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		i, e := statUnder(n.file, args[2].(string))
+		i, e := statUnderPathFlags(n.file, args[2].(string), args[1].(uint32))
 		if e != nil {
 			return fsFailure(e), nil
 		}
@@ -817,7 +821,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		i, e := statUnder(n.file, args[2].(string))
+		i, e := statUnderPathFlags(n.file, args[2].(string), args[1].(uint32))
 		if e != nil {
 			return fsFailure(e), nil
 		}
