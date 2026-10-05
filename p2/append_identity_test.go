@@ -16,9 +16,14 @@ func TestAppendTargetIsSharedByFileAliases(t *testing.T) {
 	if err := os.Link(name, alias); err != nil {
 		t.Fatal(err)
 	}
+	base, err := openPreopenDirectory(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
 	var want *appendTarget
-	for _, path := range []string{name, name, alias} {
-		f, err := os.OpenFile(path, os.O_RDWR, 0)
+	for _, name := range []string{"original", "original", "alias"} {
+		f, err := openUnder(base, name, hostFS.O_RDWR, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -34,5 +39,20 @@ func TestAppendTargetIsSharedByFileAliases(t *testing.T) {
 		} else if node.append != want {
 			t.Fatal("independent handles and hard-link aliases must share one append lock")
 		}
+	}
+	if err := os.Rename(name, filepath.Join(root, "renamed")); err != nil {
+		t.Fatal(err)
+	}
+	f, err := openUnder(base, "renamed", hostFS.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	node := &descriptorNode{file: f}
+	if _, err := newFilesystem(nil, Limits{}).addDesc(node); err != nil {
+		t.Fatal(err)
+	}
+	if node.append != want {
+		t.Fatal("rename must preserve the append lock for live file aliases")
 	}
 }

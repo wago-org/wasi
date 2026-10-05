@@ -64,3 +64,22 @@ func BenchmarkWindowsAppendIndependentFiles(b *testing.B) {
 		}
 	})
 }
+
+func BenchmarkWindowsAppendTargetIdentity(b *testing.B) {
+	f, err := os.Create(filepath.Join(b.TempDir(), "file"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := appendTargetForFile(f, info); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
