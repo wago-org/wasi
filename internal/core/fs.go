@@ -751,12 +751,24 @@ func (e *Plugin) writeAt(m wago.HostModule, p, r []uint64) {
 		if f.flags&1 != 0 {
 			n, err = appendWriteAt(f.file, b, off)
 		} else {
-			n, err = f.file.WriteAt(b, off)
+			n, err = writeFileAt(f.file, b, off)
+		}
+		if n < 0 || n > len(b) {
+			n = 0
+			if err == nil {
+				err = io.ErrShortWrite
+			}
 		}
 		total += uint32(n)
 		off += int64(n)
 		if err != nil {
-			code = errno(err)
+			if total == 0 {
+				code = errno(err)
+			}
+			break
+		}
+		if n < len(b) {
+			break
 		}
 	}
 	if code == 0 && !putLe32(m.Memory(), uint32(p[4]), total) {
