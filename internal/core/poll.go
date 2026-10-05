@@ -110,8 +110,12 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 
 	started := time.Now()
 	ready := readySubscriptions(subs, 0)
-	if len(ready) == 0 {
-		if err := e.waitSubscriptions(subs, earliest, hasDeadline); err != nil {
+	for len(ready) == 0 {
+		remaining := earliest - time.Since(started)
+		if hasDeadline && remaining < 0 {
+			remaining = 0
+		}
+		if err := e.waitSubscriptions(subs, remaining, hasDeadline); err != nil {
 			switch {
 			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 				r[0] = wasiEIntr
@@ -123,6 +127,32 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 			return
 		}
 		ready = readySubscriptions(subs, time.Since(started))
+		if len(ready) == 0 {
+			// Another consumer may drain a stream between its wake and the
+			// readiness check. Bound retries even if a waiter repeatedly wakes.
+			pause := time.Millisecond
+			if hasDeadline {
+				if remaining := earliest - time.Since(started); remaining < pause {
+					pause = remaining
+				}
+			}
+			if pause > 0 {
+				ctx := e.pollContext()
+				if ctx.Err() != nil {
+					r[0] = wasiEIntr
+					return
+				}
+				timer := time.NewTimer(pause)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					r[0] = wasiEIntr
+					return
+				}
+				timer.Stop()
+			}
+		}
 	}
 
 	clear(mem[uint64(out) : uint64(out)+uint64(n)*32])
@@ -214,7 +244,7 @@ func streamReady(entry *fdEntry, typ byte) bool {
 
 var errPollUnsupported = errors.New("wasi: stream does not implement readiness")
 
-func (e *Plugin) waitSubscriptions(subs []pollSubscription, delay time.Duration, hasDeadline bool) error {
+func (e *Plugin) pollContext() context.Context {
 	var ctx context.Context
 	if e.fs != nil {
 		ctx = e.fs.pollCtx
@@ -225,6 +255,11 @@ func (e *Plugin) waitSubscriptions(subs []pollSubscription, delay time.Duration,
 			ctx = context.Background()
 		}
 	}
+	return ctx
+}
+
+func (e *Plugin) waitSubscriptions(subs []pollSubscription, delay time.Duration, hasDeadline bool) error {
+	ctx := e.pollContext()
 	waitCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if hasDeadline {
