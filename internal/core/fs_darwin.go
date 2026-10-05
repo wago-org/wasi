@@ -15,10 +15,11 @@ import (
 func hostMountRoot(_ *os.File, host string) (string, error) { return host, nil }
 
 const (
-	hostOpenReadOnly        = unix.O_RDONLY
-	hostOpenDirectory       = unix.O_DIRECTORY
-	hostOpenNoFollow        = unix.O_NOFOLLOW
-	hostOpenWriteAttributes = 0
+	hostOpenReadOnly           = unix.O_RDONLY
+	hostOpenDirectory          = unix.O_DIRECTORY
+	hostOpenNoFollow           = unix.O_NOFOLLOW
+	hostOpenCanCreateDirectory = false
+	hostOpenWriteAttributes    = 0
 )
 
 func openPreopen(path string, _ bool) (*os.File, error) { return os.Open(path) }

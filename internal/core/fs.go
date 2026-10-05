@@ -1012,6 +1012,9 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	if code == 0 && oflags&1 != 0 {
 		code = require(d, rightPathCreateFile)
 	}
+	if code == 0 && oflags&1 != 0 && (oflags&2 != 0 || trailingSlash) && hostOpenCanCreateDirectory {
+		code = require(d, rightPathCreateDirectory)
+	}
 	if code == 0 && oflags&8 != 0 {
 		code = require(d, rightPathFilestatSetSize)
 	}

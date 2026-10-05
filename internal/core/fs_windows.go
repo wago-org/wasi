@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	hostOpenReadOnly        = os.O_RDONLY
-	hostOpenDirectory       = 1 << 24
-	hostOpenNoFollow        = 1 << 25
-	hostOpenWriteAttributes = 1 << 26
+	hostOpenReadOnly           = os.O_RDONLY
+	hostOpenDirectory          = 1 << 24
+	hostOpenNoFollow           = 1 << 25
+	hostOpenCanCreateDirectory = true
+	hostOpenWriteAttributes    = 1 << 26
 )
 
 func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
