@@ -1016,7 +1016,10 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 	if code == 0 {
 		follow := uint16(p[1])&1 != 0 || trailingSlash
 		if follow {
-			f, openCode := openMetadataAt(d, name, true)
+			// The handle used for the eventual update must already carry
+			// attribute-write access. Native Windows does not grant that right
+			// to a metadata-only read handle opened for the initial stat.
+			f, openCode := openAt(d, name, hostOpenReadOnly|hostOpenWriteAttributes, 0)
 			code = openCode
 			if code == 0 {
 				st, err := f.Stat()
