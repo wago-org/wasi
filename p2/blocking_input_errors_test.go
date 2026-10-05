@@ -21,6 +21,7 @@ type readinessFailureInput struct {
 	err    error
 	cancel context.CancelFunc
 	reads  int
+	waits  int
 }
 
 func (in *readinessFailureInput) TryRead(dst []byte) (int, error) {
@@ -29,11 +30,33 @@ func (in *readinessFailureInput) TryRead(dst []byte) (int, error) {
 	return 1, nil
 }
 func (in *readinessFailureInput) WaitReadable(ctx context.Context) error {
+	in.waits++
 	if in.cancel != nil {
 		in.cancel()
 		return fmt.Errorf("input: %w", ctx.Err())
 	}
 	return in.err
+}
+func TestBlockingInputCachesClosedWaitResult(t *testing.T) {
+	input := &readinessFailureInput{err: fmt.Errorf("input: %w", io.EOF)}
+	err := withBlockingInput(t, context.Background(), input, func(in *component.Instance) error {
+		for _, method := range []string{"read", "skip", "read", "skip"} {
+			values, err := in.Call(context.Background(), method, uint64(1))
+			if err != nil {
+				return fmt.Errorf("blocking %s trapped after EOF: %w", method, err)
+			}
+			if got := values[0].(uint32); got != 1 {
+				return fmt.Errorf("blocking %s status=%d, want closed", method, got)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.waits != 1 || input.reads != 0 {
+		t.Fatalf("closed input waits=%d reads=%d, want one wait and no read", input.waits, input.reads)
+	}
 }
 func withBlockingInput(tb testing.TB, ctx context.Context, input p2.InputStream, fn func(*component.Instance) error) error {
 	tb.Helper()

@@ -801,10 +801,16 @@ func instanceOptions(cfg Config) []component.Option {
 				var err error
 				if !s.stdinBuffered && s.stdinReadError == nil {
 					err = s.stdin.WaitReadable(ctx)
+					if errors.Is(err, io.EOF) {
+						s.stdinReadError = err
+					}
 				}
 				s.stdinMu.Unlock()
 				if err != nil {
-					return nil, err
+					if canceled := ctx.Err(); canceled != nil {
+						return nil, canceled
+					}
+					return s.streamFailure(err)
 				}
 			}
 		}
