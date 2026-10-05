@@ -393,7 +393,7 @@ func parentUnder(dir *os.File, name string) (*os.File, string, error) {
 }
 
 func statUnder(dir *os.File, name string) (os.FileInfo, error) {
-	f, err := openUnder(dir, name, hostFS.O_RDONLY, 0)
+	f, err := openUnder(dir, name, hostFS.O_RDONLY|hostFS.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
