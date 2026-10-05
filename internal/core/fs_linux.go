@@ -223,7 +223,16 @@ func setHostFileFlags(_ *fdEntry, file *os.File, flags uint16) error {
 }
 
 func appendWriteAt(file *os.File, b []byte, offset int64) (int, error) {
-	return unix.Pwrite(int(file.Fd()), b, offset)
+	return writeFileAt(file, b, offset)
+}
+
+func writeFileAt(file *os.File, b []byte, offset int64) (int, error) {
+	for {
+		n, err := unix.Pwrite(int(file.Fd()), b, offset)
+		if err != unix.EINTR {
+			return n, err
+		}
+	}
 }
 
 func makeDirectoryAt(parent *os.File, name string, mode uint32) error {

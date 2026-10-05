@@ -464,6 +464,10 @@ func appendWriteAt(file *os.File, b []byte, _ int64) (int, error) {
 	return file.Write(b)
 }
 
+func writeFileAt(file *os.File, b []byte, offset int64) (int, error) {
+	return file.WriteAt(b, offset)
+}
+
 func makeDirectoryAt(parent *os.File, name string, mode uint32) error {
 	return winfs.MkdirAt(windows.Handle(parent.Fd()), name)
 }
