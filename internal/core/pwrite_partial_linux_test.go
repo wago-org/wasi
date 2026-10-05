@@ -39,9 +39,23 @@ func TestFDPwriteReportsPartialWrite(t *testing.T) {
 	}
 	defer f.Close()
 	signal.Ignore(syscall.SIGXFSZ)
-	if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &unix.Rlimit{Cur: 5, Max: 5}); err != nil {
+	var original unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_FSIZE, &original); err != nil {
 		t.Fatal(err)
 	}
+	if original.Max < 5 {
+		t.Skip("file-size hard limit is below five bytes")
+	}
+	limited := original
+	limited.Cur = 5
+	if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &limited); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &original); err != nil {
+			t.Errorf("restore file-size limit: %v", err)
+		}
+	}()
 	e := newTestPlugin(t, Config{})
 	e.fs.fds[3] = &fdEntry{file: f, rights: rightFDWrite | rightFDSeek}
 	mem := make([]byte, 64)
