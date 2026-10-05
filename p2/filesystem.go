@@ -486,6 +486,18 @@ func setTimesUnderPathFlags(dir *os.File, name string, pathFlags uint32, access,
 	return platformSetTimesUnderPathFlags(dir, name, pathFlags&1 != 0, access, modification, now)
 }
 
+func setDescriptorTimes(file *os.File, access, modification component.Value, now func() time.Time) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	at, mt, _, err := requestedTimes(access, modification, info, now)
+	if err != nil {
+		return err
+	}
+	return setFileTimes(file, at, mt)
+}
+
 func fsError(err error) uint32 {
 	if code, ok := platformFilesystemError(err); ok {
 		return code
@@ -1136,14 +1148,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if n.flags&2 == 0 {
 			return fsFailure(hostFS.EROFS), nil
 		}
-		info, e := n.file.Stat()
-		if e != nil {
-			return fsFailure(e), nil
-		}
-		at, mt, _, e := requestedTimes(args[1], args[2], info, s.wall)
-		if e == nil {
-			e = setFileTimes(n.file, at, mt)
-		}
+		e = setDescriptorTimes(n.file, args[1], args[2], s.wall)
 		if e != nil {
 			return fsFailure(e), nil
 		}
