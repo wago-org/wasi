@@ -125,6 +125,54 @@ func TestAppendStreamsDoNotOverlap(t *testing.T) {
 	}
 }
 
+func TestAppendIndependentDescriptorsDoNotOverlap(t *testing.T) {
+	const writers, records = 8, 250
+	path := t.TempDir() + "/append"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFilesystem(nil, Limits{})
+	streams := make([]*fileStream, writers)
+	for i := range streams {
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		node := &descriptorNode{file: f}
+		if _, err := fs.addDesc(node); err != nil {
+			t.Fatal(err)
+		}
+		streams[i] = &fileStream{file: f, append: node.append}
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, stream := range streams {
+		i, stream := i, stream
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < records; j++ {
+				record := fmt.Sprintf("%02d:%04d\n", i, j)
+				if n, err := stream.Write([]byte(record)); err != nil || n != len(record) {
+					t.Errorf("append %q = %d, %v", record, n, err)
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(data), writers*records*8; got != want {
+		t.Fatalf("appended bytes = %d, want %d; concurrent append lost records", got, want)
+	}
+}
+
 func TestAppendStreamSurvivesParentDescriptorClose(t *testing.T) {
 	parent, err := os.CreateTemp(t.TempDir(), "append-parent")
 	if err != nil {
