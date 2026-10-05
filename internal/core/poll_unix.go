@@ -20,6 +20,21 @@ func osFileReady(file *os.File, typ byte) bool {
 	return err == nil && fds[0].Revents != 0
 }
 
+func osFileError(file *os.File) uint16 {
+	conn, err := file.SyscallConn()
+	if err != nil {
+		return wasiEBadf
+	}
+	var stat unix.Stat_t
+	var statErr error
+	if err := conn.Control(func(fd uintptr) {
+		statErr = unix.Fstat(int(fd), &stat)
+	}); err != nil {
+		return wasiEBadf
+	}
+	return uint16(errno(statErr))
+}
+
 func waitOSFiles(ctx context.Context, files []pollFile) error {
 	fds := make([]unix.PollFd, 0, len(files))
 	for _, file := range files {

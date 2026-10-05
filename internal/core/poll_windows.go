@@ -48,32 +48,57 @@ func queryPipe(handle windows.Handle) (pipeLocalInformation, bool) {
 }
 
 func osFileReady(file *os.File, typ byte) bool {
-	info, err := file.Stat()
-	if err == nil && info.Mode().IsRegular() {
-		return true
-	}
-	handle := windows.Handle(file.Fd())
-	if typ == 2 {
-		if pipe, ok := queryPipe(handle); ok {
-			return pipe.NamedPipeState == pipeDisconnected || pipe.NamedPipeState == pipeClosing || pipe.WriteQuotaAvailable != 0
-		}
-		var mode uint32
-		if ok, _, _ := procGetConsoleMode.Call(uintptr(handle), uintptr(unsafe.Pointer(&mode))); ok != 0 {
-			return true
-		}
+	conn, err := file.SyscallConn()
+	if err != nil {
 		return false
 	}
-	var available uint32
-	if ok, _, callErr := procPeekNamedPipe.Call(uintptr(handle), 0, 0, 0, uintptr(unsafe.Pointer(&available)), 0); ok != 0 {
-		return available != 0
-	} else if callErr == windows.ERROR_BROKEN_PIPE || callErr == windows.ERROR_PIPE_NOT_CONNECTED {
-		return true
+	var ready bool
+	_ = conn.Control(func(raw uintptr) {
+		info, statErr := file.Stat()
+		if statErr == nil && info.Mode().IsRegular() {
+			ready = true
+			return
+		}
+		handle := windows.Handle(raw)
+		if typ == 2 {
+			if pipe, ok := queryPipe(handle); ok {
+				ready = pipe.NamedPipeState == pipeDisconnected || pipe.NamedPipeState == pipeClosing || pipe.WriteQuotaAvailable != 0
+				return
+			}
+			var mode uint32
+			if ok, _, _ := procGetConsoleMode.Call(uintptr(handle), uintptr(unsafe.Pointer(&mode))); ok != 0 {
+				ready = true
+			}
+			return
+		}
+		var available uint32
+		if ok, _, callErr := procPeekNamedPipe.Call(uintptr(handle), 0, 0, 0, uintptr(unsafe.Pointer(&available)), 0); ok != 0 {
+			ready = available != 0
+			return
+		} else if callErr == windows.ERROR_BROKEN_PIPE || callErr == windows.ERROR_PIPE_NOT_CONNECTED {
+			ready = true
+			return
+		}
+		var events uint32
+		if ok, _, _ := procGetNumberConsoleInputEvent.Call(uintptr(handle), uintptr(unsafe.Pointer(&events))); ok != 0 {
+			ready = events != 0
+		}
+	})
+	return ready
+}
+
+func osFileError(file *os.File) uint16 {
+	conn, err := file.SyscallConn()
+	if err != nil {
+		return wasiEBadf
 	}
-	var events uint32
-	if ok, _, _ := procGetNumberConsoleInputEvent.Call(uintptr(handle), uintptr(unsafe.Pointer(&events))); ok != 0 {
-		return events != 0
+	var statusErr error
+	if err := conn.Control(func(raw uintptr) {
+		_, statusErr = windows.GetFileType(windows.Handle(raw))
+	}); err != nil {
+		return wasiEBadf
 	}
-	return false
+	return uint16(errno(statusErr))
 }
 
 func waitOSFiles(ctx context.Context, files []pollFile) error {
@@ -81,12 +106,7 @@ func waitOSFiles(ctx context.Context, files []pollFile) error {
 	defer ticker.Stop()
 	for {
 		for _, file := range files {
-			// A file closed after the initial readiness check cannot become
-			// readable again. Wake poll_oneoff so it can report the error event.
-			if _, err := file.file.Stat(); err != nil {
-				return nil
-			}
-			if osFileReady(file.file, file.typ) {
+			if osFileError(file.file) != 0 || osFileReady(file.file, file.typ) {
 				return nil
 			}
 		}

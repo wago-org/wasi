@@ -164,11 +164,7 @@ func streamFileError(entry *fdEntry, typ byte) uint16 {
 	if !ok {
 		return 0
 	}
-	_, err := file.Stat()
-	if errors.Is(err, os.ErrClosed) {
-		return wasiEBadf
-	}
-	return uint16(errno(err))
+	return osFileError(file)
 }
 
 func streamObject(entry *fdEntry, typ byte) any {
