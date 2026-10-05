@@ -10,7 +10,7 @@ import (
 )
 
 func TestDirectoryEntryStreamSurvivesDirectoryRename(t *testing.T) {
-	root := t.TempDir()
+	root := directoryTestRoot(t)
 	original := filepath.Join(root, "original")
 	if err := os.MkdirAll(filepath.Join(original, "child"), 0o700); err != nil {
 		t.Fatal(err)
@@ -29,6 +29,14 @@ func TestDirectoryEntryStreamSurvivesDirectoryRename(t *testing.T) {
 	}
 	defer streamFile.Close()
 	if err := os.Rename(original, filepath.Join(root, "renamed")); err != nil {
+		t.Fatal(err)
+	}
+	// Replacement entries deliberately have different types. A pathname-based
+	// metadata lookup must not change the pinned stream's entry types.
+	if err := os.MkdirAll(filepath.Join(original, "file.txt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(original, "child"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stream := &directoryStream{file: streamFile}
@@ -52,8 +60,27 @@ func TestDirectoryEntryStreamSurvivesDirectoryRename(t *testing.T) {
 	}
 }
 
+// An optional DT_UNKNOWN filesystem exercises Go 1.22's eager lstat fallback.
+// See testdata/directory-unknown for the small functional FUSE fixture.
+func directoryTestRoot(t testing.TB) string {
+	t.Helper()
+	if root := os.Getenv("WASI_TEST_DIRECTORY_ROOT"); root != "" {
+		dir, err := os.MkdirTemp(root, "wasi-directory-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := os.RemoveAll(dir); err != nil {
+				t.Error(err)
+			}
+		})
+		return dir
+	}
+	return t.TempDir()
+}
+
 func BenchmarkReadDirectoryEntries(b *testing.B) {
-	root := b.TempDir()
+	root := directoryTestRoot(b)
 	const entries = 32
 	for i := 0; i < entries; i++ {
 		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("entry-%02d", i)), nil, 0o600); err != nil {
