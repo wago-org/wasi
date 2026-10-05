@@ -70,6 +70,37 @@ func emptyWriteStatus(in *component.Instance, op string, length uint32) (uint32,
 	}
 	return values[0].(uint32), nil
 }
+
+type failedFlushAfterPermit struct{}
+
+func (failedFlushAfterPermit) CheckWrite() (uint64, error) { return 3, nil }
+func (failedFlushAfterPermit) TryWrite([]byte) error {
+	panic("closed output stream was written")
+}
+func (failedFlushAfterPermit) BeginFlush() error { return errors.New("flush failed") }
+func (failedFlushAfterPermit) WaitWritable(context.Context) error { return nil }
+
+func TestEmptyOutputWriteReturnsClosedAfterFlushFailure(t *testing.T) {
+	for _, op := range []string{"write", "zeroes"} {
+		t.Run(op, func(t *testing.T) {
+			withEmptyOutput(t, failedFlushAfterPermit{}, func(in *component.Instance) error {
+				permit, err := grantEmptyOutput(in)
+				if err != nil || permit != 3 {
+					return fmt.Errorf("check-write permit=%d, err=%v; want 3", permit, err)
+				}
+				values, err := in.Call(context.Background(), "flush")
+				if err != nil || values[0].(uint32) != 1 {
+					return fmt.Errorf("flush status=%v, err=%v; want last-operation-failed", values, err)
+				}
+				status, err := emptyWriteStatus(in, op, 1)
+				if err != nil || status != 257 {
+					return fmt.Errorf("%s after failure status=%d, err=%v; want closed", op, status, err)
+				}
+				return nil
+			})
+		})
+	}
+}
 func startEmptyWriteBackend(t *testing.T, flush bool, failure error) (*emptyWriteBackend, p2.OutputStream, func()) {
 	t.Helper()
 	w := &emptyWriteBackend{started: make(chan struct{}), release: make(chan struct{}), flushGate: flush, err: failure}
