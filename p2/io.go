@@ -247,6 +247,12 @@ func (s *outputAdapter) TryWrite(p []byte) error {
 		s.mu.Unlock()
 		return err
 	}
+	// Empty writes consume no capacity and must not start underlying I/O.
+	// Preserve any failure or closure observed since the caller's permit.
+	if len(p) == 0 {
+		s.mu.Unlock()
+		return nil
+	}
 	select {
 	case s.slots <- struct{}{}:
 	default:
