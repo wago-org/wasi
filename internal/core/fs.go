@@ -854,6 +854,7 @@ func (e *Plugin) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op fu
 
 func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
+	trailingSlash := strings.HasSuffix(name, "/")
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
@@ -866,7 +867,7 @@ func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 	}
 	var st os.FileInfo
 	if code == 0 {
-		f, openCode := openMetadataAt(d, name, uint16(p[1])&1 != 0)
+		f, openCode := openMetadataAt(d, name, uint16(p[1])&1 != 0 || trailingSlash)
 		code = openCode
 		if code == 0 {
 			var err error
@@ -874,6 +875,8 @@ func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 			_ = f.Close()
 			if err != nil {
 				code = errno(err)
+			} else if trailingSlash && !st.IsDir() {
+				code = wasiENotdir
 			}
 		}
 	}
@@ -885,6 +888,7 @@ func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 
 func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
+	trailingSlash := strings.HasSuffix(name, "/")
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
@@ -896,7 +900,7 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 		code = wasiEInval
 	}
 	if code == 0 {
-		follow := uint16(p[1])&1 != 0
+		follow := uint16(p[1])&1 != 0 || trailingSlash
 		if follow {
 			f, openCode := openMetadataAt(d, name, true)
 			code = openCode
@@ -904,6 +908,8 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 				st, err := f.Stat()
 				if err != nil {
 					code = errno(err)
+				} else if trailingSlash && !st.IsDir() {
+					code = wasiENotdir
 				} else {
 					var now time.Time
 					if p[6]&0xa != 0 {
@@ -1097,12 +1103,28 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 
 func (e *Plugin) pathReadlink(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[1]), uint32(p[2]))
+	trailingSlash := strings.HasSuffix(name, "/")
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
 	}
 	if code == 0 {
 		code = require(d, rightPathReadlink)
+	}
+	if code == 0 && trailingSlash {
+		f, openCode := openMetadataAt(d, name, true)
+		code = openCode
+		if code == 0 {
+			st, err := f.Stat()
+			_ = f.Close()
+			if err != nil {
+				code = errno(err)
+			} else if st.IsDir() {
+				code = wasiEInval
+			} else {
+				code = wasiENotdir
+			}
+		}
 	}
 	var target string
 	if code == 0 {
