@@ -45,7 +45,7 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 		r[0] = wasiENomem
 		return
 	}
-	if uint64(in)+uint64(n)*48 > uint64(len(mem)) || uint64(out)+uint64(n)*32 > uint64(len(mem)) {
+	if uint64(in)+uint64(n)*48 > uint64(len(mem)) || uint64(out)+uint64(n)*32 > uint64(len(mem)) || uint64(result)+4 > uint64(len(mem)) {
 		r[0] = wasiEFault
 		return
 	}
