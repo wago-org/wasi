@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
 	"time"
 
@@ -131,12 +132,30 @@ func (e *Plugin) pollOneoff(m wago.HostModule, p, r []uint64) {
 		binary.LittleEndian.PutUint64(b, sub.userdata)
 		binary.LittleEndian.PutUint16(b[8:], sub.code)
 		b[10] = sub.typ
+		if sub.typ == 1 && sub.code == wasiOK {
+			binary.LittleEndian.PutUint64(b[16:], readableRegularFileBytes(sub.entry))
+		}
 	}
 	if !putLe32(mem, result, uint32(len(ready))) {
 		r[0] = wasiEFault
 		return
 	}
 	r[0] = wasiOK
+}
+
+func readableRegularFileBytes(entry *fdEntry) uint64 {
+	if entry == nil || entry.file == nil {
+		return 0
+	}
+	info, err := entry.file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	offset, err := entry.file.Seek(0, io.SeekCurrent)
+	if err != nil || offset >= info.Size() {
+		return 0
+	}
+	return uint64(info.Size() - offset)
 }
 
 func readySubscriptions(subs []pollSubscription, elapsed time.Duration) []int {
