@@ -1025,9 +1025,7 @@ func (e *Plugin) fdClose(_ wago.HostModule, p, r []uint64) {
 				code = closeCode
 			}
 		}
-		if code == 0 {
-			delete(e.fs.fds, fd)
-		}
+		delete(e.fs.fds, fd)
 	}
 	r[0] = code
 }
