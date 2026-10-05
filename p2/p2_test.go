@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	component "github.com/wago-org/component-model"
 	"github.com/wago-org/wago"
@@ -457,6 +458,123 @@ func TestDefinitionAndConfigAreStrict(t *testing.T) {
 		}
 		if err := p2.Provider().ValidateConfig(raw); err != nil {
 			t.Fatalf("valid rights-aware mount %+v: %v", mount, err)
+		}
+	}
+}
+
+func TestConfigRejectsMalformedEnvironmentAndExplicitNulls(t *testing.T) {
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"env":["NO_EQUALS"]}`),
+		json.RawMessage(`{"env":["=value"]}`),
+		json.RawMessage(`{"env":["KEY=a\u0000b"]}`),
+		json.RawMessage(`{"env":null}`),
+		json.RawMessage(`{"stdout":null}`),
+		json.RawMessage(`{"limits":{"maxDescriptors":0}}`),
+		json.RawMessage(`{"limits":{"maxDescriptors":null}}`),
+	} {
+		if err := p2.Provider().ValidateConfig(raw); err == nil {
+			t.Errorf("accepted schema-invalid config %s", raw)
+		}
+	}
+}
+
+func TestConfigStringLengthCountsUnicodeCharacters(t *testing.T) {
+	for _, value := range []string{"a", "é", "😀"} {
+		for _, count := range []int{32768, 32769} {
+			entry := "K=" + strings.Repeat(value, count-2)
+			raw, err := json.Marshal(map[string]any{"env": []string{entry}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = p2.Provider().ValidateConfig(raw)
+			if (err == nil) != (count == 32768) {
+				t.Errorf("env with %d %q characters: %v", count, value, err)
+			}
+		}
+	}
+
+	hostPrefix := filepath.Clean(os.TempDir()) + string(filepath.Separator)
+	for _, field := range []string{"guest", "host"} {
+		for _, count := range []int{4096, 4097} {
+			mount := map[string]any{"guest": "/data", "host": filepath.Clean(os.TempDir())}
+			prefix := "/"
+			if field == "host" {
+				prefix = hostPrefix
+			}
+			mount[field] = prefix + strings.Repeat("é", count-utf8.RuneCountInString(prefix))
+			raw, err := json.Marshal(map[string]any{"mounts": []any{mount}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = p2.Provider().ValidateConfig(raw)
+			if (err == nil) != (count == 4096) {
+				t.Errorf("mount %s with %d characters: %v", field, count, err)
+			}
+		}
+	}
+}
+
+func TestConfigRejectsNestedSchemaShapeViolations(t *testing.T) {
+	host, err := json.Marshal(filepath.Clean(os.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"mounts":[{"guest":"/data","host":"/tmp","read":null}]}`),
+		json.RawMessage(`{"mounts":[{"guest":"/data","host":"/tmp","write":null}]}`),
+		json.RawMessage(`{"mounts":[{"guest":"/data","host":"/tmp","mutateDirectory":null}]}`),
+		json.RawMessage(`{"mounts":[{"guest":null,"host":"/tmp"}]}`),
+		json.RawMessage(`{"mounts":[{"guest":"/data","host":null}]}`),
+		json.RawMessage(`{"mounts":[null]}`),
+		json.RawMessage(`{"mounts":[{"host":"/tmp"}]}`),
+		json.RawMessage(`{"mounts":[{"guest":"/data"}]}`),
+		json.RawMessage(`{"mounts":[{"guest":"/data","host":"/tmp","Read":true}]}`),
+		json.RawMessage(`{"limits":{"MaxDescriptors":1}}`),
+		json.RawMessage(`{"Limits":{"maxDescriptors":null}}`),
+		json.RawMessage(`{"Env":["K=value"]}`),
+		json.RawMessage(`{"env":[null]}`),
+		json.RawMessage(`{"env":[1]}`),
+		json.RawMessage(`{"mounts":{}}`),
+		json.RawMessage(`{"mounts":[[]]}`),
+		json.RawMessage(`{"limits":[]}`),
+	} {
+		raw = bytes.ReplaceAll(raw, []byte(`"/tmp"`), host)
+		if err := p2.Provider().ValidateConfig(raw); err == nil {
+			t.Errorf("accepted schema-invalid config %s", raw)
+		}
+	}
+}
+
+func TestConfigEnvironmentEntryCountBoundary(t *testing.T) {
+	for _, count := range []int{4096, 4097} {
+		entries := make([]string, count)
+		for i := range entries {
+			entries[i] = "K="
+		}
+		raw, err := json.Marshal(map[string]any{"env": entries})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = p2.Provider().ValidateConfig(raw)
+		if (err == nil) != (count == 4096) {
+			t.Errorf("%d env entries: %v", count, err)
+		}
+	}
+}
+
+func TestConfigAcceptsValidOptionalShapes(t *testing.T) {
+	for _, value := range []any{
+		map[string]any{},
+		map[string]any{"env": []string{"é="}, "mounts": []any{}, "limits": map[string]any{}},
+		map[string]any{"mounts": []any{map[string]any{"guest": "/data", "host": filepath.Clean(os.TempDir()), "read": false, "write": true, "mutateDirectory": false}}},
+		map[string]any{"limits": map[string]any{"maxDescriptors": 1, "maxStreams": 65536, "maxErrors": 1, "maxDirectoryStreams": 1, "maxNetworkHandles": 65536, "maxPollables": 1, "maxPollInputs": 1, "maxDirectoryEntryBytes": 1, "maxAggregateBufferBytes": 16777216}},
+	} {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p2.Provider().ValidateConfig(raw); err != nil {
+			t.Errorf("rejected valid config %s: %v", raw, err)
 		}
 	}
 }

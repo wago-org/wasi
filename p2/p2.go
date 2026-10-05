@@ -3,6 +3,7 @@
 package p2
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	component "github.com/wago-org/component-model"
 	wago "github.com/wago-org/wago"
@@ -227,14 +229,14 @@ func validateConfig(raw json.RawMessage) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	if err := validateConfigShape(raw); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var cfg pluginConfig
 	if err := dec.Decode(&cfg); err != nil {
 		return fmt.Errorf("wasi p2: config: %w", err)
-	}
-	if strings.TrimSpace(string(raw)) == "null" {
-		return fmt.Errorf("wasi p2: config must be an object")
 	}
 	if cfg.Stdin != nil && *cfg.Stdin != "inherit" && *cfg.Stdin != "eof" ||
 		cfg.Stdout != nil && *cfg.Stdout != "inherit" && *cfg.Stdout != "discard" ||
@@ -246,6 +248,17 @@ func validateConfig(raw json.RawMessage) error {
 			return err
 		}
 	}
+	if cfg.Env != nil {
+		if len(*cfg.Env) > 4096 {
+			return fmt.Errorf("wasi p2: env has more than 4096 entries")
+		}
+		for i, entry := range *cfg.Env {
+			key, _, found := strings.Cut(entry, "=")
+			if !found || key == "" || utf8.RuneCountInString(entry) > 32768 || strings.IndexByte(entry, 0) >= 0 {
+				return fmt.Errorf("wasi p2: invalid env entry %d", i)
+			}
+		}
+	}
 	if cfg.Limits != nil {
 		if err := validateLimits(*cfg.Limits); err != nil {
 			return err
@@ -253,6 +266,70 @@ func validateConfig(raw json.RawMessage) error {
 	}
 	if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return fmt.Errorf("wasi p2: config has a trailing JSON value")
+	}
+	return nil
+}
+
+func validateConfigShape(raw json.RawMessage) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fmt.Errorf("wasi p2: config: %w", err)
+	}
+	if fields == nil {
+		return fmt.Errorf("wasi p2: config must be an object")
+	}
+	for name, value := range fields {
+		switch name {
+		case "stdin", "stdout", "stderr", "env", "mounts", "limits":
+		default:
+			return fmt.Errorf("wasi p2: unknown config field %q", name)
+		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("wasi p2: %s must not be null", name)
+		}
+	}
+	if value, ok := fields["mounts"]; ok {
+		var mounts []map[string]json.RawMessage
+		if err := json.Unmarshal(value, &mounts); err != nil {
+			return fmt.Errorf("wasi p2: mounts: %w", err)
+		}
+		for i, mount := range mounts {
+			if mount == nil {
+				return fmt.Errorf("wasi p2: mounts[%d] must be an object", i)
+			}
+			for _, name := range []string{"guest", "host"} {
+				if _, ok := mount[name]; !ok {
+					return fmt.Errorf("wasi p2: mounts[%d].%s is required", i, name)
+				}
+			}
+			for name, value := range mount {
+				switch name {
+				case "guest", "host", "read", "write", "mutateDirectory":
+				default:
+					return fmt.Errorf("wasi p2: unknown mounts[%d] field %q", i, name)
+				}
+				if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+					return fmt.Errorf("wasi p2: mounts[%d].%s must not be null", i, name)
+				}
+			}
+		}
+	}
+	if value, ok := fields["limits"]; ok {
+		var limits map[string]json.RawMessage
+		if err := json.Unmarshal(value, &limits); err != nil {
+			return fmt.Errorf("wasi p2: limits: %w", err)
+		}
+		for name, rawLimit := range limits {
+			switch name {
+			case "maxDescriptors", "maxStreams", "maxErrors", "maxDirectoryStreams", "maxNetworkHandles", "maxPollables", "maxPollInputs", "maxDirectoryEntryBytes", "maxAggregateBufferBytes":
+			default:
+				return fmt.Errorf("wasi p2: unknown limits field %q", name)
+			}
+			limit := bytes.TrimSpace(rawLimit)
+			if bytes.Equal(limit, []byte("null")) || bytes.Equal(limit, []byte("0")) {
+				return fmt.Errorf("wasi p2: limits.%s must be positive", name)
+			}
+		}
 	}
 	return nil
 }
@@ -368,10 +445,10 @@ func validateMounts(mounts []Preopen) error {
 	seen := make(map[string]struct{}, len(mounts))
 	for _, mount := range mounts {
 		guest, host := mount.GuestPath, mount.HostPath
-		if guest == "" || len(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
+		if guest == "" || utf8.RuneCountInString(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
 			return fmt.Errorf("wasi p2: invalid guest mount path %q", guest)
 		}
-		if host == "" || len(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
+		if host == "" || utf8.RuneCountInString(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
 			return fmt.Errorf("wasi p2: mount %q requires a clean absolute host path", guest)
 		}
 		if _, ok := seen[mount.GuestPath]; ok {
