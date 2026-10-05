@@ -552,7 +552,10 @@ func fsFailure(err error) []component.Value {
 }
 
 func descriptorKind(info fs.FileInfo) uint32 {
-	m := info.Mode()
+	return descriptorModeKind(info.Mode())
+}
+
+func descriptorModeKind(m fs.FileMode) uint32 {
 	switch {
 	case m.IsDir():
 		return descriptorDirectory
@@ -929,24 +932,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if d == nil {
 			return nil, fmt.Errorf("unknown directory stream")
 		}
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		entries, readErr := d.file.ReadDir(1)
-		if errors.Is(readErr, io.EOF) || len(entries) == 0 {
-			return ok(nil), nil
-		}
-		if readErr != nil {
-			return fsFailure(readErr), nil
-		}
-		entry := entries[0]
-		if uint64(len(entry.Name())) > s.limits.MaxDirectoryEntryBytes {
-			return fsFailure(hostFS.ENAMETOOLONG), nil
-		}
-		i, e := entry.Info()
-		if e != nil {
-			return fsFailure(e), nil
-		}
-		return ok([]component.Value{descriptorKind(i), entry.Name()}), nil
+		return d.readEntry(s.limits.MaxDirectoryEntryBytes), nil
 	}
 	createDirectoryAt := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		n, e := s.desc(args[0].(uint32))
