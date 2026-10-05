@@ -392,6 +392,15 @@ func parentUnder(dir *os.File, name string) (*os.File, string, error) {
 	return f, parts[len(parts)-1], err
 }
 
+func statUnder(dir *os.File, name string) (os.FileInfo, error) {
+	f, err := openUnder(dir, name, hostFS.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return f.Stat()
+}
+
 func fsError(err error) uint32 {
 	if code, ok := platformFilesystemError(err); ok {
 		return code
@@ -686,12 +695,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		f, e := openUnder(n.file, args[2].(string), hostFS.O_RDONLY, 0)
-		if e != nil {
-			return fsFailure(e), nil
-		}
-		defer f.Close()
-		i, e := f.Stat()
+		i, e := statUnder(n.file, args[2].(string))
 		if e != nil {
 			return fsFailure(e), nil
 		}
@@ -713,12 +717,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		f, e := openUnder(n.file, args[2].(string), hostFS.O_RDONLY, 0)
-		if e != nil {
-			return fsFailure(e), nil
-		}
-		defer f.Close()
-		i, e := f.Stat()
+		i, e := statUnder(n.file, args[2].(string))
 		if e != nil {
 			return fsFailure(e), nil
 		}
