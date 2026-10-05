@@ -26,6 +26,34 @@ func windowsMutationFixture(t *testing.T) (string, *Plugin) {
 	return root, e
 }
 
+func TestWindowsLinkMixedTerminalSeparators(t *testing.T) {
+	for _, tc := range []struct {
+		oldName, newName string
+		want             uint64
+	}{
+		{`file/\`, "link", wasiENotdir},
+		{`file\/`, "link", wasiENotdir},
+		{"file", `link/\`, wasiENoent},
+		{"file", `link\/`, wasiENoent},
+	} {
+		t.Run(tc.oldName+"_to_"+tc.newName, func(t *testing.T) {
+			root, e := windowsMutationFixture(t)
+			mem := []byte(tc.oldName + tc.newName)
+			result := []uint64{999}
+			e.pathLink(testModule{mem}, []uint64{3, 0, 0, uint64(len(tc.oldName)), 3, uint64(len(tc.oldName)), uint64(len(tc.newName))}, result)
+			if result[0] != tc.want {
+				t.Fatalf("link %q -> %q: errno %d, want %d", tc.oldName, tc.newName, result[0], tc.want)
+			}
+			if _, err := os.Lstat(filepath.Join(root, "link")); !os.IsNotExist(err) {
+				t.Fatalf("failed link created destination: %v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(root, "file")); err != nil || string(data) != "keep" {
+				t.Fatalf("failed link changed source: %q, %v", data, err)
+			}
+		})
+	}
+}
+
 func TestWindowsMutationParentLookup(t *testing.T) {
 	for _, tc := range []struct {
 		name string
