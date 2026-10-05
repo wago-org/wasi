@@ -460,22 +460,25 @@ func validateMounts(mounts []Preopen) error {
 }
 
 type hostState struct {
-	mu           sync.Mutex
-	stdinMu      sync.Mutex
-	stdin        InputStream
-	stdout       OutputStream
-	stderr       OutputStream
-	resources    *component.HandleTable
-	base         time.Time
-	wall         func() time.Time
-	errors       map[uint32]streamErrorValue
-	nextError    uint32
-	pollables    map[uint32]pollableValue
-	nextPollable uint32
-	permits      map[uint32]uint64
-	outputs      map[uint32]OutputStream
-	networks     uint32
-	limits       Limits
+	mu             sync.Mutex
+	stdinMu        sync.Mutex
+	stdin          InputStream
+	stdinProbe     [1]byte
+	stdinBuffered  bool
+	stdinReadError error
+	stdout         OutputStream
+	stderr         OutputStream
+	resources      *component.HandleTable
+	base           time.Time
+	wall           func() time.Time
+	errors         map[uint32]streamErrorValue
+	nextError      uint32
+	pollables      map[uint32]pollableValue
+	nextPollable   uint32
+	permits        map[uint32]uint64
+	outputs        map[uint32]OutputStream
+	networks       uint32
+	limits         Limits
 }
 
 // Options returns Component Model host options for the Preview 2 command
@@ -792,7 +795,10 @@ func instanceOptions(cfg Config) []component.Option {
 		if len(args) == 2 {
 			if rep, ok := args[0].(uint32); ok && rep == stdinRep {
 				s.stdinMu.Lock()
-				err := s.stdin.WaitReadable(ctx)
+				var err error
+				if !s.stdinBuffered && s.stdinReadError == nil {
+					err = s.stdin.WaitReadable(ctx)
+				}
 				s.stdinMu.Unlock()
 				if err != nil {
 					return nil, err

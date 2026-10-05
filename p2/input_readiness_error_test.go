@@ -46,12 +46,13 @@ func TestInputReadinessPreservesCustomReadError(t *testing.T) {
 			{"underlying cancellation", context.Canceled},
 			{"underlying deadline", context.DeadlineExceeded},
 			{"EOF", io.EOF},
+			{"wrapped EOF", fmt.Errorf("custom input: %w", io.EOF)},
 		} {
 			for _, withByte := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/byte=%v", operation.name, tc.name, withByte), func(t *testing.T) {
 					in := &readinessErrorInput{err: tc.err, withByte: withByte}
 					s := &hostState{stdin: in}
-					p := pollableValue{ready: func() bool { return inputReady(s) }, wait: in.WaitReadable}
+					p := pollableValue{ready: func() bool { return inputReady(s) }, wait: s.waitStdin}
 					if err := operation.run(context.Background(), p); err != nil {
 						t.Fatalf("polling custom stream failure: %v", err)
 					}
@@ -74,6 +75,17 @@ func TestInputReadinessPreservesCustomReadError(t *testing.T) {
 						t.Errorf("reporting the probed result made %d host reads, want 1", in.calls)
 					}
 					if errors.Is(tc.err, io.EOF) {
+						for i := 0; i < 16; i++ {
+							if !inputReady(s) {
+								t.Fatal("closed custom input stopped being ready")
+							}
+							if n, err := s.readStdin(dst[:]); n != 0 || !errors.Is(err, io.EOF) {
+								t.Fatalf("closed custom read = %d, %v, want EOF", n, err)
+							}
+						}
+						if in.calls != 1 {
+							t.Fatalf("closed custom input made %d host reads, want 1", in.calls)
+						}
 						return
 					}
 					if n, err := s.readStdin(dst[:]); n != 0 || err != ErrWouldBlock {
@@ -98,6 +110,24 @@ func TestInputReadinessPreservesWrappedWouldBlock(t *testing.T) {
 	s := &hostState{stdin: in}
 	if inputReady(s) {
 		t.Fatal("wrapped would-block was reported as readiness")
+	}
+}
+
+func TestInputReadinessCachedResultDoesNotWait(t *testing.T) {
+	for _, withByte := range []bool{false, true} {
+		in := &readinessErrorInput{err: io.ErrClosedPipe, withByte: withByte}
+		s := &hostState{stdin: in}
+		if !inputReady(s) {
+			t.Fatal("custom result was not ready")
+		}
+		// The underlying stream has consumed its one-shot result and would
+		// wait for cancellation. Buffered results must bypass that wait, just
+		// as a buffered asyncInput does, even with an already canceled context.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := s.waitStdin(ctx); err != nil {
+			t.Fatalf("wait for cached result byte=%v: %v", withByte, err)
+		}
 	}
 }
 
