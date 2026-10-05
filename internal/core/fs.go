@@ -956,6 +956,12 @@ func (e *Plugin) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op fu
 		code = require(d, right)
 	}
 	if code == 0 {
+		if guestBackslashSeparator && (right == rightPathCreateDirectory || right == rightPathRemoveDirectory) {
+			// These operations already require a directory leaf. Remove the
+			// entire terminal separator run before splitting the parent;
+			// otherwise "name/\\" looks like a rooted leaf to openParent.
+			name = strings.TrimRight(name, `/\`)
+		}
 		parent, leaf, parentCode := openParent(d, name)
 		code = parentCode
 		if code == 0 {
