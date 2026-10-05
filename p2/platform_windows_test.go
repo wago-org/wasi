@@ -88,11 +88,12 @@ func TestWindowsRelativeDirectoryMutation(t *testing.T) {
 
 func TestWindowsFilesystemErrorMapping(t *testing.T) {
 	tests := map[error]uint32{
-		windows.ERROR_ACCESS_DENIED:     fsErrAccess,
-		windows.ERROR_DIR_NOT_EMPTY:     fsErrNotEmpty,
-		windows.ERROR_DISK_FULL:         fsErrInsufficientSpace,
-		windows.ERROR_NOT_SAME_DEVICE:   fsErrCrossDevice,
-		windows.ERROR_SHARING_VIOLATION: fsErrBusy,
+		windows.ERROR_ACCESS_DENIED:      fsErrAccess,
+		windows.ERROR_PRIVILEGE_NOT_HELD: fsErrNotPermitted,
+		windows.ERROR_DIR_NOT_EMPTY:      fsErrNotEmpty,
+		windows.ERROR_DISK_FULL:          fsErrInsufficientSpace,
+		windows.ERROR_NOT_SAME_DEVICE:    fsErrCrossDevice,
+		windows.ERROR_SHARING_VIOLATION:  fsErrBusy,
 	}
 	for input, want := range tests {
 		if got := fsError(input); got != want {
