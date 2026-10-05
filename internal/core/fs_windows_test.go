@@ -267,7 +267,7 @@ func TestWindowsPinnedMountRemainsUsableAfterHostRename(t *testing.T) {
 	}
 	childFD := binary.LittleEndian.Uint32(mem[16:])
 	if err := os.Rename(root, moved); err != nil {
-		t.Skipf("host cannot rename open mount directory: %v", err)
+		t.Fatalf("host cannot rename open mount directory: %v", err)
 	}
 	for _, tc := range []struct {
 		entry *fdEntry
