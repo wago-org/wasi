@@ -433,18 +433,20 @@ func parentUnderRaw(dir *os.File, name string) (*os.File, string, error) {
 		}
 		return nil, "", err
 	}
-	parent := strings.Join(parts[:len(parts)-1], "/")
-	f, err := openUnder(dir, parent, hostFS.O_RDONLY|hostFS.O_DIRECTORY, 0)
-	leaf := parts[len(parts)-1]
-	if strings.HasSuffix(name, "/.") {
-		leaf += "/."
-	} else if strings.HasSuffix(name, "/") {
-		leaf += "/"
+	// Keep the original parent path until it has been resolved. Cleaning it
+	// first would turn missing/../file into file and skip the missing entry.
+	rawParts := strings.Split(name, "/")
+	leafIndex := len(rawParts) - 1
+	for leafIndex >= 0 && (rawParts[leafIndex] == "" || rawParts[leafIndex] == ".") {
+		leafIndex--
 	}
-	if err != nil {
-		return nil, "", err
+	parent := strings.Join(rawParts[:leafIndex], "/")
+	leaf := strings.Join(rawParts[leafIndex:], "/")
+	if parent == "" {
+		parent = "."
 	}
-	return f, leaf, nil
+	f, err := openUnderPathFlags(dir, parent, hostFS.O_RDONLY|hostFS.O_DIRECTORY, 0, 1)
+	return f, leaf, err
 }
 
 func statUnder(dir *os.File, name string) (os.FileInfo, error) {
