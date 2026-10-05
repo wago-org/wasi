@@ -11,6 +11,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const metadataHandleFlag = 1 << 27
+const metadataOpenFlags = metadataHandleFlag
+
 func hostStat(info fs.FileInfo) (nlink uint64, atime, mtime, ctime time.Time, dev, ino uint64) {
 	mtime = info.ModTime()
 	if st, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {

@@ -408,16 +408,20 @@ func parentUnder(dir *os.File, name string) (*os.File, string, error) {
 }
 
 func statUnder(dir *os.File, name string) (os.FileInfo, error) {
-	f, err := openUnder(dir, name, hostFS.O_RDONLY|hostFS.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return f.Stat()
+	return statUnderPathFlags(dir, name, 0)
 }
 
-func statUnderPathFlags(dir *os.File, name string, _ uint32) (os.FileInfo, error) {
-	return statUnder(dir, name)
+func statUnderPathFlags(dir *os.File, name string, pathFlags uint32) (os.FileInfo, error) {
+	if pathFlags&^uint32(1) != 0 {
+		return nil, hostFS.EINVAL
+	}
+	if strings.IndexByte(name, 0) >= 0 || path.IsAbs(name) {
+		return nil, hostFS.EPERM
+	}
+	if name == "" {
+		name = "."
+	}
+	return platformStatUnderPathFlags(dir, name, pathFlags&1 != 0)
 }
 
 func readlinkUnder(dir *os.File, path string) (string, error) {

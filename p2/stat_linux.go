@@ -11,6 +11,9 @@ import (
 	sysunix "golang.org/x/sys/unix"
 )
 
+const metadataHandleFlag = sysunix.O_PATH
+const metadataOpenFlags = metadataHandleFlag
+
 func hostStat(info fs.FileInfo) (nlink uint64, atime, mtime, ctime time.Time, dev, ino uint64) {
 	mtime = info.ModTime()
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
