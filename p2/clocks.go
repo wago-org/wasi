@@ -2,7 +2,9 @@ package p2
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"time"
 
@@ -121,7 +123,7 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 		}
 		var p pollableValue
 		if rep == stdinRep {
-			p = pollableValue{ready: func() bool { return inputReady(s) }, wait: s.stdin.WaitReadable}
+			p = pollableValue{ready: func() bool { return inputReady(s) }, wait: s.waitStdin}
 		} else if fs.input(rep) != nil {
 			p = pollableValue{ready: func() bool { return true }, wait: func(context.Context) error { return nil }}
 		} else {
@@ -227,50 +229,55 @@ func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, 
 	return ready, nil
 }
 
-type prefixedInput struct {
-	prefix []byte
-	next   InputStream
-}
-
-func (p *prefixedInput) TryRead(dst []byte) (int, error) {
-	if len(p.prefix) > 0 {
-		n := copy(dst, p.prefix)
-		p.prefix = p.prefix[n:]
+func (s *hostState) readStdin(dst []byte) (int, error) {
+	s.stdinMu.Lock()
+	defer s.stdinMu.Unlock()
+	if s.stdinBuffered {
+		n := copy(dst, s.stdinProbe[:])
+		if n != 0 {
+			s.stdinBuffered = false
+		}
 		return n, nil
 	}
-	return p.next.TryRead(dst)
+	if s.stdinReadError != nil {
+		err := s.stdinReadError
+		if !errors.Is(err, io.EOF) {
+			s.stdinReadError = nil
+		}
+		return 0, err
+	}
+	return s.stdin.TryRead(dst)
 }
-func (p *prefixedInput) WaitReadable(ctx context.Context) error {
-	if len(p.prefix) > 0 {
+
+func (s *hostState) waitStdin(ctx context.Context) error {
+	s.stdinMu.Lock()
+	if s.stdinBuffered || s.stdinReadError != nil {
+		s.stdinMu.Unlock()
 		return nil
 	}
-	return p.next.WaitReadable(ctx)
+	in := s.stdin
+	s.stdinMu.Unlock()
+	return in.WaitReadable(ctx)
 }
+
 func inputReady(s *hostState) bool {
 	s.stdinMu.Lock()
 	defer s.stdinMu.Unlock()
-	for {
-		prefix, ok := s.stdin.(*prefixedInput)
-		if !ok {
-			break
-		}
-		if len(prefix.prefix) != 0 {
-			return true
-		}
-		// Drop consumed prefixes before probing the underlying stream. This
-		// keeps polling from retaining a chain of empty wrappers.
-		s.stdin = prefix.next
+	if s.stdinBuffered || s.stdinReadError != nil {
+		return true
 	}
 	if in, ok := s.stdin.(*asyncInput); ok && in.pendingReadError() {
 		return true
 	}
-	buf := make([]byte, 1)
-	n, err := s.stdin.TryRead(buf)
-	if n > 0 {
-		s.stdin = &prefixedInput{prefix: buf[:n], next: s.stdin}
-		return true
+	// Keep the probe's byte and error until a guest read consumes them. Using
+	// instance storage also avoids allocating a byte slice and prefix wrapper
+	// on every successful probe.
+	n, err := s.stdin.TryRead(s.stdinProbe[:])
+	s.stdinBuffered = n > 0
+	if err != nil && !errors.Is(err, ErrWouldBlock) {
+		s.stdinReadError = err
 	}
-	return err != nil && err != ErrWouldBlock
+	return s.stdinBuffered || s.stdinReadError != nil
 }
 func readyIndexes(ps []pollableValue) []component.Value {
 	out := make([]component.Value, 0, len(ps))
