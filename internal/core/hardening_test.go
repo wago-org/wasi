@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -224,6 +225,43 @@ func TestDescriptorIOErrorAndShortWriteSemantics(t *testing.T) {
 	e.fdWrite(testModule{mem}, []uint64{1, 0, 2, 32}, result)
 	if result[0] != wasiOK || binary.LittleEndian.Uint32(mem[32:]) != 3 || w.calls != 1 {
 		t.Fatalf("short write = errno %d bytes %d calls %d", result[0], binary.LittleEndian.Uint32(mem[32:]), w.calls)
+	}
+}
+
+func TestInvalidResultPointersDoNotPerformDescriptorIO(t *testing.T) {
+	mem := make([]byte, 256)
+	setIOVec(mem, 0, 64, "x")
+	m := testModule{mem: mem}
+	r := make([]uint64, 1)
+
+	var output bytes.Buffer
+	e := newTestPlugin(t, Config{Stdout: &output})
+	e.fdWrite(m, []uint64{1, 0, 1, 255}, r)
+	if r[0] != wasiEFault || output.Len() != 0 {
+		t.Fatalf("fd_write with bad count pointer = errno %d, output %q", r[0], output.String())
+	}
+
+	e = newTestPlugin(t, Config{Stdin: bytes.NewBufferString("x")})
+	e.fdRead(m, []uint64{0, 0, 1, 255}, r)
+	if r[0] != wasiEFault {
+		t.Fatalf("fd_read with bad count pointer = errno %d", r[0])
+	}
+	e.fdRead(m, []uint64{0, 0, 1, 32}, r)
+	if r[0] != wasiOK || binary.LittleEndian.Uint32(mem[32:]) != 1 || mem[64] != 'x' {
+		t.Fatalf("read after bad result pointer = errno %d, count %d, byte %q", r[0], binary.LittleEndian.Uint32(mem[32:]), mem[64])
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "seek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	e = newTestPlugin(t, Config{})
+	e.fs.fds[3] = &fdEntry{file: f, rights: rightFDSeek}
+	e.fdSeek(m, []uint64{3, 2, 0, 255}, r)
+	position, err := f.Seek(0, 1)
+	if r[0] != wasiEFault || err != nil || position != 0 {
+		t.Fatalf("fd_seek with bad output pointer = errno %d, position %d, %v", r[0], position, err)
 	}
 }
 
