@@ -325,6 +325,36 @@ func (s *hostState) streamFailure(err error) ([]component.Value, error) {
 	return []component.Value{component.ResultValue{IsErr: true, Payload: v}}, nil
 }
 
+// probeWritePermit records the latest CheckWrite result, including probes
+// performed by blocking wrappers. An error invalidates an earlier grant.
+func (s *hostState) probeWritePermit(rep uint32, w OutputStream) (uint64, error) {
+	permit, err := w.CheckWrite()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		delete(s.permits, rep)
+		return 0, err
+	}
+	if limit := s.limits.ioLimit(); permit > limit {
+		permit = limit
+	}
+	s.permits[rep] = permit
+	return permit, nil
+}
+
+// waitWritable distinguishes interruption of the caller from an asynchronous
+// stream failure. Writers may themselves fail with a context error while the
+// caller is still active; those failures belong in the stream-error result.
+func (s *hostState) waitWritable(ctx context.Context, w OutputStream) ([]component.Value, error) {
+	if err := w.WaitWritable(ctx); err != nil {
+		if canceled := ctx.Err(); canceled != nil {
+			return nil, canceled
+		}
+		return s.streamFailure(err)
+	}
+	return nil, nil
+}
+
 func (s *hostState) addPollable(v pollableValue) (uint32, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
