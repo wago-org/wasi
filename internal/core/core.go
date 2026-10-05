@@ -573,17 +573,8 @@ func decodePluginConfig(raw json.RawMessage) (pluginConfig, error) {
 	if !utf8.Valid(trimmed) {
 		return pluginConfig{}, fmt.Errorf("wasi: config is not valid UTF-8")
 	}
-	if err := rejectDuplicateJSONKeys(trimmed); err != nil {
+	if err := validateConfigJSON(trimmed); err != nil {
 		return pluginConfig{}, fmt.Errorf("wasi: config: %w", err)
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &fields); err != nil {
-		return pluginConfig{}, fmt.Errorf("wasi: config: %w", err)
-	}
-	for name, value := range fields {
-		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return pluginConfig{}, fmt.Errorf("wasi: config field %q must not be null", name)
-		}
 	}
 	var cfg pluginConfig
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
@@ -600,22 +591,47 @@ func decodePluginConfig(raw json.RawMessage) (pluginConfig, error) {
 	return cfg, nil
 }
 
-func rejectDuplicateJSONKeys(raw []byte) error {
+// validateConfigJSON checks schema shapes and duplicate keys in one token scan.
+// Known property sets fit in bit masks, avoiding maps for every JSON object.
+func validateConfigJSON(raw []byte) error {
+	const (
+		configObject uint8 = iota
+		mountObject
+		envArray
+		mountArray
+		stringValue
+		boolValue
+		numberValue
+	)
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	var value func() error
-	value = func() error {
+	var value func(uint8) error
+	value = func(kind uint8) error {
 		token, err := dec.Token()
 		if err != nil {
 			return err
 		}
-		delim, ok := token.(json.Delim)
-		if !ok {
+		switch kind {
+		case stringValue:
+			if _, ok := token.(string); !ok {
+				return fmt.Errorf("expected a JSON string")
+			}
 			return nil
-		}
-		switch delim {
-		case '{':
-			seen := map[string]struct{}{}
+		case boolValue:
+			if _, ok := token.(bool); !ok {
+				return fmt.Errorf("expected a JSON boolean")
+			}
+			return nil
+		case numberValue:
+			if _, ok := token.(json.Number); !ok {
+				return fmt.Errorf("expected a JSON number")
+			}
+			return nil
+		case configObject, mountObject:
+			if token != json.Delim('{') {
+				return fmt.Errorf("expected a JSON object")
+			}
+			var seen uint16
 			for dec.More() {
 				keyToken, err := dec.Token()
 				if err != nil {
@@ -625,37 +641,93 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 				if !ok {
 					return fmt.Errorf("object key is not a string")
 				}
-				if _, duplicate := seen[key]; duplicate {
+				var bit uint16
+				var child uint8
+				if kind == configObject {
+					switch key {
+					case "stdin":
+						bit, child = 1, stringValue
+					case "stdout":
+						bit, child = 2, stringValue
+					case "stderr":
+						bit, child = 4, stringValue
+					case "env":
+						bit, child = 8, envArray
+					case "mounts":
+						bit, child = 16, mountArray
+					case "maxOpenFiles":
+						bit, child = 32, numberValue
+					case "maxIOVecs":
+						bit, child = 64, numberValue
+					case "maxSubscriptionsPerPoll":
+						bit, child = 128, numberValue
+					default:
+						return fmt.Errorf("unknown config field %q", key)
+					}
+				} else {
+					switch key {
+					case "guest":
+						bit, child = 1, stringValue
+					case "host":
+						bit, child = 2, stringValue
+					case "read":
+						bit, child = 4, boolValue
+					case "write":
+						bit, child = 8, boolValue
+					case "mutateDirectory":
+						bit, child = 16, boolValue
+					default:
+						return fmt.Errorf("unknown mount field %q", key)
+					}
+				}
+				if seen&bit != 0 {
 					return fmt.Errorf("duplicate object key %q", key)
 				}
-				seen[key] = struct{}{}
-				if err := value(); err != nil {
+				seen |= bit
+				if err := value(child); err != nil {
 					return err
 				}
 			}
-		case '[':
-			for dec.More() {
-				if err := value(); err != nil {
+			end, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if end != json.Delim('}') {
+				return fmt.Errorf("expected end of JSON object")
+			}
+			if kind == mountObject && seen&3 != 3 {
+				return fmt.Errorf("mount requires guest and host fields")
+			}
+			return nil
+		case envArray, mountArray:
+			if token != json.Delim('[') {
+				return fmt.Errorf("expected a JSON array")
+			}
+			child, maxItems := stringValue, 4096
+			if kind == mountArray {
+				child, maxItems = mountObject, 64
+			}
+			for count := 0; dec.More(); count++ {
+				if count >= maxItems {
+					return fmt.Errorf("JSON array exceeds %d entries", maxItems)
+				}
+				if err := value(child); err != nil {
 					return err
 				}
 			}
+			end, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if end != json.Delim(']') {
+				return fmt.Errorf("expected end of JSON array")
+			}
+			return nil
 		default:
-			return fmt.Errorf("unexpected JSON delimiter %q", delim)
+			panic("invalid config JSON shape")
 		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		wantEnd := json.Delim('}')
-		if delim == '[' {
-			wantEnd = ']'
-		}
-		if end != wantEnd {
-			return fmt.Errorf("mismatched JSON delimiter %q", end)
-		}
-		return nil
 	}
-	if err := value(); err != nil {
+	if err := value(configObject); err != nil {
 		return err
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
@@ -689,7 +761,7 @@ func configFromPluginConfig(cfg pluginConfig) (Config, error) {
 		resolved.Env = append([]string(nil), (*cfg.Env)...)
 		for _, entry := range resolved.Env {
 			name, _, ok := strings.Cut(entry, "=")
-			if !ok || name == "" || strings.ContainsRune(entry, 0) || len(entry) > 32768 {
+			if !ok || name == "" || strings.ContainsRune(entry, 0) || utf8.RuneCountInString(entry) > 32768 {
 				return Config{}, fmt.Errorf("wasi: invalid environment entry %q", entry)
 			}
 		}
@@ -774,10 +846,10 @@ func cloneConfig(cfg Config) Config {
 
 func validateMount(mount Preopen) error {
 	guest, host := mount.GuestPath, mount.HostPath
-	if len(guest) == 0 || len(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
+	if len(guest) == 0 || utf8.RuneCountInString(guest) > 4096 || !strings.HasPrefix(guest, "/") || path.Clean(guest) != guest || strings.ContainsRune(guest, 0) {
 		return fmt.Errorf("wasi: invalid guest mount path %q", guest)
 	}
-	if len(host) == 0 || len(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
+	if len(host) == 0 || utf8.RuneCountInString(host) > 4096 || !filepath.IsAbs(host) || filepath.Clean(host) != host || strings.ContainsRune(host, 0) {
 		return fmt.Errorf("wasi: mount %q requires a clean absolute host path", guest)
 	}
 	return nil
