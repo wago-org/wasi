@@ -143,11 +143,12 @@ func (s *asyncInput) WaitReadable(ctx context.Context) error {
 }
 
 type outputAdapter struct {
-	w     io.Writer
-	slots chan struct{}
-	mu    sync.Mutex
-	last  <-chan struct{}
-	err   error
+	w            io.Writer
+	slots        chan struct{}
+	mu           sync.Mutex
+	last         <-chan struct{}
+	err          error
+	flushPending bool
 }
 
 type outputRequest struct {
@@ -173,9 +174,7 @@ func NewOutputStream(w io.Writer) OutputStream { return newOutput(w) }
 func (s *outputAdapter) run(request outputRequest) {
 	var err error
 	if request.flush {
-		if f, ok := s.w.(interface{ Flush() error }); ok {
-			err = f.Flush()
-		}
+		err = s.flush()
 	} else {
 		n, e := s.w.Write(request.data)
 		err = e
@@ -183,20 +182,38 @@ func (s *outputAdapter) run(request outputRequest) {
 			err = io.ErrShortWrite
 		}
 	}
-	s.mu.Lock()
-	if err != nil && s.err == nil {
-		s.err = err
+	for {
+		s.mu.Lock()
+		if err != nil && s.err == nil {
+			s.err = err
+		}
+		if s.flushPending && !request.flush && s.err == nil {
+			s.flushPending = false
+			s.mu.Unlock()
+			err = s.flush()
+			request.flush = true
+			continue
+		}
+		// A concurrent flush request is covered by the flush already in flight.
+		s.flushPending = false
+		<-s.slots
+		close(request.done)
+		s.mu.Unlock()
+		return
 	}
-	s.mu.Unlock()
-	<-s.slots
-	close(request.done)
+}
+
+func (s *outputAdapter) flush() error {
+	if f, ok := s.w.(interface{ Flush() error }); ok {
+		return f.Flush()
+	}
+	return nil
 }
 func (s *outputAdapter) CheckWrite() (uint64, error) {
 	s.mu.Lock()
-	err := s.err
-	s.mu.Unlock()
-	if err != nil {
-		return 0, err
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return 0, s.err
 	}
 	if len(s.slots) != 0 {
 		return 0, nil
@@ -204,26 +221,38 @@ func (s *outputAdapter) CheckWrite() (uint64, error) {
 	return maxIOSize, nil
 }
 func (s *outputAdapter) TryWrite(p []byte) error {
+	s.mu.Lock()
+	if s.err != nil {
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
 	select {
 	case s.slots <- struct{}{}:
 	default:
+		s.mu.Unlock()
 		return ErrWouldBlock
 	}
 	done := make(chan struct{})
-	s.mu.Lock()
 	s.last = done
 	s.mu.Unlock()
 	go s.run(outputRequest{data: append([]byte(nil), p...), done: done})
 	return nil
 }
 func (s *outputAdapter) BeginFlush() error {
-	select {
-	case s.slots <- struct{}{}:
-	default:
-		return ErrWouldBlock
-	}
-	done := make(chan struct{})
 	s.mu.Lock()
+	if s.err != nil {
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
+	if len(s.slots) != 0 {
+		s.flushPending = true
+		s.mu.Unlock()
+		return nil
+	}
+	s.slots <- struct{}{}
+	done := make(chan struct{})
 	s.last = done
 	s.mu.Unlock()
 	go s.run(outputRequest{flush: true, done: done})
