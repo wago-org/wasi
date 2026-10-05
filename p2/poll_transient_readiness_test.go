@@ -73,3 +73,31 @@ func TestTransientPollWaitsBackOffAndRemainCancellable(t *testing.T) {
 		})
 	}
 }
+
+func TestPollDoesNotAccumulateLosingWaitersAcrossRetries(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	release := make(chan struct{})
+	defer close(release)
+	var loserWaits atomic.Int32
+	_, err := waitPollables(ctx, []pollableValue{
+		{
+			ready: func() bool { return false },
+			wait:  func(context.Context) error { return nil },
+		},
+		{
+			ready: func() bool { return false },
+			wait: func(context.Context) error {
+				loserWaits.Add(1)
+				<-release // A host waiter may not honor cancellation promptly.
+				return nil
+			},
+		},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("poll returned %v, want caller deadline", err)
+	}
+	if count := loserWaits.Load(); count != 1 {
+		t.Fatalf("poll started %d overlapping waits for one pollable, want one", count)
+	}
+}
