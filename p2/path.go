@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -18,6 +19,14 @@ func openUnderPathFlags(dir *os.File, name string, flags int, mode, pathFlags ui
 		name = "."
 	}
 	return platformOpenUnderPathFlags(dir, name, flags, mode, pathFlags&1 != 0)
+}
+
+// descriptorFileName retains parent steps after links for lazy DirEntry.Info.
+func descriptorFileName(dir *os.File, name string) string {
+	if name == "." {
+		return dir.Name()
+	}
+	return dir.Name() + string(os.PathSeparator) + filepath.FromSlash(name)
 }
 
 // openUnderWalk opens every component without following links in the kernel.
@@ -52,7 +61,11 @@ resolve:
 			}
 			fd, openErr := hostFS.Openat(int(cur.Fd()), part, openFlags|hostFS.O_NOFOLLOW|hostFS.O_CLOEXEC, openMode)
 			if openErr == nil {
-				next := os.NewFile(uintptr(fd), part)
+				fileName := part
+				if last {
+					fileName = descriptorFileName(dir, name)
+				}
+				next := os.NewFile(uintptr(fd), fileName)
 				cur.Close()
 				if last {
 					return next, nil
@@ -99,9 +112,9 @@ resolve:
 		if err != nil {
 			return nil, err
 		}
-		fileName := name
-		if path.Clean(name) == "." {
-			fileName = dir.Name()
+		fileName := dir.Name()
+		if path.Clean(name) != "." {
+			fileName = descriptorFileName(dir, name)
 		}
 		return os.NewFile(uintptr(fd), fileName), nil
 	}

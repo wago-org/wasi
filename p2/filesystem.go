@@ -391,7 +391,7 @@ func openUnder(dir *os.File, name string, flags int, mode uint32) (*os.File, err
 	if err != nil {
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), parts[len(parts)-1]), nil
+	return os.NewFile(uintptr(fd), descriptorFileName(dir, path.Clean(name))), nil
 }
 
 func parentUnder(dir *os.File, name string) (*os.File, string, error) {
