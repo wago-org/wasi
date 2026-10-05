@@ -403,11 +403,18 @@ func (e *Plugin) iovecs(mem []byte, ptr, count uint32) ([][]byte, uint64) {
 		return nil, wasiEFault
 	}
 	bufs := make([][]byte, 0, count)
+	var total uint64
 	for i := uint32(0); i < count; i++ {
 		base := binary.LittleEndian.Uint32(mem[ptr+i*8:])
 		n := binary.LittleEndian.Uint32(mem[ptr+i*8+4:])
 		if uint64(base)+uint64(n) > uint64(len(mem)) {
 			return nil, wasiEFault
+		}
+		// Every descriptor I/O result is a Preview 1 size (u32). Reject
+		// unrepresentable aggregates before a caller performs any host I/O.
+		total += uint64(n)
+		if total > uint64(^uint32(0)) {
+			return nil, wasiEOverflow
 		}
 		bufs = append(bufs, mem[base:base+n])
 	}
