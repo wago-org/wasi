@@ -190,7 +190,8 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 }
 
 func blockPollable(ctx context.Context, p pollableValue) error {
-	if !p.ready() {
+	retryDelay := time.Millisecond
+	for !p.ready() {
 		err := p.wait(ctx)
 		if canceled := ctx.Err(); canceled != nil {
 			return canceled
@@ -198,35 +199,84 @@ func blockPollable(ctx context.Context, p pollableValue) error {
 		if err != nil && !p.ready() {
 			return err
 		}
+		if !p.ready() {
+			if err := waitPollRetry(ctx, &retryDelay); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
 func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, error) {
-	ready := readyIndexes(ps)
-	if len(ready) == 0 {
-		waitCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		ch := make(chan error, len(ps))
-		for _, p := range ps {
-			go func(p pollableValue) { ch <- p.wait(waitCtx) }(p)
+	if ready := readyIndexes(ps); len(ready) != 0 {
+		return ready, nil
+	}
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type waitResult struct {
+		err    error
+		resume chan struct{}
+	}
+	ch := make(chan waitResult, len(ps))
+	for _, p := range ps {
+		go func(p pollableValue) {
+			retryDelay := time.Millisecond
+			for {
+				result := waitResult{err: p.wait(waitCtx), resume: make(chan struct{})}
+				select {
+				case ch <- result:
+				case <-waitCtx.Done():
+					return
+				}
+				select {
+				case <-result.resume:
+				case <-waitCtx.Done():
+					return
+				}
+				if err := waitPollRetry(waitCtx, &retryDelay); err != nil {
+					return
+				}
+			}
+		}(p)
+	}
+	for {
+		var result waitResult
+		select {
+		case result = <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		err := <-ch
-		cancel()
-		// Check the caller context; waitCtx also cancels losing waiters.
 		if canceled := ctx.Err(); canceled != nil {
 			return nil, canceled
 		}
-		ready = readyIndexes(ps)
-		if len(ready) != 0 {
+		if ready := readyIndexes(ps); len(ready) != 0 {
 			return ready, nil
 		}
-		if err != nil {
-			return nil, err
+		if result.err != nil {
+			return nil, result.err
 		}
-		return nil, fmt.Errorf("wasi:io/poll.poll: waiter returned before readiness")
+		// Readiness was consumed before the recheck. Resume only this worker;
+		// each pollable has at most one waiter even after repeated wakeups.
+		close(result.resume)
 	}
-	return ready, nil
+}
+
+func waitPollRetry(ctx context.Context, delay *time.Duration) error {
+	timer := time.NewTimer(*delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if *delay < 50*time.Millisecond {
+		*delay *= 2
+		if *delay > 50*time.Millisecond {
+			*delay = 50 * time.Millisecond
+		}
+	}
+	return nil
 }
 
 func (s *hostState) readStdin(dst []byte) (int, error) {
