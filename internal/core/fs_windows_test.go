@@ -61,6 +61,22 @@ func TestWindowsOpenAtUsesDescriptorDirectory(t *testing.T) {
 	directory.Close()
 }
 
+func TestWindowsPathOpenCannotCreateDirectoryWithoutDirectoryRight(t *testing.T) {
+	root := t.TempDir()
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
+	e.fs.fds[3].rights &^= rightPathCreateDirectory
+	m := testModule{mem: make([]byte, 128)}
+	copy(m.mem[32:], "created")
+	r := make([]uint64, 1)
+	e.pathOpen(m, []uint64{3, 0, 32, 7, 3, rightFDRead, 0, 0, 16}, r)
+	if r[0] != wasiENotcapable {
+		t.Fatalf("path_open CREAT|DIRECTORY without directory right = errno %d, want ENOTCAPABLE", r[0])
+	}
+	if _, err := os.Stat(filepath.Join(root, "created")); !os.IsNotExist(err) {
+		t.Fatalf("directory was created without the right: %v", err)
+	}
+}
+
 func TestWindowsSetPathTimesNoFollowUpdatesSymlink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
