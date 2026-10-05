@@ -182,6 +182,35 @@ func TestPreview1PreopenAndFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestPathOpenSizeRightWorksWithoutWriteRight(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/file", []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true}}})
+	m := testModule{mem: make([]byte, 128)}
+	copy(m.mem[32:], "file")
+	r := make([]uint64, 1)
+	e.pathOpen(m, []uint64{3, 0, 32, 4, 0, rightFDFilestatSetSize, 0, 0, 16}, r)
+	if r[0] != wasiOK {
+		t.Fatalf("path_open with size right: errno %d", r[0])
+	}
+	fd := uint64(binary.LittleEndian.Uint32(m.mem[16:]))
+	defer e.fdClose(m, []uint64{fd}, r)
+	e.fdFilestatSetSize(m, []uint64{fd, 2}, r)
+	if r[0] != wasiOK {
+		t.Fatalf("fd_filestat_set_size with granted right: errno %d", r[0])
+	}
+	info, err := os.Stat(root + "/file")
+	if err != nil || info.Size() != 2 {
+		t.Fatalf("file size = %v, %v; want 2", info, err)
+	}
+	e.fdWrite(m, []uint64{fd, 64, 0, 80}, r)
+	if r[0] != wasiENotcapable {
+		t.Fatalf("fd_write recovered ungranted write right: errno %d", r[0])
+	}
+}
+
 func TestPreview1RejectsCapabilityEscape(t *testing.T) {
 	base := t.TempDir()
 	root := base + "/root"
