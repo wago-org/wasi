@@ -18,6 +18,7 @@ const (
 	hostOpenReadOnly           = os.O_RDONLY
 	hostOpenDirectory          = 1 << 24
 	hostOpenNoFollow           = 1 << 25
+	hostOpenNonblock           = 0
 	hostOpenCanCreateDirectory = true
 	hostOpenWriteAttributes    = 1 << 26
 )

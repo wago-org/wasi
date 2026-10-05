@@ -843,7 +843,13 @@ func (e *Plugin) fdWrite(m wago.HostModule, p, r []uint64) {
 	var writeErr error
 	for _, buf := range bufs {
 		if out != nil {
-			nn, err := out.Write(buf)
+			var nn int
+			var err error
+			if file, ok := out.(*os.File); ok && f.flags&4 != 0 {
+				nn, err = writeNonblocking(file, buf)
+			} else {
+				nn, err = out.Write(buf)
+			}
 			if nn < 0 || nn > len(buf) {
 				err = io.ErrShortWrite
 				nn = 0
@@ -899,7 +905,13 @@ func (e *Plugin) fdRead(m wago.HostModule, p, r []uint64) {
 	var readErr error
 	if in != nil {
 		for _, buf := range bufs {
-			nn, err := in.Read(buf)
+			var nn int
+			var err error
+			if file, ok := in.(*os.File); ok && f.flags&4 != 0 {
+				nn, err = readNonblocking(file, buf)
+			} else {
+				nn, err = in.Read(buf)
+			}
 			if nn < 0 || nn > len(buf) {
 				err = io.ErrNoProgress
 				nn = 0

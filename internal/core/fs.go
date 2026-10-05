@@ -1078,6 +1078,9 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	if code == 0 && (p[1]&^uint64(1) != 0 || p[4]&^uint64(15) != 0 || p[7]&^uint64(31) != 0) {
 		code = wasiEInval
 	}
+	if code == 0 && (fdflags&0x1a != 0 || fdflags&4 != 0 && hostOpenNonblock == 0) {
+		code = wasiENotsup
+	}
 	if code == 0 && (rights&^d.inheriting != 0 || inheriting&^d.inheriting != 0) {
 		code = wasiENotcapable
 	}
@@ -1113,6 +1116,9 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	}
 	if fdflags&1 != 0 {
 		flags |= os.O_APPEND
+	}
+	if fdflags&4 != 0 {
+		flags |= hostOpenNonblock
 	}
 	if rights&(rightFDFilestatSetTimes|rightPathFilestatSetTimes) != 0 {
 		flags |= hostOpenWriteAttributes
