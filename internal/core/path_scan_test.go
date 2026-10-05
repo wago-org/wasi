@@ -2,7 +2,6 @@ package core
 
 import (
 	"os"
-	"path"
 	"strings"
 	"testing"
 )
@@ -64,7 +63,7 @@ func TestPathResolveOrdering(t *testing.T) {
 		if s == "" || strings.HasPrefix(s, "/") || splitPathEscapes(s) {
 			want = wasiENotcapable
 		}
-		if code != want || code == wasiOK && clean != path.Clean(s) {
+		if code != want || code == wasiOK && clean != strings.TrimRight(s, "/") {
 			t.Fatalf("%q: %q %d", s, clean, code)
 		}
 		if _, _, code := e.resolve(99, s); code != wasiEBadf {

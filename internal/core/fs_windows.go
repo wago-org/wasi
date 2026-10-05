@@ -24,11 +24,15 @@ const (
 )
 
 func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
-	clean := filepath.Clean(filepath.FromSlash(name))
-	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	name = filepath.FromSlash(name)
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" || strings.HasPrefix(name, `\`) {
 		return nil, wasiENotcapable
 	}
-	parent, leaf := filepath.Split(clean)
+	name = strings.TrimRight(name, `\`)
+	if windowsParentStep(name) {
+		return walkWindowsParents(d, name, flags, mode, false, flags&hostOpenNoFollow == 0)
+	}
+	parent, leaf := filepath.Split(name)
 	parent = strings.TrimSuffix(parent, string(filepath.Separator))
 	if parent != "" {
 		p, code := openAt(d, parent, hostOpenReadOnly|hostOpenDirectory, 0)
@@ -54,6 +58,18 @@ func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) 
 			flags&hostOpenDirectory != 0, flags&os.O_CREATE != 0, flags&hostOpenNoFollow != 0, windowsAccess(flags))
 	}
 	if err != nil {
+		// Some NT filesystem implementations report a missing name for an
+		// existing non-directory when FILE_DIRECTORY_FILE is requested.
+		// Distinguish that case through a pinned metadata handle.
+		if flags&hostOpenDirectory != 0 && flags&os.O_CREATE == 0 && errors.Is(err, os.ErrNotExist) {
+			if existing, code := openMetadataAt(d, leaf, false); code == wasiOK {
+				info, statErr := existing.Stat()
+				_ = existing.Close()
+				if statErr == nil && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+					return nil, wasiENotdir
+				}
+			}
+		}
 		if flags&os.O_CREATE != 0 && flags&os.O_EXCL != 0 && errors.Is(err, syscall.ELOOP) {
 			return nil, wasiEExist
 		}
@@ -95,6 +111,145 @@ func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) 
 		}
 	}
 	return f, wasiOK
+}
+
+// windowsParentStep identifies paths that need WASI component lookup instead
+// of Windows lexical parent normalization. The ordinary leaf path allocates
+// no component slice.
+func windowsParentStep(name string) bool {
+	for start := 0; start < len(name); {
+		end := strings.IndexByte(name[start:], '\\')
+		if end < 0 {
+			end = len(name)
+		} else {
+			end += start
+		}
+		if name[start:end] == ".." {
+			return true
+		}
+		start = end + 1
+	}
+	return false
+}
+
+// walkWindowsParents expands relative symlinks before processing parent
+// steps. Every directory is opened without following a reparse point first,
+// and parent steps return to a pinned handle rather than opening "..".
+func walkWindowsParents(d *fdEntry, name string, flags int, mode uint32, metadata, follow bool) (*os.File, uint64) {
+	var current *os.File
+	var parentInline [8]*os.File
+	parents := parentInline[:0]
+	defer func() {
+		if current != nil && current != d.file {
+			_ = current.Close()
+		}
+		for _, parent := range parents {
+			if parent != d.file {
+				_ = parent.Close()
+			}
+		}
+	}()
+	symlinks := 0
+resolve:
+	for {
+		current = d.file
+		parts := strings.Split(name, `\`)
+		resolved := make([]string, 0, len(parts))
+		for i, part := range parts {
+			if part == "" || part == "." {
+				continue
+			}
+			if part == ".." {
+				if len(parents) == 0 {
+					return nil, wasiENotcapable
+				}
+				if current != d.file {
+					_ = current.Close()
+				}
+				current = parents[len(parents)-1]
+				parents = parents[:len(parents)-1]
+				resolved = resolved[:len(resolved)-1]
+				continue
+			}
+			last := i == len(parts)-1
+			if !last && len(parents) >= maxPinnedPathDepth {
+				return nil, wasiENametoolong
+			}
+			entry := &fdEntry{file: current, mount: d.mount, root: d.root}
+			openFlags, openMode := hostOpenReadOnly|hostOpenDirectory|hostOpenNoFollow, uint32(0)
+			if last {
+				openFlags, openMode = flags|hostOpenNoFollow, mode
+			}
+			var next *os.File
+			var code uint64
+			if last && metadata {
+				next, code = openMetadataAt(entry, part, false)
+				if code == wasiOK && follow {
+					info, err := next.Stat()
+					if err != nil {
+						_ = next.Close()
+						return nil, errno(err)
+					}
+					if info.Mode()&os.ModeSymlink != 0 {
+						_ = next.Close()
+						next = nil
+						code = wasiELoop
+					}
+				}
+			} else {
+				next, code = openAt(entry, part, openFlags, openMode)
+			}
+			if code == wasiOK {
+				if last {
+					if current != d.file {
+						_ = current.Close()
+					}
+					current = nil
+					return next, wasiOK
+				}
+				parents = append(parents, current)
+				current = next
+				resolved = append(resolved, part)
+				continue
+			}
+			if last && (!follow || flags&(os.O_CREATE|os.O_EXCL) == os.O_CREATE|os.O_EXCL) {
+				return nil, code
+			}
+			target, relative, err := winfs.ReadlinkTargetAt(windows.Handle(current.Fd()), part)
+			if err != nil {
+				return nil, code
+			}
+			// Absolute targets and junctions cannot be replayed relative to
+			// the confined base. Refuse them in this fallback walk.
+			if !relative || filepath.IsAbs(target) || filepath.VolumeName(target) != "" || strings.HasPrefix(target, `\`) || strings.HasPrefix(target, "/") {
+				return nil, wasiENotcapable
+			}
+			symlinks++
+			if symlinks > 40 {
+				return nil, wasiELoop
+			}
+			expanded := append([]string(nil), resolved...)
+			expanded = append(expanded, filepath.FromSlash(target))
+			expanded = append(expanded, parts[i+1:]...)
+			name = strings.Join(expanded, `\`)
+			if current != d.file {
+				_ = current.Close()
+			}
+			for _, parent := range parents {
+				if parent != d.file {
+					_ = parent.Close()
+				}
+			}
+			parents = parents[:0]
+			current = nil
+			continue resolve
+		}
+		entry := &fdEntry{file: current, mount: d.mount, root: d.root}
+		if metadata {
+			return openMetadataAt(entry, ".", follow)
+		}
+		return openAt(entry, ".", flags, mode)
+	}
 }
 
 func windowsAccess(flags int) uint32 {
@@ -175,11 +330,15 @@ func normalizeWindowsPath(name string) string {
 }
 
 func openMetadataAt(d *fdEntry, name string, follow bool) (*os.File, uint64) {
-	clean := filepath.Clean(filepath.FromSlash(name))
-	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	name = filepath.FromSlash(name)
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" || strings.HasPrefix(name, `\`) {
 		return nil, wasiENotcapable
 	}
-	parent, leaf := filepath.Split(clean)
+	name = strings.TrimRight(name, `\`)
+	if windowsParentStep(name) {
+		return walkWindowsParents(d, name, 0, 0, true, follow)
+	}
+	parent, leaf := filepath.Split(name)
 	parent = strings.TrimSuffix(parent, string(filepath.Separator))
 	if parent != "" {
 		p, code := openAt(d, parent, hostOpenReadOnly|hostOpenDirectory, 0)

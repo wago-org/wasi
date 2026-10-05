@@ -5,7 +5,6 @@ package core
 import (
 	"errors"
 	"os"
-	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -46,32 +45,82 @@ func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) 
 
 // openAtWalk is the secure fallback for kernels, seccomp profiles, and syscall
 // emulators without openat2. It refuses symlinks rather than attempting a
-// race-prone userspace emulation of RESOLVE_BENEATH.
+// race-prone userspace emulation of RESOLVE_BENEATH. Parent steps pop pinned
+// descriptors, avoiding pathname replay and native ".." traversal.
 func openAtWalk(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
-	clean := path.Clean(name)
-	if clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
+	if name == "" || strings.HasPrefix(name, "/") || pathEscapes(name) {
 		return nil, wasiENotcapable
 	}
-	parts := strings.Split(clean, "/")
 	curFD, err := unix.Dup(int(d.file.Fd()))
 	if err != nil {
 		return nil, errno(err)
 	}
-	cur := os.NewFile(uintptr(curFD), d.file.Name())
-	defer func() { _ = cur.Close() }()
-	for _, part := range parts[:len(parts)-1] {
-		if part == "." || part == "" {
-			continue
+	var parentInline [8]int
+	parents := parentInline[:0]
+	defer func() {
+		_ = unix.Close(curFD)
+		for _, fd := range parents {
+			_ = unix.Close(fd)
 		}
-		next, err := unix.Openat(int(cur.Fd()), part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if err != nil {
-			return nil, capabilityErr(err)
+	}()
+	retainParents := false
+	if strings.Contains(name, "..") {
+		for start := 0; start < len(name); {
+			end := strings.IndexByte(name[start:], '/')
+			if end < 0 {
+				end = len(name)
+			} else {
+				end += start
+			}
+			if name[start:end] == ".." {
+				retainParents = true
+				break
+			}
+			start = end + 1
 		}
-		cur.Close()
-		cur = os.NewFile(uintptr(next), part)
 	}
-	leaf := parts[len(parts)-1]
-	fd, err := unix.Openat(int(cur.Fd()), leaf, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
+	for start := 0; start < len(name); {
+		end := strings.IndexByte(name[start:], '/')
+		if end < 0 {
+			end = len(name)
+		} else {
+			end += start
+		}
+		part := name[start:end]
+		switch part {
+		case "", ".":
+		case "..":
+			if len(parents) == 0 {
+				return nil, wasiENotcapable
+			}
+			_ = unix.Close(curFD)
+			curFD = parents[len(parents)-1]
+			parents = parents[:len(parents)-1]
+		default:
+			if end == len(name) {
+				fd, err := unix.Openat(curFD, part, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
+				if err != nil {
+					return nil, capabilityErr(err)
+				}
+				return os.NewFile(uintptr(fd), name), wasiOK
+			}
+			if retainParents && len(parents) >= maxPinnedPathDepth {
+				return nil, wasiENametoolong
+			}
+			next, err := unix.Openat(curFD, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return nil, capabilityErr(err)
+			}
+			if retainParents {
+				parents = append(parents, curFD)
+			} else {
+				_ = unix.Close(curFD)
+			}
+			curFD = next
+		}
+		start = end + 1
+	}
+	fd, err := unix.Openat(curFD, ".", flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 	if err != nil {
 		return nil, capabilityErr(err)
 	}
