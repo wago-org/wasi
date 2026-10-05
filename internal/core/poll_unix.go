@@ -5,7 +5,6 @@ package core
 import (
 	"context"
 	"os"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -46,18 +45,38 @@ func osFileError(file *os.File) uint16 {
 }
 
 func waitOSFiles(ctx context.Context, files []pollFile) error {
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		fds := make([]unix.PollFd, 0, len(files))
 		for _, file := range files {
-			if osFileError(file.file) != 0 || osFileReady(file.file, file.typ) {
+			conn, err := file.file.SyscallConn()
+			if err != nil {
+				// Let readySubscriptions report the descriptor error.
+				return nil
+			}
+			events := int16(unix.POLLIN)
+			if file.typ == 2 {
+				events = unix.POLLOUT
+			}
+			if err := conn.Control(func(fd uintptr) {
+				fds = append(fds, unix.PollFd{Fd: int32(fd), Events: events})
+			}); err != nil {
 				return nil
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
+		// Reacquire each descriptor after this bounded wait. A closed fd may be
+		// reused by an unrelated file before poll returns.
+		n, err := unix.Poll(fds, 50)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n != 0 {
+			return nil
 		}
 	}
 }
