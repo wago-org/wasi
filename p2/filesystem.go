@@ -741,7 +741,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if descFlags&(2|1<<5) != 0 {
 			flags |= hostFS.O_WRITE_ATTRIBUTES
 		}
-		f, err := openUnder(n.file, args[2].(string), flags, 0o644)
+		f, err := openUnderPathFlags(n.file, args[2].(string), flags, 0o644, args[1].(uint32))
 		if err != nil {
 			return fsFailure(err), nil
 		}
