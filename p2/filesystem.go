@@ -92,6 +92,17 @@ type appendTarget struct {
 	mu sync.Mutex
 }
 
+// A fixed lock table makes append atomic across independently opened
+// descriptors (including descriptors owned by different instances) without
+// allocating a lock for every open. Collisions only serialize unrelated files.
+var appendTargets [256]appendTarget
+
+func appendTargetFor(info fs.FileInfo) *appendTarget {
+	_, _, _, _, dev, ino := hostStat(info)
+	key := dev*0x9e3779b97f4a7c15 ^ ino*0xbf58476d1ce4e5b9
+	return &appendTargets[byte(key^(key>>32))]
+}
+
 type fileStream struct {
 	mu     sync.Mutex
 	file   *os.File
@@ -212,7 +223,11 @@ func (s *filesystemState) addDesc(n *descriptorNode) (uint32, error) {
 		return 0, hostFS.EMFILE
 	}
 	if !n.isDir && n.append == nil {
-		n.append = &appendTarget{}
+		info, err := n.file.Stat()
+		if err != nil {
+			return 0, err
+		}
+		n.append = appendTargetFor(info)
 	}
 	rep := s.nextDesc
 	s.nextDesc++
@@ -645,7 +660,11 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			f.Close()
 			return fsFailure(err), nil
 		}
-		rep, addErr := s.addDesc(&descriptorNode{file: f, mount: n.mount, flags: descFlags, isDir: info.IsDir()})
+		node := &descriptorNode{file: f, mount: n.mount, flags: descFlags, isDir: info.IsDir()}
+		if !node.isDir {
+			node.append = appendTargetFor(info)
+		}
+		rep, addErr := s.addDesc(node)
 		if addErr != nil {
 			f.Close()
 			return fsFailure(addErr), nil
