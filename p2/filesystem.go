@@ -561,6 +561,23 @@ type descriptorHandles interface {
 	TakeOwn(uint32, uint32) (uint32, error)
 }
 
+func (s *filesystemState) rollbackDirectories(out []component.Value, handles descriptorHandles) {
+	for _, value := range out {
+		handle := value.([]component.Value)[0].(uint32)
+		rep, err := handles.TakeOwn(descriptorResource, handle)
+		if err != nil {
+			continue
+		}
+		s.mu.Lock()
+		node := s.descs[rep]
+		delete(s.descs, rep)
+		s.mu.Unlock()
+		if node != nil {
+			_ = node.file.Close()
+		}
+	}
+}
+
 func (s *filesystemState) getDirectories(handles descriptorHandles) ([]component.Value, error) {
 	out := make([]component.Value, 0, len(s.mounts))
 	for i, mount := range s.mounts {
@@ -572,16 +589,19 @@ func (s *filesystemState) getDirectories(handles descriptorHandles) ([]component
 			f, err = openPreopenDirectory(mount.host, mount.flags&(2|1<<5) != 0)
 		}
 		if err != nil {
+			s.rollbackDirectories(out, handles)
 			return nil, fmt.Errorf("preopen %q: %w", mount.guest, err)
 		}
 		info, err := f.Stat()
 		if err != nil || !info.IsDir() {
 			f.Close()
+			s.rollbackDirectories(out, handles)
 			return nil, fmt.Errorf("preopen %q is not a directory", mount.guest)
 		}
 		rep, addErr := s.addDesc(&descriptorNode{file: f, mount: i, flags: mount.flags, isDir: true})
 		if addErr != nil {
 			f.Close()
+			s.rollbackDirectories(out, handles)
 			return nil, addErr
 		}
 		h := handles.NewOwn(descriptorResource, rep)
