@@ -1373,6 +1373,7 @@ func (s *filesystemState) dropStream(rep uint32) error {
 		s.ioState.mu.Lock()
 		delete(s.ioState.outputs, rep)
 		delete(s.ioState.permits, rep)
+		delete(s.ioState.outputFailed, rep)
 		s.ioState.mu.Unlock()
 	}
 	if n != nil {

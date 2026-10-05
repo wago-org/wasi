@@ -587,6 +587,7 @@ type hostState struct {
 	nextPollable   uint32
 	permits        map[uint32]uint64
 	outputs        map[uint32]OutputStream
+	outputFailed   map[uint32]bool
 	networks       uint32
 	limits         Limits
 }
@@ -626,7 +627,7 @@ func instanceOptions(cfg Config) []component.Option {
 	if random == nil {
 		random = crand.Reader
 	}
-	s := &hostState{stdin: stdin, stdout: stdout, stderr: stderr, base: time.Now(), wall: wall, errors: map[uint32]streamErrorValue{}, nextError: 1, pollables: map[uint32]pollableValue{}, nextPollable: 1, permits: map[uint32]uint64{}, outputs: map[uint32]OutputStream{}, limits: limits}
+	s := &hostState{stdin: stdin, stdout: stdout, stderr: stderr, base: time.Now(), wall: wall, errors: map[uint32]streamErrorValue{}, nextError: 1, pollables: map[uint32]pollableValue{}, nextPollable: 1, permits: map[uint32]uint64{}, outputs: map[uint32]OutputStream{}, outputFailed: map[uint32]bool{}, limits: limits}
 	fs := cfg.filesystem
 	if fs == nil {
 		fs = newFilesystem(cfg.Mounts, limits)
@@ -731,9 +732,12 @@ func instanceOptions(cfg Config) []component.Option {
 		if err != nil {
 			return nil, err
 		}
+		if s.outputClosed(rep) {
+			return s.streamFailure(io.EOF)
+		}
 		permit, err := s.probeWritePermit(rep, w)
 		if err != nil {
-			return s.streamFailure(err)
+			return s.outputFailure(rep, err)
 		}
 		return []component.Value{component.ResultValue{Payload: permit}}, nil
 	}
@@ -756,8 +760,11 @@ func instanceOptions(cfg Config) []component.Option {
 		if err := s.consumeWritePermit(rep, uint64(len(buf))); err != nil {
 			return nil, err
 		}
+		if s.outputClosed(rep) {
+			return s.streamFailure(io.EOF)
+		}
 		if err := w.TryWrite(buf); err != nil {
-			return s.streamFailure(err)
+			return s.outputFailure(rep, err)
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}
@@ -789,7 +796,7 @@ func instanceOptions(cfg Config) []component.Option {
 		}
 		retryDelay := time.Millisecond
 		for len(buf) > 0 {
-			if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+			if values, err := s.waitWritable(ctx, rep, w); values != nil || err != nil {
 				return values, err
 			}
 			values, err := checkWrite(ctx, []component.Value{rep})
@@ -821,17 +828,17 @@ func instanceOptions(cfg Config) []component.Option {
 			}
 			buf = buf[n:]
 		}
-		if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+		if values, err := s.waitWritable(ctx, rep, w); values != nil || err != nil {
 			return values, err
 		}
 		if err := w.BeginFlush(); err != nil {
-			return s.streamFailure(err)
+			return s.outputFailure(rep, err)
 		}
-		if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+		if values, err := s.waitWritable(ctx, rep, w); values != nil || err != nil {
 			return values, err
 		}
 		if _, err := s.probeWritePermit(rep, w); err != nil {
-			return s.streamFailure(err)
+			return s.outputFailure(rep, err)
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}
@@ -843,8 +850,11 @@ func instanceOptions(cfg Config) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("output-stream.blocking-flush: self is %T", args[0])
 		}
+		if s.outputClosed(rep) {
+			return s.streamFailure(io.EOF)
+		}
 		if err := flushWriter(rep); err != nil {
-			return s.streamFailure(err)
+			return s.outputFailure(rep, err)
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}
@@ -857,17 +867,17 @@ func instanceOptions(cfg Config) []component.Option {
 		if err != nil {
 			return nil, err
 		}
-		if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+		if values, err := s.waitWritable(ctx, rep, w); values != nil || err != nil {
 			return values, err
 		}
 		if err := w.BeginFlush(); err != nil {
-			return s.streamFailure(err)
+			return s.outputFailure(rep, err)
 		}
-		if values, err := s.waitWritable(ctx, w); values != nil || err != nil {
+		if values, err := s.waitWritable(ctx, rep, w); values != nil || err != nil {
 			return values, err
 		}
 		if _, err := s.probeWritePermit(rep, w); err != nil {
-			return s.streamFailure(err)
+			return s.outputFailure(rep, err)
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}
@@ -1009,8 +1019,11 @@ func instanceOptions(cfg Config) []component.Option {
 		if err := s.consumeWritePermit(rep, n); err != nil {
 			return nil, err
 		}
+		if s.outputClosed(rep) {
+			return s.streamFailure(io.EOF)
+		}
 		if err := w.TryWrite(make([]byte, int(n))); err != nil {
-			return s.streamFailure(err)
+			return s.outputFailure(rep, err)
 		}
 		return []component.Value{component.ResultValue{}}, nil
 	}
@@ -1048,7 +1061,7 @@ func instanceOptions(cfg Config) []component.Option {
 			retryDelay := time.Millisecond
 			for {
 				if blocking {
-					if values, err := s.waitWritable(ctx, out); values != nil || err != nil {
+					if values, err := s.waitWritable(ctx, outRep, out); values != nil || err != nil {
 						return values, err
 					}
 				}
