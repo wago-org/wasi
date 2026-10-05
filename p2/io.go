@@ -88,6 +88,15 @@ func (s *asyncInput) collect() {
 	}
 }
 
+// pendingReadError reports readiness without consuming an error that must be
+// delivered by the next read.
+func (s *asyncInput) pendingReadError() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.collect()
+	return s.result != nil && len(s.result.b) == 0 && s.result.err != nil
+}
+
 func (s *asyncInput) TryRead(dst []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -108,10 +117,13 @@ func (s *asyncInput) TryRead(dst []byte) (int, error) {
 		return n, nil
 	}
 	err := s.result.err
-	s.result = nil
 	if errors.Is(err, io.EOF) {
 		s.closed = true
+	} else if n > 0 && err != nil {
+		// Deliver the bytes first, retaining the error for the next read.
+		return n, nil
 	}
+	s.result = nil
 	if n > 0 {
 		return n, nil
 	}

@@ -261,6 +261,9 @@ func inputReady(s *hostState) bool {
 		// keeps polling from retaining a chain of empty wrappers.
 		s.stdin = prefix.next
 	}
+	if in, ok := s.stdin.(*asyncInput); ok && in.pendingReadError() {
+		return true
+	}
 	buf := make([]byte, 1)
 	n, err := s.stdin.TryRead(buf)
 	if n > 0 {
