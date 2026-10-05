@@ -6,6 +6,7 @@ import (
 )
 
 var errUnsupportedClock = errors.New("unsupported clock")
+var errClockOverflow = errors.New("clock timestamp exceeds WASI timestamp range")
 
 // ClockSource supplies the four clocks named by WASI Preview 1. Implementations
 // must keep Monotonic nondecreasing. CPU clocks may return an error when the
@@ -31,10 +32,15 @@ func newSystemClock(realtime func() time.Time) ClockSource {
 
 func (c *systemClock) Realtime() (uint64, uint64, error) {
 	n := c.realtime()
-	if n.UnixNano() < 0 {
+	seconds := n.Unix()
+	if seconds < 0 {
 		return 0, 1, nil
 	}
-	return uint64(n.UnixNano()), 1, nil
+	nanoseconds := uint64(n.Nanosecond())
+	if uint64(seconds) > (^uint64(0)-nanoseconds)/1_000_000_000 {
+		return 0, 1, errClockOverflow
+	}
+	return uint64(seconds)*1_000_000_000 + nanoseconds, 1, nil
 }
 
 func (c *systemClock) Monotonic() (uint64, uint64, error) {

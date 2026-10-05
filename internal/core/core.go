@@ -1188,7 +1188,11 @@ func (e *Plugin) clockTimeGet(m wago.HostModule, p, r []uint64) {
 	}
 	now, _, err := clockValue(e.cfg.Clocks, uint32(p[0]))
 	if err != nil {
-		r[0] = wasiENotsup
+		if errors.Is(err, errClockOverflow) {
+			r[0] = wasiEOverflow
+		} else {
+			r[0] = wasiENotsup
+		}
 		return
 	}
 	if !putLe64(m.Memory(), uint32(p[2]), now) {
@@ -1204,7 +1208,7 @@ func (e *Plugin) clockResGet(m wago.HostModule, p, r []uint64) {
 		return
 	}
 	_, resolution, err := clockValue(e.cfg.Clocks, uint32(p[0]))
-	if err != nil {
+	if err != nil && !errors.Is(err, errClockOverflow) {
 		r[0] = wasiENotsup
 		return
 	}
