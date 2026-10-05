@@ -13,7 +13,7 @@ func TestPathOpenAtGuestDescriptorLimitDoesNotMutate(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := newTestPlugin(t, Config{
-		Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}},
+		Mounts:       []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}},
 		MaxOpenFiles: 4, // stdio and this preopen consume all guest descriptors
 	})
 	defer e.closeAll()
