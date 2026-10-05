@@ -98,6 +98,10 @@ func openFileAt(fd int, name string, flags int, mode uint32) (int, error) {
 	if filepath.IsAbs(clean) || filepath.Base(clean) != clean {
 		return 0, errNotPermitted
 	}
+	if flags&metadataHandleFlag != 0 {
+		handle, err := winfs.OpenMetadataAt(windows.Handle(fd), clean, flags&winDirectory != 0)
+		return int(handle), err
+	}
 	openFlags := flags &^ (winDirectory | winNoFollow | winWriteAttributes)
 	f, err := openWindowsP2At(windows.Handle(fd), clean, openFlags, flags&winDirectory != 0, flags&winNoFollow != 0, flags&winWriteAttributes != 0)
 	if err != nil {

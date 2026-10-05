@@ -189,6 +189,26 @@ func openForMutation(root windows.Handle, name string, directory int, access uin
 	return handle, nil
 }
 
+// OpenMetadataAt opens a single component without following its reparse point
+// and requests only attribute access, so metadata never opens the data stream.
+func OpenMetadataAt(root windows.Handle, name string, directory bool) (windows.Handle, error) {
+	if name == "." {
+		process := windows.CurrentProcess()
+		var handle windows.Handle
+		err := windows.DuplicateHandle(process, root, process, &handle,
+			windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE, false, 0)
+		return handle, err
+	}
+	if name == "" || name == ".." || filepath.IsAbs(name) || filepath.Base(name) != name {
+		return windows.InvalidHandle, syscall.EINVAL
+	}
+	directoryMode := -1
+	if directory {
+		directoryMode = 1
+	}
+	return openForMutation(root, name, directoryMode, windows.FILE_READ_ATTRIBUTES)
+}
+
 func DeleteAt(root windows.Handle, name string, directory bool) error {
 	if name == "." {
 		return syscall.EINVAL
