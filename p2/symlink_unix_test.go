@@ -18,6 +18,8 @@ func TestCreateAbsoluteSymlinkTargetIsRejected(t *testing.T) {
 
 	if err := symlinkUnder(dir, "/outside", "created"); !errors.Is(err, hostFS.EPERM) {
 		t.Fatalf("symlink with absolute target = %v, want EPERM", err)
+	} else if got := fsError(err); got != fsErrNotPermitted {
+		t.Fatalf("symlink guest error = %d, want not-permitted (%d)", got, fsErrNotPermitted)
 	}
 	if _, err := os.Lstat(root + "/created"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("absolute symlink was created: %v", err)
@@ -37,6 +39,8 @@ func TestReadAbsoluteSymlinkTargetIsRejected(t *testing.T) {
 	}
 	if target, err := readlinkUnder(dir, "existing"); !errors.Is(err, hostFS.EPERM) {
 		t.Fatalf("readlink absolute target = %q, %v; want EPERM", target, err)
+	} else if got := fsError(err); got != fsErrNotPermitted {
+		t.Fatalf("readlink guest error = %d, want not-permitted (%d)", got, fsErrNotPermitted)
 	}
 }
 
