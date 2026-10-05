@@ -194,8 +194,8 @@ func (e *Plugin) Register(reg *wago.Registrar) error {
 			return err
 		}
 	}
-	for _, b := range e.bindings() {
-		imports.HostFunc(e.module, b.name, b.callback()).Params(b.params...).Results(b.results...).Capability(b.cap).Docs(b.docs)
+	for _, b := range importBindings {
+		imports.HostFunc(e.module, b.name, b.callback(e)).Params(b.params()...).Results(b.results()...).Capability(b.cap).Docs(b.docs)
 	}
 	return reg.Lifecycle(wago.PluginLifecycle{Start: e.start, Stop: e.stop})
 }
@@ -230,28 +230,217 @@ func Imports(module string, cfg Config) *wago.Imports {
 
 func (e *Plugin) Imports() *wago.Imports {
 	out := wago.NewImports()
-	for _, b := range e.bindings() {
-		out.HostFunc(e.module, b.name, b.callback()).Params(b.params...).Results(b.results...).Capability(b.cap).Docs(b.docs)
+	for _, b := range importBindings {
+		out.HostFunc(e.module, b.name, b.callback(e)).Params(b.params()...).Results(b.results()...).Capability(b.cap).Docs(b.docs)
 	}
 	return out
 }
 
-type hostFunc func(wago.HostModule, []uint64, []uint64)
-
 // binding is one host function with its declared signature and docs. Register and
-// Imports both derive from bindings so the plugin and raw-bundle paths never drift.
+// Imports both use the private definition table, so their declarations agree.
 type binding struct {
-	name            string
-	handler         func(*Plugin, wago.HostModule, []uint64, []uint64)
-	fn              hostFunc
-	params, results []wago.ValType
-	cap             wago.Capability
-	docs            string
+	name      string
+	handler   handlerID
+	signature uint8
+	errno     bool
+	cap       wago.Capability
+	docs      string
 }
 
-func (b binding) callback() wago.CallerHostCallFunc {
+func (b binding) callback(e *Plugin) wago.CallerHostCallFunc {
+	handler := b.handler
+	switch handler {
+	case dispatchargsSizesGet, dispatchargsGet, dispatchenvironSizesGet, dispatchenvironGet:
+		return argumentCallback(e, handler)
+	}
 	return func(caller wago.Caller, call wago.HostCall) {
-		b.fn(caller, call.ParamSlots(), call.ResultSlots())
+		state, code := e.stateFor(caller)
+		if code != wasiOK {
+			setStateError(call.ResultSlots(), code)
+			return
+		}
+		defer state.mu.Unlock()
+		var current Plugin
+		current.module = e.module
+		current.cfg = e.cfg
+		current.arguments = e.arguments
+		current.fs = state
+		current.guard = e.guard
+		handler.call(&current, caller, call.ParamSlots(), call.ResultSlots())
+	}
+}
+
+func argumentCallback(e *Plugin, handler handlerID) wago.CallerHostCallFunc {
+	return func(caller wago.Caller, call wago.HostCall) {
+		state, code := e.stateFor(caller)
+		if code != wasiOK {
+			setStateError(call.ResultSlots(), code)
+			return
+		}
+		defer state.mu.Unlock()
+		params, results := call.ParamSlots(), call.ResultSlots()
+		switch handler {
+		case dispatchargsSizesGet:
+			e.argsSizesGet(caller.Memory(), params, results)
+		case dispatchargsGet:
+			e.argsGet(caller.Memory(), params, results)
+		case dispatchenvironSizesGet:
+			e.environSizesGet(caller.Memory(), params, results)
+		case dispatchenvironGet:
+			e.environGet(caller.Memory(), params, results)
+		default:
+			panic("invalid WASI argument handler")
+		}
+	}
+}
+
+type handlerID uint8
+
+const (
+	dispatchfdWrite handlerID = iota
+	dispatchfdRead
+	dispatchfdClose
+	dispatchfdSeek
+	dispatchfdFdstatGet
+	dispatchfdPrestatGet
+	dispatchfdPrestatDirName
+	dispatchprocExit
+	dispatchargsSizesGet
+	dispatchargsGet
+	dispatchenvironSizesGet
+	dispatchenvironGet
+	dispatchclockTimeGet
+	dispatchclockResGet
+	dispatchrandomGet
+	dispatchschedYield
+	dispatchfdAdvise
+	dispatchfdAllocate
+	dispatchfdDatasync
+	dispatchfdSync
+	dispatchfdFdstatSetFlags
+	dispatchfdFdstatSetRights
+	dispatchfdFilestatGet
+	dispatchfdFilestatSetSize
+	dispatchfdFilestatSetTimes
+	dispatchfdPread
+	dispatchfdPwrite
+	dispatchfdReaddir
+	dispatchfdRenumber
+	dispatchfdTell
+	dispatchpathCreateDirectory
+	dispatchpathFilestatGet
+	dispatchpathFilestatSetTimes
+	dispatchpathLink
+	dispatchpathOpen
+	dispatchpathReadlink
+	dispatchpathRemoveDirectory
+	dispatchpathRename
+	dispatchpathSymlink
+	dispatchpathUnlinkFile
+	dispatchpollOneoff
+	dispatchprocRaise
+	dispatchsockAccept
+	dispatchsockRecv
+	dispatchsockSend
+	dispatchsockShutdown
+)
+
+func (h handlerID) call(e *Plugin, m wago.HostModule, p, r []uint64) {
+	switch h {
+	case dispatchfdWrite:
+		e.fdWrite(m, p, r)
+	case dispatchfdRead:
+		e.fdRead(m, p, r)
+	case dispatchfdClose:
+		e.fdClose(m, p, r)
+	case dispatchfdSeek:
+		e.fdSeek(m, p, r)
+	case dispatchfdFdstatGet:
+		e.fdFdstatGet(m, p, r)
+	case dispatchfdPrestatGet:
+		e.fdPrestatGet(m, p, r)
+	case dispatchfdPrestatDirName:
+		e.fdPrestatDirName(m, p, r)
+	case dispatchprocExit:
+		e.procExit(m, p, r)
+	case dispatchargsSizesGet:
+		e.argsSizesGet(m.Memory(), p, r)
+	case dispatchargsGet:
+		e.argsGet(m.Memory(), p, r)
+	case dispatchenvironSizesGet:
+		e.environSizesGet(m.Memory(), p, r)
+	case dispatchenvironGet:
+		e.environGet(m.Memory(), p, r)
+	case dispatchclockTimeGet:
+		e.clockTimeGet(m, p, r)
+	case dispatchclockResGet:
+		e.clockResGet(m, p, r)
+	case dispatchrandomGet:
+		e.randomGet(m, p, r)
+	case dispatchschedYield:
+		e.schedYield(m, p, r)
+	case dispatchfdAdvise:
+		e.fdAdvise(m, p, r)
+	case dispatchfdAllocate:
+		e.fdAllocate(m, p, r)
+	case dispatchfdDatasync:
+		e.fdDatasync(m, p, r)
+	case dispatchfdSync:
+		e.fdSync(m, p, r)
+	case dispatchfdFdstatSetFlags:
+		e.fdFdstatSetFlags(m, p, r)
+	case dispatchfdFdstatSetRights:
+		e.fdFdstatSetRights(m, p, r)
+	case dispatchfdFilestatGet:
+		e.fdFilestatGet(m, p, r)
+	case dispatchfdFilestatSetSize:
+		e.fdFilestatSetSize(m, p, r)
+	case dispatchfdFilestatSetTimes:
+		e.fdFilestatSetTimes(m, p, r)
+	case dispatchfdPread:
+		e.fdPread(m, p, r)
+	case dispatchfdPwrite:
+		e.fdPwrite(m, p, r)
+	case dispatchfdReaddir:
+		e.fdReaddir(m, p, r)
+	case dispatchfdRenumber:
+		e.fdRenumber(m, p, r)
+	case dispatchfdTell:
+		e.fdTell(m, p, r)
+	case dispatchpathCreateDirectory:
+		e.pathCreateDirectory(m, p, r)
+	case dispatchpathFilestatGet:
+		e.pathFilestatGet(m, p, r)
+	case dispatchpathFilestatSetTimes:
+		e.pathFilestatSetTimes(m, p, r)
+	case dispatchpathLink:
+		e.pathLink(m, p, r)
+	case dispatchpathOpen:
+		e.pathOpen(m, p, r)
+	case dispatchpathReadlink:
+		e.pathReadlink(m, p, r)
+	case dispatchpathRemoveDirectory:
+		e.pathRemoveDirectory(m, p, r)
+	case dispatchpathRename:
+		e.pathRename(m, p, r)
+	case dispatchpathSymlink:
+		e.pathSymlink(m, p, r)
+	case dispatchpathUnlinkFile:
+		e.pathUnlinkFile(m, p, r)
+	case dispatchpollOneoff:
+		e.pollOneoff(m, p, r)
+	case dispatchprocRaise:
+		e.procRaise(m, p, r)
+	case dispatchsockAccept:
+		e.sockAccept(m, p, r)
+	case dispatchsockRecv:
+		e.sockRecv(m, p, r)
+	case dispatchsockSend:
+		e.sockSend(m, p, r)
+	case dispatchsockShutdown:
+		e.sockShutdown(m, p, r)
+	default:
+		panic("invalid WASI handler")
 	}
 }
 
@@ -277,79 +466,92 @@ var guestCapabilities = []guestCapability{
 	{CapUnsupported, "call unsupported Preview 1 compatibility stubs"},
 }
 
-func (e *Plugin) bindings() []binding {
-	i32 := []wago.ValType{wago.ValI32}
-	i32x2 := []wago.ValType{wago.ValI32, wago.ValI32}
-	i32x3 := []wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32}
-	i32x4 := []wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32}
-	i64 := wago.ValI64
-	i32v := wago.ValI32
+type importSignature struct {
+	values [9]wago.ValType
+	count  uint8
+}
 
-	bindings := []binding{
-		{"fd_write", (*Plugin).fdWrite, nil, i32x4, i32, CapFDWrite, "write iovecs to a file descriptor (stdout/stderr)"},
-		{"fd_read", (*Plugin).fdRead, nil, i32x4, i32, CapFDRead, "read into iovecs from a file descriptor (stdin)"},
-		{"fd_close", (*Plugin).fdClose, nil, i32, i32, CapFDManage, "close a file descriptor (streams: no-op)"},
-		{"fd_seek", (*Plugin).fdSeek, nil, []wago.ValType{i32v, i64, i32v, i32v}, i32, CapFDManage, "seek a file descriptor (streams: ESPIPE)"},
-		{"fd_fdstat_get", (*Plugin).fdFdstatGet, nil, i32x2, i32, CapFDManage, "report fd stat (streams: character device)"},
-		{"fd_prestat_get", (*Plugin).fdPrestatGet, nil, i32x2, i32, CapFDManage, "report a preopen (none: EBADF)"},
-		{"fd_prestat_dir_name", (*Plugin).fdPrestatDirName, nil, i32x3, i32, CapFDManage, "report a preopen dir name (none: EBADF)"},
-		{"proc_exit", (*Plugin).procExit, nil, i32, nil, CapProcessExit, "terminate the program with an exit code"},
-		{"args_sizes_get", (*Plugin).argsSizesGet, nil, i32x2, i32, CapArgumentsRead, "report argc and argv byte size"},
-		{"args_get", (*Plugin).argsGet, nil, i32x2, i32, CapArgumentsRead, "write argv pointers and bytes"},
-		{"environ_sizes_get", (*Plugin).environSizesGet, nil, i32x2, i32, CapEnvironmentRead, "report environ count and byte size"},
-		{"environ_get", (*Plugin).environGet, nil, i32x2, i32, CapEnvironmentRead, "write environ pointers and bytes"},
-		{"clock_time_get", (*Plugin).clockTimeGet, nil, []wago.ValType{i32v, i64, i32v}, i32, CapClockRead, "read a clock's current time"},
-		{"clock_res_get", (*Plugin).clockResGet, nil, i32x2, i32, CapClockRead, "read a clock's resolution"},
-		{"random_get", (*Plugin).randomGet, nil, i32x2, i32, CapRandomRead, "fill a buffer with random bytes"},
+var importSignatures = [...]importSignature{
+	{[9]wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32}, 4},
+	{[9]wago.ValType{wago.ValI32}, 1},
+	{[9]wago.ValType{wago.ValI32, wago.ValI64, wago.ValI32, wago.ValI32}, 4},
+	{[9]wago.ValType{wago.ValI32, wago.ValI32}, 2},
+	{[9]wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32}, 3},
+	{[9]wago.ValType{wago.ValI32, wago.ValI64, wago.ValI32}, 3},
+	{[9]wago.ValType{}, 0},
+	{[9]wago.ValType{wago.ValI32, wago.ValI64, wago.ValI64, wago.ValI32}, 4},
+	{[9]wago.ValType{wago.ValI32, wago.ValI64, wago.ValI64}, 3},
+	{[9]wago.ValType{wago.ValI32, wago.ValI64}, 2},
+	{[9]wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI64, wago.ValI32}, 5},
+	{[9]wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32}, 5},
+	{[9]wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI64, wago.ValI64, wago.ValI32}, 7},
+	{[9]wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32}, 7},
+	{[9]wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI64, wago.ValI64, wago.ValI32, wago.ValI32}, 9},
+	{[9]wago.ValType{wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32, wago.ValI32}, 6},
+}
+var errnoResult = [1]wago.ValType{wago.ValI32}
 
-		{"sched_yield", (*Plugin).schedYield, nil, nil, i32, CapSchedulerYield, "yield execution"},
-		{"fd_advise", (*Plugin).fdAdvise, nil, []wago.ValType{i32v, i64, i64, i32v}, i32, CapFDManage, "provide file access advice"},
-		{"fd_allocate", (*Plugin).fdAllocate, nil, []wago.ValType{i32v, i64, i64}, i32, CapFDWrite, "allocate file space"},
-		{"fd_datasync", (*Plugin).fdDatasync, nil, i32, i32, CapFDWrite, "synchronize file data"},
-		{"fd_sync", (*Plugin).fdSync, nil, i32, i32, CapFDWrite, "synchronize a file"},
-		{"fd_fdstat_set_flags", (*Plugin).fdFdstatSetFlags, nil, i32x2, i32, CapFDManage, "set descriptor flags"},
-		{"fd_fdstat_set_rights", (*Plugin).fdFdstatSetRights, nil, []wago.ValType{i32v, i64, i64}, i32, CapFDManage, "reduce descriptor rights"},
-		{"fd_filestat_get", (*Plugin).fdFilestatGet, nil, i32x2, i32, CapFDRead, "get file metadata"},
-		{"fd_filestat_set_size", (*Plugin).fdFilestatSetSize, nil, []wago.ValType{i32v, i64}, i32, CapFDWrite, "set file size"},
-		{"fd_filestat_set_times", (*Plugin).fdFilestatSetTimes, nil, []wago.ValType{i32v, i64, i64, i32v}, i32, CapFDWrite, "set file timestamps"},
-		{"fd_pread", (*Plugin).fdPread, nil, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, CapFDRead, "read at an offset"},
-		{"fd_pwrite", (*Plugin).fdPwrite, nil, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, CapFDWrite, "write at an offset"},
-		{"fd_readdir", (*Plugin).fdReaddir, nil, []wago.ValType{i32v, i32v, i32v, i64, i32v}, i32, CapFDRead, "read directory entries"},
-		{"fd_renumber", (*Plugin).fdRenumber, nil, i32x2, i32, CapFDManage, "renumber a descriptor"},
-		{"fd_tell", (*Plugin).fdTell, nil, i32x2, i32, CapFDManage, "get a descriptor offset"},
-		{"path_create_directory", (*Plugin).pathCreateDirectory, nil, i32x3, i32, CapPathWrite, "create a directory"},
-		{"path_filestat_get", (*Plugin).pathFilestatGet, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, CapPathRead, "get path metadata"},
-		{"path_filestat_set_times", (*Plugin).pathFilestatSetTimes, nil, []wago.ValType{i32v, i32v, i32v, i32v, i64, i64, i32v}, i32, CapPathWrite, "set path timestamps"},
-		{"path_link", (*Plugin).pathLink, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapPathWrite, "create a hard link"},
-		{"path_open", (*Plugin).pathOpen, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i64, i64, i32v, i32v}, i32, CapPathOpen, "open a path with rights limited by its preopen"},
-		{"path_readlink", (*Plugin).pathReadlink, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapPathRead, "read a symbolic link"},
-		{"path_remove_directory", (*Plugin).pathRemoveDirectory, nil, i32x3, i32, CapPathWrite, "remove a directory"},
-		{"path_rename", (*Plugin).pathRename, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapPathWrite, "rename a path"},
-		{"path_symlink", (*Plugin).pathSymlink, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, CapPathWrite, "create a symbolic link"},
-		{"path_unlink_file", (*Plugin).pathUnlinkFile, nil, i32x3, i32, CapPathWrite, "unlink a file"},
-		{"poll_oneoff", (*Plugin).pollOneoff, nil, i32x4, i32, CapPoll, "wait for events"},
-		{"proc_raise", (*Plugin).procRaise, nil, i32, i32, CapUnsupported, "raise a signal (unsupported)"},
-		{"sock_accept", (*Plugin).sockAccept, nil, i32x3, i32, CapUnsupported, "accept a socket (unsupported)"},
-		{"sock_recv", (*Plugin).sockRecv, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v, i32v}, i32, CapUnsupported, "receive from a socket (unsupported)"},
-		{"sock_send", (*Plugin).sockSend, nil, []wago.ValType{i32v, i32v, i32v, i32v, i32v}, i32, CapUnsupported, "send to a socket (unsupported)"},
-		{"sock_shutdown", (*Plugin).sockShutdown, nil, i32x2, i32, CapUnsupported, "shut down a socket (unsupported)"},
+func (b binding) params() []wago.ValType {
+	s := &importSignatures[b.signature]
+	if s.count == 0 {
+		return nil
 	}
-	for i := range bindings {
-		handler := bindings[i].handler
-		bindings[i].fn = func(m wago.HostModule, p, r []uint64) {
-			state, code := e.stateFor(m)
-			if code != wasiOK {
-				setStateError(r, code)
-				return
-			}
-			defer state.mu.Unlock()
-			// e.fs is cleared by shutdown under guard.mu. Snapshot only the
-			// immutable configuration and the state acquired for this call.
-			call := Plugin{module: e.module, cfg: e.cfg, arguments: e.arguments, fs: state, guard: e.guard}
-			handler(&call, m, p, r)
-		}
+	return s.values[:s.count:s.count]
+}
+func (b binding) results() []wago.ValType {
+	if !b.errno {
+		return nil
 	}
-	return bindings
+	return errnoResult[:]
+}
+
+var importBindings = [...]binding{
+	{"fd_write", dispatchfdWrite, 0, true, CapFDWrite, "write iovecs to a file descriptor (stdout/stderr)"},
+	{"fd_read", dispatchfdRead, 0, true, CapFDRead, "read into iovecs from a file descriptor (stdin)"},
+	{"fd_close", dispatchfdClose, 1, true, CapFDManage, "close a file descriptor (streams: no-op)"},
+	{"fd_seek", dispatchfdSeek, 2, true, CapFDManage, "seek a file descriptor (streams: ESPIPE)"},
+	{"fd_fdstat_get", dispatchfdFdstatGet, 3, true, CapFDManage, "report fd stat (streams: character device)"},
+	{"fd_prestat_get", dispatchfdPrestatGet, 3, true, CapFDManage, "report a preopen (none: EBADF)"},
+	{"fd_prestat_dir_name", dispatchfdPrestatDirName, 4, true, CapFDManage, "report a preopen dir name (none: EBADF)"},
+	{"proc_exit", dispatchprocExit, 1, false, CapProcessExit, "terminate the program with an exit code"},
+	{"args_sizes_get", dispatchargsSizesGet, 3, true, CapArgumentsRead, "report argc and argv byte size"},
+	{"args_get", dispatchargsGet, 3, true, CapArgumentsRead, "write argv pointers and bytes"},
+	{"environ_sizes_get", dispatchenvironSizesGet, 3, true, CapEnvironmentRead, "report environ count and byte size"},
+	{"environ_get", dispatchenvironGet, 3, true, CapEnvironmentRead, "write environ pointers and bytes"},
+	{"clock_time_get", dispatchclockTimeGet, 5, true, CapClockRead, "read a clock's current time"},
+	{"clock_res_get", dispatchclockResGet, 3, true, CapClockRead, "read a clock's resolution"},
+	{"random_get", dispatchrandomGet, 3, true, CapRandomRead, "fill a buffer with random bytes"},
+	{"sched_yield", dispatchschedYield, 6, true, CapSchedulerYield, "yield execution"},
+	{"fd_advise", dispatchfdAdvise, 7, true, CapFDManage, "provide file access advice"},
+	{"fd_allocate", dispatchfdAllocate, 8, true, CapFDWrite, "allocate file space"},
+	{"fd_datasync", dispatchfdDatasync, 1, true, CapFDWrite, "synchronize file data"},
+	{"fd_sync", dispatchfdSync, 1, true, CapFDWrite, "synchronize a file"},
+	{"fd_fdstat_set_flags", dispatchfdFdstatSetFlags, 3, true, CapFDManage, "set descriptor flags"},
+	{"fd_fdstat_set_rights", dispatchfdFdstatSetRights, 8, true, CapFDManage, "reduce descriptor rights"},
+	{"fd_filestat_get", dispatchfdFilestatGet, 3, true, CapFDRead, "get file metadata"},
+	{"fd_filestat_set_size", dispatchfdFilestatSetSize, 9, true, CapFDWrite, "set file size"},
+	{"fd_filestat_set_times", dispatchfdFilestatSetTimes, 7, true, CapFDWrite, "set file timestamps"},
+	{"fd_pread", dispatchfdPread, 10, true, CapFDRead, "read at an offset"},
+	{"fd_pwrite", dispatchfdPwrite, 10, true, CapFDWrite, "write at an offset"},
+	{"fd_readdir", dispatchfdReaddir, 10, true, CapFDRead, "read directory entries"},
+	{"fd_renumber", dispatchfdRenumber, 3, true, CapFDManage, "renumber a descriptor"},
+	{"fd_tell", dispatchfdTell, 3, true, CapFDManage, "get a descriptor offset"},
+	{"path_create_directory", dispatchpathCreateDirectory, 4, true, CapPathWrite, "create a directory"},
+	{"path_filestat_get", dispatchpathFilestatGet, 11, true, CapPathRead, "get path metadata"},
+	{"path_filestat_set_times", dispatchpathFilestatSetTimes, 12, true, CapPathWrite, "set path timestamps"},
+	{"path_link", dispatchpathLink, 13, true, CapPathWrite, "create a hard link"},
+	{"path_open", dispatchpathOpen, 14, true, CapPathOpen, "open a path with rights limited by its preopen"},
+	{"path_readlink", dispatchpathReadlink, 15, true, CapPathRead, "read a symbolic link"},
+	{"path_remove_directory", dispatchpathRemoveDirectory, 4, true, CapPathWrite, "remove a directory"},
+	{"path_rename", dispatchpathRename, 15, true, CapPathWrite, "rename a path"},
+	{"path_symlink", dispatchpathSymlink, 11, true, CapPathWrite, "create a symbolic link"},
+	{"path_unlink_file", dispatchpathUnlinkFile, 4, true, CapPathWrite, "unlink a file"},
+	{"poll_oneoff", dispatchpollOneoff, 0, true, CapPoll, "wait for events"},
+	{"proc_raise", dispatchprocRaise, 1, true, CapUnsupported, "raise a signal (unsupported)"},
+	{"sock_accept", dispatchsockAccept, 4, true, CapUnsupported, "accept a socket (unsupported)"},
+	{"sock_recv", dispatchsockRecv, 15, true, CapUnsupported, "receive from a socket (unsupported)"},
+	{"sock_send", dispatchsockSend, 11, true, CapUnsupported, "send to a socket (unsupported)"},
+	{"sock_shutdown", dispatchsockShutdown, 3, true, CapUnsupported, "shut down a socket (unsupported)"},
 }
 
 func validatePluginConfig(raw json.RawMessage) error {
@@ -849,20 +1051,20 @@ func (e *Plugin) procExit(_ wago.HostModule, p, r []uint64) {
 	panic(wago.HostExit{Code: int32(uint32(p[0]))})
 }
 
-func (e *Plugin) argsSizesGet(m wago.HostModule, p, r []uint64) {
-	r[0] = writeCounts(m.Memory(), uint32(p[0]), uint32(p[1]), e.cfg.Args)
+func (e *Plugin) argsSizesGet(mem []byte, p, r []uint64) {
+	r[0] = writeCounts(mem, uint32(p[0]), uint32(p[1]), e.cfg.Args)
 }
 
-func (e *Plugin) argsGet(m wago.HostModule, p, r []uint64) {
-	r[0] = writeStrings(m.Memory(), uint32(p[0]), uint32(p[1]), e.cfg.Args)
+func (e *Plugin) argsGet(mem []byte, p, r []uint64) {
+	r[0] = writeStrings(mem, uint32(p[0]), uint32(p[1]), e.cfg.Args)
 }
 
-func (e *Plugin) environSizesGet(m wago.HostModule, p, r []uint64) {
-	r[0] = writeCounts(m.Memory(), uint32(p[0]), uint32(p[1]), e.cfg.Env)
+func (e *Plugin) environSizesGet(mem []byte, p, r []uint64) {
+	r[0] = writeCounts(mem, uint32(p[0]), uint32(p[1]), e.cfg.Env)
 }
 
-func (e *Plugin) environGet(m wago.HostModule, p, r []uint64) {
-	r[0] = writeStrings(m.Memory(), uint32(p[0]), uint32(p[1]), e.cfg.Env)
+func (e *Plugin) environGet(mem []byte, p, r []uint64) {
+	r[0] = writeStrings(mem, uint32(p[0]), uint32(p[1]), e.cfg.Env)
 }
 
 // writeCounts writes the item count and the total NUL-terminated byte size.
