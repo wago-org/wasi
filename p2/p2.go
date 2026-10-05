@@ -888,6 +888,15 @@ func instanceOptions(cfg Config) []component.Option {
 			if !ok {
 				return nil, fmt.Errorf("output-stream.splice: invalid len")
 			}
+			if blocking {
+				out, err := writer(outRep)
+				if err != nil {
+					return nil, err
+				}
+				if values, err := s.waitWritable(ctx, out); values != nil || err != nil {
+					return values, err
+				}
+			}
 			check, err := checkWrite(ctx, []component.Value{outRep})
 			if err != nil {
 				return nil, err
@@ -900,12 +909,15 @@ func instanceOptions(cfg Config) []component.Option {
 			if n > permit {
 				n = permit
 			}
-			var got []component.Value
 			if blocking {
-				got, err = blockingRead(ctx, []component.Value{args[1], n})
-			} else {
-				got, err = read(ctx, []component.Value{args[1], n})
+				if srcRep, ok := args[1].(uint32); ok && srcRep == stdinRep {
+					values, err := s.waitStdinReadable(ctx)
+					if values != nil || err != nil {
+						return values, err
+					}
+				}
 			}
+			got, err := read(ctx, []component.Value{args[1], n})
 			if err != nil {
 				return nil, err
 			}

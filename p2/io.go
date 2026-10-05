@@ -381,6 +381,26 @@ func (s *hostState) waitWritable(ctx context.Context, w OutputStream) ([]compone
 	return nil, nil
 }
 
+func (s *hostState) waitStdinReadable(ctx context.Context) ([]component.Value, error) {
+	s.stdinMu.Lock()
+	if s.stdinBuffered || s.stdinReadError != nil {
+		s.stdinMu.Unlock()
+		return nil, nil
+	}
+	err := s.stdin.WaitReadable(ctx)
+	if errors.Is(err, io.EOF) {
+		s.stdinReadError = err
+	}
+	s.stdinMu.Unlock()
+	if err != nil {
+		if canceled := ctx.Err(); canceled != nil {
+			return nil, canceled
+		}
+		return s.streamFailure(err)
+	}
+	return nil, nil
+}
+
 func (s *hostState) addPollable(v pollableValue) (uint32, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

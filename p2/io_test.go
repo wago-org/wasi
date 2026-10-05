@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	component "github.com/wago-org/component-model"
 )
 
 type blockingReader struct{ release <-chan struct{} }
@@ -50,6 +52,80 @@ func TestInputReadyPreservesBufferedByteAcrossRepeatedChecks(t *testing.T) {
 	buf := make([]byte, 1)
 	if n, err := s.readStdin(buf); n != 1 || err != nil || buf[0] != 'x' {
 		t.Fatalf("buffered read = %q, %d, %v", buf, n, err)
+	}
+}
+
+func TestSpliceReadinessUsesCachedStdinResult(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		withByte bool
+		err      error
+	}{
+		{name: "byte", withByte: true},
+		{name: "error", err: io.ErrClosedPipe},
+		{name: "closed", err: io.EOF},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := &readinessErrorInput{withByte: tc.withByte, err: tc.err}
+			s := &hostState{stdin: in}
+			if !inputReady(s) {
+				t.Fatal("input was not ready")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			values, err := s.waitStdinReadable(ctx)
+			if values != nil || err != nil {
+				t.Fatalf("wait with cached input = %v, %v; want no wait", values, err)
+			}
+			if in.calls != 1 {
+				t.Fatalf("cached input made %d host reads, want 1", in.calls)
+			}
+			var dst [1]byte
+			n, err := s.readStdin(dst[:])
+			if tc.withByte {
+				if n != 1 || err != nil || dst[0] != 'x' {
+					t.Fatalf("cached byte = %q, %d, %v; want x", dst, n, err)
+				}
+			} else if n != 0 || err != tc.err {
+				t.Fatalf("cached error = %d, %v; want %v", n, err, tc.err)
+			}
+		})
+	}
+}
+
+type spliceEOFWaitInput struct{ waits int }
+
+func (*spliceEOFWaitInput) TryRead([]byte) (int, error) { return 0, ErrWouldBlock }
+func (in *spliceEOFWaitInput) WaitReadable(context.Context) error {
+	in.waits++
+	if in.waits == 1 {
+		return io.EOF
+	}
+	return errors.New("wait after closed")
+}
+
+func TestSpliceReadinessCachesWaitEOF(t *testing.T) {
+	in := &spliceEOFWaitInput{}
+	s := &hostState{stdin: in}
+	values, err := s.waitStdinReadable(context.Background())
+	if err != nil || len(values) != 1 {
+		t.Fatalf("first splice wait = %v, %v; want typed closed", values, err)
+	}
+	result, ok := values[0].(component.ResultValue)
+	if !ok || !result.IsErr {
+		t.Fatalf("first splice wait = %v; want typed closed", values)
+	}
+	variant, ok := result.Payload.(component.VariantValue)
+	if !ok || variant.Disc != 1 {
+		t.Fatalf("first splice wait = %v; want typed closed", values)
+	}
+	var dst [1]byte
+	if n, err := s.readStdin(dst[:]); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("read after closed wait = %d, %v; want EOF", n, err)
+	}
+	values, err = s.waitStdinReadable(context.Background())
+	if values != nil || err != nil || in.waits != 1 {
+		t.Fatalf("repeat splice wait = %v, %v; underlying waits %d; want cached EOF", values, err, in.waits)
 	}
 }
 
