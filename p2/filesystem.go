@@ -413,6 +413,19 @@ func openUnder(dir *os.File, name string, flags int, mode uint32) (*os.File, err
 }
 
 func parentUnder(dir *os.File, name string) (*os.File, string, error) {
+	f, leaf, err := parentUnderRaw(dir, name)
+	if err != nil {
+		return nil, "", err
+	}
+	leaf, err = platformMutationLeaf(f, leaf)
+	if err != nil {
+		f.Close()
+		return nil, "", err
+	}
+	return f, leaf, nil
+}
+
+func parentUnderRaw(dir *os.File, name string) (*os.File, string, error) {
 	parts, err := splitRelative(name)
 	if err != nil || len(parts) == 0 {
 		if err == nil {
@@ -422,7 +435,16 @@ func parentUnder(dir *os.File, name string) (*os.File, string, error) {
 	}
 	parent := strings.Join(parts[:len(parts)-1], "/")
 	f, err := openUnder(dir, parent, hostFS.O_RDONLY|hostFS.O_DIRECTORY, 0)
-	return f, parts[len(parts)-1], err
+	leaf := parts[len(parts)-1]
+	if strings.HasSuffix(name, "/.") {
+		leaf += "/."
+	} else if strings.HasSuffix(name, "/") {
+		leaf += "/"
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	return f, leaf, nil
 }
 
 func statUnder(dir *os.File, name string) (os.FileInfo, error) {
@@ -1026,7 +1048,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			if n.flags&(1<<5) == 0 {
 				return fsFailure(hostFS.EROFS), nil
 			}
-			p, name, e := parentUnder(n.file, args[1].(string))
+			p, name, e := parentUnderRaw(n.file, args[1].(string))
 			if e != nil {
 				return fsFailure(e), nil
 			}
@@ -1035,7 +1057,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 			if dir {
 				flags = hostFS.AT_REMOVEDIR
 			}
-			e = hostFS.Unlinkat(int(p.Fd()), name, flags)
+			e = platformUnlinkAt(p, name, flags)
 			if e != nil {
 				return fsFailure(e), nil
 			}
@@ -1057,17 +1079,17 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if a.mount != b.mount {
 			return fsFailure(hostFS.EXDEV), nil
 		}
-		ap, an, e := parentUnder(a.file, args[1].(string))
+		ap, an, e := parentUnderRaw(a.file, args[1].(string))
 		if e != nil {
 			return fsFailure(e), nil
 		}
 		defer ap.Close()
-		bp, bn, e := parentUnder(b.file, args[3].(string))
+		bp, bn, e := parentUnderRaw(b.file, args[3].(string))
 		if e != nil {
 			return fsFailure(e), nil
 		}
 		defer bp.Close()
-		e = hostFS.Renameat(int(ap.Fd()), an, int(bp.Fd()), bn)
+		e = platformRenameAt(ap, an, bp, bn)
 		if e != nil {
 			return fsFailure(e), nil
 		}

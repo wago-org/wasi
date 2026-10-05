@@ -262,10 +262,25 @@ func OpenMetadataAtAccess(root windows.Handle, name string, directory bool, addi
 }
 
 func DeleteAt(root windows.Handle, name string, directory bool) error {
+	return deleteAt(root, name, directory, false)
+}
+
+// DeleteAtDirectoryRequired requires the leaf itself to be a directory on
+// the same handle used for deletion. This preserves a trailing separator's
+// directory requirement even if another process replaces the leaf.
+func DeleteAtDirectoryRequired(root windows.Handle, name string, directory bool) error {
+	return deleteAt(root, name, directory, true)
+}
+
+func deleteAt(root windows.Handle, name string, directory, requireDirectory bool) error {
 	if name == "." {
 		return syscall.EINVAL
 	}
-	h, err := openForMutation(root, name, -1, windows.DELETE|windows.FILE_READ_ATTRIBUTES)
+	directoryMode := -1
+	if requireDirectory {
+		directoryMode = 1
+	}
+	h, err := openForMutationChecked(root, name, directoryMode, windows.DELETE|windows.FILE_READ_ATTRIBUTES, requireDirectory)
 	if err != nil {
 		return err
 	}
