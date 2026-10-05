@@ -974,7 +974,7 @@ func (e *Plugin) pathUnary(m wago.HostModule, p, r []uint64, right uint64, op fu
 
 func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
-	trailingSlash := strings.HasSuffix(name, "/")
+	trailingSlash := strings.HasSuffix(name, "/") || guestBackslashSeparator && strings.HasSuffix(name, `\`)
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
@@ -1008,7 +1008,7 @@ func (e *Plugin) pathFilestatGet(m wago.HostModule, p, r []uint64) {
 
 func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 	name, code := guestBytes(m.Memory(), uint32(p[2]), uint32(p[3]))
-	trailingSlash := strings.HasSuffix(name, "/")
+	trailingSlash := strings.HasSuffix(name, "/") || guestBackslashSeparator && strings.HasSuffix(name, `\`)
 	d, name, pathCode := e.resolve(uint32(p[0]), name)
 	if code == 0 {
 		code = pathCode
@@ -1022,7 +1022,7 @@ func (e *Plugin) pathFilestatSetTimes(m wago.HostModule, p, r []uint64) {
 	if code == 0 {
 		follow := uint16(p[1])&1 != 0 || trailingSlash
 		if follow {
-			f, openCode := openMetadataAt(d, name, true)
+			f, openCode := openPathTimesAt(d, name)
 			code = openCode
 			if code == 0 {
 				st, err := f.Stat()

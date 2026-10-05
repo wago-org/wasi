@@ -4,7 +4,9 @@ package core
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestMetadataPathsPreserveTrailingSlashSemantics(t *testing.T) {
@@ -59,5 +61,29 @@ func TestMetadataPathsPreserveTrailingSlashSemantics(t *testing.T) {
 	}
 	if !after.ModTime().Equal(before.ModTime()) {
 		t.Fatal("set-times file/ changed the regular file")
+	}
+}
+
+func TestPathSetTimesFollowsUnreadableOwnedFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "file")
+	if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true}}})
+	defer e.closeAll()
+	want := time.Date(2001, time.February, 3, 4, 5, 6, 0, time.UTC)
+	mem := []byte("file")
+	result := []uint64{999}
+	e.pathFilestatSetTimes(testModule{mem}, []uint64{3, 1, 0, 4, 0, uint64(want.UnixNano()), 4}, result)
+	if result[0] != wasiOK {
+		t.Fatalf("set times on owned unreadable file: errno %d, want OK", result[0])
+	}
+	if info, err := os.Stat(path); err != nil || !info.ModTime().Equal(want) {
+		t.Fatalf("mtime = %v, %v; want %v", info, err, want)
 	}
 }

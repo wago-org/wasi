@@ -145,6 +145,79 @@ func TestWindowsSetPathTimesUpdatesPreopenDirectory(t *testing.T) {
 	}
 }
 
+func TestWindowsSetPathTimesMixedTerminalSeparators(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want uint64
+	}{
+		{`sub/\`, wasiOK},
+		{`sub\/`, wasiOK},
+		{`file/\`, wasiENotdir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "sub"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(root, "file")
+			if err := os.WriteFile(file, []byte("data"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fileBefore, err := os.Stat(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
+			defer e.closeAll()
+			want := time.Date(2001, time.February, 3, 4, 5, 6, 0, time.UTC)
+			mem := []byte(tc.name)
+			result := []uint64{999}
+			e.pathFilestatSetTimes(testModule{mem}, []uint64{3, 0, 0, uint64(len(tc.name)), 0, uint64(want.UnixNano()), 4}, result)
+			if result[0] != tc.want {
+				t.Fatalf("set times %q: errno %d, want %d", tc.name, result[0], tc.want)
+			}
+			if tc.want == wasiOK {
+				info, err := os.Stat(filepath.Join(root, "sub"))
+				if err != nil || !info.ModTime().Equal(want) {
+					t.Fatalf("directory mtime = %v, %v; want %v", info, err, want)
+				}
+			} else {
+				info, err := os.Stat(file)
+				if err != nil || !info.ModTime().Equal(fileBefore.ModTime()) {
+					t.Fatalf("file mtime changed = %v, %v", info, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsGetPathStatMixedTerminalSeparators(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
+	defer e.closeAll()
+	for _, tc := range []struct {
+		name string
+		want uint64
+	}{
+		{`sub/\`, wasiOK},
+		{`file/\`, wasiENotdir},
+	} {
+		mem := make([]byte, 256)
+		copy(mem, tc.name)
+		result := []uint64{999}
+		e.pathFilestatGet(testModule{mem}, []uint64{3, 0, 0, uint64(len(tc.name)), 64}, result)
+		if result[0] != tc.want {
+			t.Errorf("stat %q: errno %d, want %d", tc.name, result[0], tc.want)
+		}
+	}
+}
+
 func TestWindowsOpenAtAcceptsSymlinkPreopen(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "target")
