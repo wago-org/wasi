@@ -416,6 +416,37 @@ func statUnder(dir *os.File, name string) (os.FileInfo, error) {
 	return f.Stat()
 }
 
+func readlinkUnder(dir *os.File, path string) (string, error) {
+	p, name, err := parentUnder(dir, path)
+	if err != nil {
+		return "", err
+	}
+	defer p.Close()
+	buf := make([]byte, 4096)
+	for {
+		got, err := hostFS.Readlinkat(int(p.Fd()), name, buf)
+		if err != nil {
+			return "", err
+		}
+		if got < len(buf) {
+			return string(buf[:got]), nil
+		}
+		if len(buf) >= maxIOSize {
+			return "", hostFS.ENAMETOOLONG
+		}
+		buf = make([]byte, len(buf)*2)
+	}
+}
+
+func symlinkUnder(dir *os.File, oldPath, newPath string) error {
+	p, name, err := parentUnder(dir, newPath)
+	if err != nil {
+		return err
+	}
+	defer p.Close()
+	return hostFS.Symlinkat(oldPath, int(p.Fd()), name)
+}
+
 func fsError(err error) uint32 {
 	if code, ok := platformFilesystemError(err); ok {
 		return code
@@ -1152,25 +1183,11 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		p, name, e := parentUnder(n.file, args[1].(string))
+		target, e := readlinkUnder(n.file, args[1].(string))
 		if e != nil {
 			return fsFailure(e), nil
 		}
-		defer p.Close()
-		buf := make([]byte, 4096)
-		for {
-			got, e := hostFS.Readlinkat(int(p.Fd()), name, buf)
-			if e != nil {
-				return fsFailure(e), nil
-			}
-			if got < len(buf) {
-				return ok(string(buf[:got])), nil
-			}
-			if len(buf) >= maxIOSize {
-				return fsFailure(hostFS.ENAMETOOLONG), nil
-			}
-			buf = make([]byte, len(buf)*2)
-		}
+		return ok(target), nil
 	}
 	symlinkAt := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		n, e := s.desc(args[0].(uint32))
@@ -1180,12 +1197,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e = requireDirectoryMutation(n); e != nil {
 			return fsFailure(e), nil
 		}
-		p, name, e := parentUnder(n.file, args[2].(string))
-		if e != nil {
-			return fsFailure(e), nil
-		}
-		defer p.Close()
-		e = hostFS.Symlinkat(args[1].(string), int(p.Fd()), name)
+		e = symlinkUnder(n.file, args[1].(string), args[2].(string))
 		if e != nil {
 			return fsFailure(e), nil
 		}
