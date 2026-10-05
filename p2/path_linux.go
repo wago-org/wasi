@@ -5,7 +5,6 @@ package p2
 import (
 	"errors"
 	"os"
-	"path"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,10 +29,5 @@ func platformOpenUnderPathFlags(dir *os.File, name string, flags int, mode uint3
 	if err != nil {
 		return nil, err
 	}
-	clean := path.Clean(name)
-	fileName := path.Base(clean)
-	if clean == "." {
-		fileName = dir.Name()
-	}
-	return os.NewFile(uintptr(fd), fileName), nil
+	return os.NewFile(uintptr(fd), descriptorFileName(dir, name)), nil
 }
