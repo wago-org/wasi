@@ -340,3 +340,32 @@ func TestWindowsReadlinkParentLookup(t *testing.T) {
 		})
 	}
 }
+
+func TestWindowsSymbolicLinkMixedTerminalSeparators(t *testing.T) {
+	_, e := windowsMutationFixture(t)
+	for _, tc := range []struct {
+		name string
+		want uint64
+	}{
+		{`file/\`, wasiENotdir},
+		{`file\/`, wasiENotdir},
+		{`sub/\`, wasiEInval},
+		{`sub\/`, wasiEInval},
+	} {
+		mem := make([]byte, 256)
+		copy(mem, tc.name)
+		result := []uint64{999}
+		e.pathReadlink(testModule{mem}, []uint64{3, 0, uint64(len(tc.name)), 64, 32, 128}, result)
+		if result[0] != tc.want {
+			t.Errorf("readlink %q: errno %d, want %d", tc.name, result[0], tc.want)
+		}
+	}
+	for _, name := range []string{`link/\`, `link\/`} {
+		mem := []byte("file" + name)
+		result := []uint64{999}
+		e.pathSymlink(testModule{mem}, []uint64{0, 4, 3, 4, uint64(len(name))}, result)
+		if result[0] != wasiENoent {
+			t.Errorf("symlink target file, name %q: errno %d, want ENOENT", name, result[0])
+		}
+	}
+}
