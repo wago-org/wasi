@@ -3,6 +3,7 @@
 package core
 
 import (
+	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
@@ -59,6 +60,33 @@ func TestWindowsOpenAtUsesDescriptorDirectory(t *testing.T) {
 		t.Fatalf("stat directory metadata = %#v, %v", info, err)
 	}
 	directory.Close()
+}
+
+func TestWindowsPathOpenCannotCreateDirectoryWithoutDirectoryRight(t *testing.T) {
+	root := t.TempDir()
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
+	e.fs.fds[3].rights &^= rightPathCreateDirectory
+	m := testModule{mem: make([]byte, 128)}
+	copy(m.mem[32:], "created")
+	r := make([]uint64, 1)
+	e.pathOpen(m, []uint64{3, 0, 32, 7, 3, rightFDRead, 0, 0, 16}, r)
+	if r[0] != wasiENotcapable {
+		t.Fatalf("path_open CREAT|DIRECTORY without directory right = errno %d, want ENOTCAPABLE", r[0])
+	}
+	if _, err := os.Stat(filepath.Join(root, "created")); !os.IsNotExist(err) {
+		t.Fatalf("directory was created without the right: %v", err)
+	}
+	e.fs.fds[3].rights |= rightPathCreateDirectory
+	copy(m.mem[32:], "allowed")
+	e.pathOpen(m, []uint64{3, 0, 32, 7, 3, rightFDRead, 0, 0, 16}, r)
+	if r[0] != wasiOK {
+		t.Fatalf("path_open CREAT|DIRECTORY with directory right: errno %d", r[0])
+	}
+	fd := uint64(binary.LittleEndian.Uint32(m.mem[16:]))
+	e.fdClose(m, []uint64{fd}, r)
+	if info, err := os.Stat(filepath.Join(root, "allowed")); err != nil || !info.IsDir() {
+		t.Fatalf("authorized directory = %v, %v", info, err)
+	}
 }
 
 func TestWindowsSetPathTimesNoFollowUpdatesSymlink(t *testing.T) {
@@ -210,5 +238,33 @@ func TestWindowsSetAppendFlagReopensSameFile(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != "CB" {
 		t.Fatalf("file = %q, %v", got, err)
+	}
+}
+
+func TestWindowsPathOpenTrailingSlashRequiresDirectoryCreationRight(t *testing.T) {
+	root := t.TempDir()
+	e := newTestPlugin(t, Config{Mounts: []Preopen{{GuestPath: "/data", HostPath: root, Read: true, Write: true, MutateDirectory: true}}})
+	defer closeFS(e.fs)
+	e.fs.fds[3].rights &^= rightPathCreateDirectory
+	m := testModule{mem: make([]byte, 128)}
+	copy(m.mem[32:], "created/")
+	r := make([]uint64, 1)
+	e.pathOpen(m, []uint64{3, 0, 32, 8, 1, rightFDRead, 0, 0, 16}, r)
+	if r[0] != wasiENotcapable {
+		t.Fatalf("CREAT with trailing slash: %d, want ENOTCAPABLE", r[0])
+	}
+	if _, err := os.Stat(filepath.Join(root, "created")); !os.IsNotExist(err) {
+		t.Fatalf("unauthorized directory: %v", err)
+	}
+	e.fs.fds[3].rights |= rightPathCreateDirectory
+	copy(m.mem[32:], "allowed/")
+	e.pathOpen(m, []uint64{3, 0, 32, 8, 1, rightFDRead, 0, 0, 16}, r)
+	if r[0] != wasiOK {
+		t.Fatalf("authorized CREAT with trailing slash: %d", r[0])
+	}
+	fd := uint64(binary.LittleEndian.Uint32(m.mem[16:]))
+	e.fdClose(m, []uint64{fd}, r)
+	if info, err := os.Stat(filepath.Join(root, "allowed")); err != nil || !info.IsDir() {
+		t.Fatalf("authorized directory=%v, %v", info, err)
 	}
 }
