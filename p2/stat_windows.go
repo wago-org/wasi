@@ -29,4 +29,8 @@ func setFileTimes(f *os.File, atime, mtime time.Time) error {
 	return windows.SetFileTime(windows.Handle(f.Fd()), nil, &at, &mt)
 }
 
+func setMetadataTimes(f *os.File, atime, mtime time.Time) error {
+	return setFileTimes(f, atime, mtime)
+}
+
 func syncFileData(f *os.File) error { return f.Sync() }

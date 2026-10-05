@@ -99,7 +99,11 @@ func openFileAt(fd int, name string, flags int, mode uint32) (int, error) {
 		return 0, errNotPermitted
 	}
 	if flags&metadataHandleFlag != 0 {
-		handle, err := winfs.OpenMetadataAt(windows.Handle(fd), clean, flags&winDirectory != 0)
+		var access uint32
+		if flags&winWriteAttributes != 0 {
+			access = windows.FILE_WRITE_ATTRIBUTES
+		}
+		handle, err := winfs.OpenMetadataAtAccess(windows.Handle(fd), clean, flags&winDirectory != 0, access)
 		return int(handle), err
 	}
 	openFlags := flags &^ (winDirectory | winNoFollow | winWriteAttributes)

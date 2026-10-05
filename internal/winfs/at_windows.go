@@ -192,11 +192,23 @@ func openForMutation(root windows.Handle, name string, directory int, access uin
 // OpenMetadataAt opens a single component without following its reparse point
 // and requests only attribute access, so metadata never opens the data stream.
 func OpenMetadataAt(root windows.Handle, name string, directory bool) (windows.Handle, error) {
+	return OpenMetadataAtAccess(root, name, directory, 0)
+}
+
+// OpenMetadataAtAccess additionally requests mutation rights on the pinned
+// object while retaining the metadata-only, no-follow open behavior.
+func OpenMetadataAtAccess(root windows.Handle, name string, directory bool, additionalAccess uint32) (windows.Handle, error) {
+	access := uint32(windows.FILE_READ_ATTRIBUTES) | additionalAccess
 	if name == "." {
+		if additionalAccess != 0 {
+			// Reopen the same directory through its handle. A duplicate cannot
+			// add attribute-write access to an intermediate read-only handle.
+			return openForMutation(root, "", 1, access)
+		}
 		process := windows.CurrentProcess()
 		var handle windows.Handle
 		err := windows.DuplicateHandle(process, root, process, &handle,
-			windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE, false, 0)
+			access|windows.SYNCHRONIZE, false, 0)
 		return handle, err
 	}
 	if name == "" || name == ".." || filepath.IsAbs(name) || filepath.Base(name) != name {
@@ -206,7 +218,7 @@ func OpenMetadataAt(root windows.Handle, name string, directory bool) (windows.H
 	if directory {
 		directoryMode = 1
 	}
-	return openForMutation(root, name, directoryMode, windows.FILE_READ_ATTRIBUTES)
+	return openForMutation(root, name, directoryMode, access)
 }
 
 func DeleteAt(root windows.Handle, name string, directory bool) error {

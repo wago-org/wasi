@@ -27,4 +27,19 @@ func setFileTimes(f *os.File, atime, mtime time.Time) error {
 	times := []sysunix.Timeval{sysunix.NsecToTimeval(atime.UnixNano()), sysunix.NsecToTimeval(mtime.UnixNano())}
 	return sysunix.Futimes(int(f.Fd()), times)
 }
+
+func setMetadataTimes(f *os.File, atime, mtime time.Time) error {
+	at, err := sysunix.TimeToTimespec(atime)
+	if err != nil {
+		return hostFS.EOVERFLOW
+	}
+	mt, err := sysunix.TimeToTimespec(mtime)
+	if err != nil {
+		return hostFS.EOVERFLOW
+	}
+	times := [2]sysunix.Timespec{at, mt}
+	// AT_EMPTY_PATH updates the pinned O_PATH handle, including a symlink
+	// itself. Futimes uses /proc/self/fd and can follow that link instead.
+	return sysunix.UtimesNanoAt(int(f.Fd()), "", times[:], sysunix.AT_EMPTY_PATH|sysunix.AT_SYMLINK_NOFOLLOW)
+}
 func syncFileData(f *os.File) error { return sysunix.Fdatasync(int(f.Fd())) }
