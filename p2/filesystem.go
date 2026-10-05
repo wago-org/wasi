@@ -462,6 +462,23 @@ func symlinkUnder(dir *os.File, oldPath, newPath string) error {
 	return hostFS.Symlinkat(oldPath, int(p.Fd()), name)
 }
 
+func setTimesUnderPathFlags(dir *os.File, name string, pathFlags uint32, access, modification component.Value, now func() time.Time) error {
+	f, err := openUnder(dir, name, hostFS.O_RDONLY|hostFS.O_WRITE_ATTRIBUTES, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	at, mt, _, err := requestedTimes(access, modification, info, now)
+	if err == nil {
+		err = setFileTimes(f, at, mt)
+	}
+	return err
+}
+
 func fsError(err error) uint32 {
 	if code, ok := platformFilesystemError(err); ok {
 		return code
@@ -1127,19 +1144,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e = requireDirectoryMutation(n); e != nil {
 			return fsFailure(e), nil
 		}
-		f, e := openUnder(n.file, args[2].(string), hostFS.O_RDONLY|hostFS.O_WRITE_ATTRIBUTES, 0)
-		if e != nil {
-			return fsFailure(e), nil
-		}
-		defer f.Close()
-		info, e := f.Stat()
-		if e != nil {
-			return fsFailure(e), nil
-		}
-		at, mt, _, e := requestedTimes(args[3], args[4], info, s.wall)
-		if e == nil {
-			e = setFileTimes(f, at, mt)
-		}
+		e = setTimesUnderPathFlags(n.file, args[2].(string), args[1].(uint32), args[3], args[4], s.wall)
 		if e != nil {
 			return fsFailure(e), nil
 		}
