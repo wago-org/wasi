@@ -113,6 +113,29 @@ func TestWindowsDirectoryMutationTerminalBackslash(t *testing.T) {
 	}
 }
 
+func TestWindowsDirectoryMutationMixedTerminalSeparators(t *testing.T) {
+	for _, name := range []string{`new/\`, `new\/`} {
+		t.Run(name, func(t *testing.T) {
+			root, e := windowsMutationFixture(t)
+			mem, result := []byte(name), []uint64{999}
+			e.pathCreateDirectory(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+			if result[0] != wasiOK {
+				t.Fatalf("mkdir %q: errno %d, want OK", name, result[0])
+			}
+			if info, err := os.Stat(filepath.Join(root, "new")); err != nil || !info.IsDir() {
+				t.Fatalf("created directory = %v, %v", info, err)
+			}
+			e.pathRemoveDirectory(testModule{mem}, []uint64{3, 0, uint64(len(mem))}, result)
+			if result[0] != wasiOK {
+				t.Fatalf("rmdir %q: errno %d, want OK", name, result[0])
+			}
+			if _, err := os.Stat(filepath.Join(root, "new")); !os.IsNotExist(err) {
+				t.Fatalf("directory remains after rmdir: %v", err)
+			}
+		})
+	}
+}
+
 func TestWindowsRenameDirectoryWithTerminalBackslash(t *testing.T) {
 	root, e := windowsMutationFixture(t)
 	if err := os.Mkdir(filepath.Join(root, "source"), 0o700); err != nil {
