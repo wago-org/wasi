@@ -190,6 +190,7 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 }
 
 func blockPollable(ctx context.Context, p pollableValue) error {
+	retryDelay := time.Millisecond
 	for !p.ready() {
 		err := p.wait(ctx)
 		if canceled := ctx.Err(); canceled != nil {
@@ -198,11 +199,17 @@ func blockPollable(ctx context.Context, p pollableValue) error {
 		if err != nil && !p.ready() {
 			return err
 		}
+		if !p.ready() {
+			if err := waitPollRetry(ctx, &retryDelay); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
 func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, error) {
+	retryDelay := time.Millisecond
 	for {
 		ready := readyIndexes(ps)
 		if len(ready) != 0 {
@@ -228,7 +235,27 @@ func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, 
 		}
 		// Readiness can be consumed by another caller between a successful
 		// wait and this check. Keep waiting until a pollable is ready now.
+		if err := waitPollRetry(ctx, &retryDelay); err != nil {
+			return nil, err
+		}
 	}
+}
+
+func waitPollRetry(ctx context.Context, delay *time.Duration) error {
+	timer := time.NewTimer(*delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if *delay < 50*time.Millisecond {
+		*delay *= 2
+		if *delay > 50*time.Millisecond {
+			*delay = 50 * time.Millisecond
+		}
+	}
+	return nil
 }
 
 func (s *hostState) readStdin(dst []byte) (int, error) {
