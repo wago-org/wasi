@@ -860,7 +860,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if !n.isDir {
 			return fsFailure(hostFS.ENOTDIR), nil
 		}
-		f, e := dupFile(n.file)
+		f, e := newDirectoryStreamFile(n.file)
 		if e != nil {
 			return fsFailure(e), nil
 		}

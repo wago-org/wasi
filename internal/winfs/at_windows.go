@@ -70,6 +70,27 @@ func OpenAtAccess(root windows.Handle, name string, flags int, mode uint32, dire
 	return openAt(root, name, flags, mode, directory, noReparse, noFollow, additionalAccess)
 }
 
+// ReopenDirectory creates an independent file object for the pinned directory.
+// An empty object name addresses root itself without resolving its pathname.
+func ReopenDirectory(root windows.Handle) (windows.Handle, error) {
+	oa, err := objectAttributes(root, "", false)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	var handle windows.Handle
+	err = windows.NtCreateFile(&handle,
+		windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+		oa, &windows.IO_STATUS_BLOCK{}, nil, 0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_FOR_BACKUP_INTENT,
+		0, 0)
+	if err != nil {
+		return windows.InvalidHandle, errno(err)
+	}
+	return handle, nil
+}
+
 func openAt(root windows.Handle, name string, flags int, mode uint32, directory, noReparse, noFollow bool, additionalAccess uint32) (windows.Handle, error) {
 	if name == "" {
 		return windows.InvalidHandle, windows.ERROR_FILE_NOT_FOUND
