@@ -1355,6 +1355,12 @@ func (e *Plugin) pathRename(m wago.HostModule, p, r []uint64) {
 		code = 75
 	}
 	if code == 0 {
+		if guestBackslashSeparator {
+			// A terminal mix of slash and backslash is one directory
+			// requirement, not a rooted leaf after openParent splits it.
+			oldName = strings.TrimRight(oldName, `/\`)
+			newName = strings.TrimRight(newName, `/\`)
+		}
 		oldParent, oldLeaf, oldCode := openParent(od, oldName)
 		code = oldCode
 		if code == 0 {
@@ -1374,6 +1380,9 @@ func (e *Plugin) pathRename(m wago.HostModule, p, r []uint64) {
 // Borrow a slash from the original path rather than allocating a new leaf.
 // A terminal parent step is pinned with leaf "." and remains a directory.
 func renameLeaf(original, leaf string) string {
+	if guestBackslashSeparator && strings.HasSuffix(original, `\`) {
+		return leaf + "/"
+	}
 	if !strings.HasSuffix(original, "/") {
 		return leaf
 	}
