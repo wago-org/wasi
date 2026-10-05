@@ -2,7 +2,10 @@
 
 package core
 
-import "syscall"
+import (
+	"errors"
+	"syscall"
+)
 
 var hostErrno = platformErrnos{
 	EPERM: syscall.EPERM, E2BIG: syscall.E2BIG, EACCES: syscall.EACCES,
@@ -16,4 +19,13 @@ var hostErrno = platformErrnos{
 	EROFS: syscall.EROFS, ESPIPE: syscall.ESPIPE,
 }
 
-func platformErrno(error) (uint64, bool) { return 0, false }
+func platformErrno(err error) (uint64, bool) {
+	switch {
+	case errors.Is(err, syscall.ENOTSUP):
+		return wasiENotsup, true
+	case errors.Is(err, syscall.ENOSYS):
+		return wasiENosys, true
+	default:
+		return 0, false
+	}
+}

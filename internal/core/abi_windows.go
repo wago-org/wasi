@@ -23,6 +23,10 @@ var hostErrno = platformErrnos{
 
 func platformErrno(err error) (uint64, bool) {
 	switch {
+	case errors.Is(err, windows.ERROR_NOT_SUPPORTED):
+		return wasiENotsup, true
+	case errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED):
+		return wasiENosys, true
 	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
 		return wasiEAcces, true
 	case errors.Is(err, windows.ERROR_FILE_NOT_FOUND), errors.Is(err, windows.ERROR_PATH_NOT_FOUND):
