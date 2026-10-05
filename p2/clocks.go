@@ -189,7 +189,7 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 
 func blockPollable(ctx context.Context, p pollableValue) error {
 	if !p.ready() {
-		if err := p.wait(ctx); err != nil {
+		if err := p.wait(ctx); err != nil && !p.ready() {
 			return err
 		}
 	}
