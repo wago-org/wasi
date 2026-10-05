@@ -189,7 +189,11 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 
 func blockPollable(ctx context.Context, p pollableValue) error {
 	if !p.ready() {
-		if err := p.wait(ctx); err != nil && !p.ready() {
+		err := p.wait(ctx)
+		if canceled := ctx.Err(); canceled != nil {
+			return canceled
+		}
+		if err != nil && !p.ready() {
 			return err
 		}
 	}
@@ -207,6 +211,10 @@ func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, 
 		}
 		err := <-ch
 		cancel()
+		// Check the caller context; waitCtx also cancels losing waiters.
+		if canceled := ctx.Err(); canceled != nil {
+			return nil, canceled
+		}
 		ready = readyIndexes(ps)
 		if len(ready) != 0 {
 			return ready, nil
