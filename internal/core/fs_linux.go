@@ -45,14 +45,22 @@ func openAt(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) 
 }
 
 // openAtWalk is the secure fallback for kernels, seccomp profiles, and syscall
-// emulators without openat2. It refuses symlinks rather than attempting a
-// race-prone userspace emulation of RESOLVE_BENEATH. Parent steps pop pinned
-// descriptors, avoiding pathname replay and native ".." traversal.
+// emulators without openat2. It resolves a final relative symlink from its
+// pinned parent, and refuses intermediate symlinks or link targets that could
+// climb above that parent. Parent steps pop pinned descriptors, avoiding
+// pathname replay and native ".." traversal.
 func openAtWalk(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint64) {
+	return openAtWalkFD(int(d.file.Fd()), name, flags, mode, 0)
+}
+
+func openAtWalkFD(rootFD int, name string, flags int, mode uint32, symlinks int) (*os.File, uint64) {
+	if symlinks > 40 {
+		return nil, wasiELoop
+	}
 	if name == "" || strings.HasPrefix(name, "/") || pathEscapes(name) {
 		return nil, wasiENotcapable
 	}
-	curFD, err := unix.Dup(int(d.file.Fd()))
+	curFD, err := unix.Dup(rootFD)
 	if err != nil {
 		return nil, errno(err)
 	}
@@ -99,6 +107,19 @@ func openAtWalk(d *fdEntry, name string, flags int, mode uint32) (*os.File, uint
 			parents = parents[:len(parents)-1]
 		default:
 			if end == len(name) {
+				if flags&unix.O_NOFOLLOW == 0 && flags&(unix.O_CREAT|unix.O_EXCL) != unix.O_CREAT|unix.O_EXCL {
+					var targetBuf [4096]byte
+					n, linkErr := unix.Readlinkat(curFD, part, targetBuf[:])
+					if linkErr == nil {
+						if n == len(targetBuf) {
+							return nil, wasiENametoolong
+						}
+						return openAtWalkFD(curFD, string(targetBuf[:n]), flags, mode, symlinks+1)
+					}
+					if !errors.Is(linkErr, unix.EINVAL) && !errors.Is(linkErr, unix.ENOENT) {
+						return nil, capabilityErr(linkErr)
+					}
+				}
 				fd, err := unix.Openat(curFD, part, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 				if err != nil {
 					return nil, capabilityErr(err)

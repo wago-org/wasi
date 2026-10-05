@@ -1184,7 +1184,9 @@ func (e *Plugin) pathOpen(m wago.HostModule, p, r []uint64) {
 	if oflags&2 != 0 || trailingSlash {
 		flags |= hostOpenDirectory
 	}
-	if uint16(p[1])&1 == 0 {
+	// A trailing slash makes the link an intermediate path component: the
+	// final lookup is the directory reached through it.
+	if uint16(p[1])&1 == 0 && !trailingSlash {
 		flags |= hostOpenNoFollow
 	}
 	var f *os.File
