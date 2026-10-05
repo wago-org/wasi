@@ -95,6 +95,30 @@ func TestPollPropagatesWaitErrorWithoutReadiness(t *testing.T) {
 	}
 }
 
+func TestBlockReportsOutputErrorAsReadiness(t *testing.T) {
+	failed := false
+	err := blockPollable(context.Background(), pollableValue{
+		ready: func() bool { return failed },
+		wait: func(context.Context) error {
+			failed = true
+			return io.ErrClosedPipe
+		},
+	})
+	if err != nil {
+		t.Fatalf("block after output error = %v, want readiness without a host error", err)
+	}
+}
+
+func TestBlockPropagatesWaitErrorWithoutReadiness(t *testing.T) {
+	err := blockPollable(context.Background(), pollableValue{
+		ready: func() bool { return false },
+		wait:  func(context.Context) error { return context.Canceled },
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("block wait error = %v, want context cancellation", err)
+	}
+}
+
 func TestStreamAndErrorQuotas(t *testing.T) {
 	limits := Limits{MaxStreams: 2, MaxErrors: 1}.normalized()
 	fs := newFilesystem(nil, limits)

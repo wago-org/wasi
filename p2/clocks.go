@@ -65,12 +65,7 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("pollable.block: unknown rep %d", rep)
 		}
-		if !p.ready() {
-			if err := p.wait(ctx); err != nil {
-				return nil, err
-			}
-		}
-		return nil, nil
+		return nil, blockPollable(ctx, p)
 	}
 	readyMethod := func(_ context.Context, args []component.Value) ([]component.Value, error) {
 		rep, err := repArg(args)
@@ -190,6 +185,15 @@ func clockOptions(s *hostState, fs *filesystemState) []component.Option {
 			return nil
 		}),
 	}
+}
+
+func blockPollable(ctx context.Context, p pollableValue) error {
+	if !p.ready() {
+		if err := p.wait(ctx); err != nil && !p.ready() {
+			return err
+		}
+	}
+	return nil
 }
 
 func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, error) {
