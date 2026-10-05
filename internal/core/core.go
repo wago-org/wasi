@@ -573,6 +573,9 @@ func decodePluginConfig(raw json.RawMessage) (pluginConfig, error) {
 	if !utf8.Valid(trimmed) {
 		return pluginConfig{}, fmt.Errorf("wasi: config is not valid UTF-8")
 	}
+	if err := validateConfigSurrogateEscapes(trimmed); err != nil {
+		return pluginConfig{}, err
+	}
 	if err := validateConfigJSON(trimmed); err != nil {
 		return pluginConfig{}, fmt.Errorf("wasi: config: %w", err)
 	}
@@ -589,6 +592,64 @@ func decodePluginConfig(raw json.RawMessage) (pluginConfig, error) {
 		return pluginConfig{}, err
 	}
 	return cfg, nil
+}
+
+// encoding/json replaces unpaired UTF-16 surrogate escapes with U+FFFD.
+// Reject them before decoding so the reviewed config keeps its exact meaning.
+func validateConfigSurrogateEscapes(raw []byte) error {
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString || i+1 >= len(raw) {
+				continue
+			}
+			if raw[i+1] != 'u' {
+				i++
+				continue
+			}
+			first, ok := configJSONEscapeCodeUnit(raw, i)
+			if !ok {
+				continue // The JSON decoder reports malformed escapes.
+			}
+			if first >= 0xd800 && first <= 0xdbff {
+				second, valid := configJSONEscapeCodeUnit(raw, i+6)
+				if !valid || second < 0xdc00 || second > 0xdfff {
+					return fmt.Errorf("wasi: unpaired JSON surrogate escape")
+				}
+				i += 11
+			} else {
+				if first >= 0xdc00 && first <= 0xdfff {
+					return fmt.Errorf("wasi: unpaired JSON surrogate escape")
+				}
+				i += 5
+			}
+		}
+	}
+	return nil
+}
+
+func configJSONEscapeCodeUnit(raw []byte, at int) (uint16, bool) {
+	if at+6 > len(raw) || raw[at] != '\\' || raw[at+1] != 'u' {
+		return 0, false
+	}
+	var value uint16
+	for _, digit := range raw[at+2 : at+6] {
+		value <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			value |= uint16(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			value |= uint16(digit-'a') + 10
+		case digit >= 'A' && digit <= 'F':
+			value |= uint16(digit-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 // validateConfigJSON checks schema shapes and duplicate keys in one token scan.
