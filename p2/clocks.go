@@ -209,35 +209,56 @@ func blockPollable(ctx context.Context, p pollableValue) error {
 }
 
 func waitPollables(ctx context.Context, ps []pollableValue) ([]component.Value, error) {
-	retryDelay := time.Millisecond
+	if ready := readyIndexes(ps); len(ready) != 0 {
+		return ready, nil
+	}
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type waitResult struct {
+		err    error
+		resume chan struct{}
+	}
+	ch := make(chan waitResult, len(ps))
+	for _, p := range ps {
+		go func(p pollableValue) {
+			retryDelay := time.Millisecond
+			for {
+				result := waitResult{err: p.wait(waitCtx), resume: make(chan struct{})}
+				select {
+				case ch <- result:
+				case <-waitCtx.Done():
+					return
+				}
+				select {
+				case <-result.resume:
+				case <-waitCtx.Done():
+					return
+				}
+				if err := waitPollRetry(waitCtx, &retryDelay); err != nil {
+					return
+				}
+			}
+		}(p)
+	}
 	for {
-		ready := readyIndexes(ps)
-		if len(ready) != 0 {
-			return ready, nil
+		var result waitResult
+		select {
+		case result = <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		waitCtx, cancel := context.WithCancel(ctx)
-		ch := make(chan error, len(ps))
-		for _, p := range ps {
-			go func(p pollableValue) { ch <- p.wait(waitCtx) }(p)
-		}
-		err := <-ch
-		cancel()
-		// Check the caller context; waitCtx also cancels losing waiters.
 		if canceled := ctx.Err(); canceled != nil {
 			return nil, canceled
 		}
-		ready = readyIndexes(ps)
-		if len(ready) != 0 {
+		if ready := readyIndexes(ps); len(ready) != 0 {
 			return ready, nil
 		}
-		if err != nil {
-			return nil, err
+		if result.err != nil {
+			return nil, result.err
 		}
-		// Readiness can be consumed by another caller between a successful
-		// wait and this check. Keep waiting until a pollable is ready now.
-		if err := waitPollRetry(ctx, &retryDelay); err != nil {
-			return nil, err
-		}
+		// Readiness was consumed before the recheck. Resume only this worker;
+		// each pollable has at most one waiter even after repeated wakeups.
+		close(result.resume)
 	}
 }
 
