@@ -523,10 +523,20 @@ func statValue(info fs.FileInfo) component.Value {
 
 func metadataHash(info fs.FileInfo) component.Value {
 	_, _, _, _, dev, ino := hostStat(info)
-	if dev != 0 || ino != 0 {
-		return []component.Value{ino, dev}
+	mtime := info.ModTime()
+	size := uint64(info.Size())
+	return []component.Value{
+		mixMetadataHash(mixMetadataHash(ino^uint64(mtime.Unix())) ^ size),
+		mixMetadataHash(mixMetadataHash(dev^uint64(mtime.Nanosecond())) ^ size),
 	}
-	return []component.Value{uint64(info.ModTime().UnixNano()), uint64(info.Size())}
+}
+
+func mixMetadataHash(v uint64) uint64 {
+	v ^= v >> 30
+	v *= 0xbf58476d1ce4e5b9
+	v ^= v >> 27
+	v *= 0x94d049bb133111eb
+	return v ^ (v >> 31)
 }
 
 func datetime(t time.Time) component.Value {

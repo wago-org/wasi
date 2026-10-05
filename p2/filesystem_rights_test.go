@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -77,6 +78,28 @@ func TestCheckedOffsetRejectsSignedOverflow(t *testing.T) {
 	}
 	if _, err := checkedOffset(uint64(math.MaxInt64) + 1); err == nil {
 		t.Fatal("MaxInt64+1 offset succeeded")
+	}
+}
+
+func TestMetadataHashChangesWhenFileSizeChanges(t *testing.T) {
+	path := t.TempDir() + "/file"
+	if err := os.WriteFile(path, []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := metadataHash(beforeInfo)
+	if err := os.WriteFile(path, []byte("a longer file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := metadataHash(afterInfo); reflect.DeepEqual(before, after) {
+		t.Fatalf("metadata hash stayed %v after file size changed", after)
 	}
 }
 
