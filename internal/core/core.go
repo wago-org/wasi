@@ -343,8 +343,9 @@ func (e *Plugin) bindings() []binding {
 				return
 			}
 			defer state.mu.Unlock()
-			call := *e
-			call.fs = state
+			// e.fs is cleared by shutdown under guard.mu. Snapshot only the
+			// immutable configuration and the state acquired for this call.
+			call := Plugin{module: e.module, cfg: e.cfg, arguments: e.arguments, fs: state, guard: e.guard}
 			handler(&call, m, p, r)
 		}
 	}

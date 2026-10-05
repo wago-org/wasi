@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -19,10 +20,13 @@ import (
 const maxInt64Value = uint64(^uint64(0) >> 1)
 
 type fsState struct {
-	mu     sync.Mutex
-	fds    map[uint32]*fdEntry
-	nextFD uint32
-	maxFDs uint32
+	mu         sync.Mutex
+	fds        map[uint32]*fdEntry
+	nextFD     uint32
+	maxFDs     uint32
+	pollCtx    context.Context
+	cancelPoll context.CancelFunc
+	closed     bool // protected by mu
 }
 
 type fsGuard struct {
@@ -73,7 +77,12 @@ func (e *Plugin) makeFS(strict bool) (*fsState, error) {
 	if maxFDs < 3 {
 		maxFDs = 3
 	}
-	s := &fsState{fds: make(map[uint32]*fdEntry), nextFD: 3, maxFDs: maxFDs}
+	baseCtx := e.cfg.Context
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	pollCtx, cancelPoll := context.WithCancel(baseCtx)
+	s := &fsState{fds: make(map[uint32]*fdEntry), nextFD: 3, maxFDs: maxFDs, pollCtx: pollCtx, cancelPoll: cancelPoll}
 	for fd := uint32(0); fd < 3; fd++ {
 		rights := rightFDFilestatGet | rightPollFDReadWrite
 		if fd == 0 {
@@ -195,8 +204,13 @@ func (e *Plugin) stateFor(m wago.HostModule) (*fsState, uint64) {
 			e.guard.states[identity] = state
 		}
 	}
-	state.mu.Lock()
+	// Waiting for an active call must not prevent shutdown from canceling it.
 	e.guard.mu.Unlock()
+	state.mu.Lock()
+	if state.closed {
+		state.mu.Unlock()
+		return nil, wasiEBadf
+	}
 	return state, wasiOK
 }
 
@@ -210,6 +224,8 @@ func closeFS(state *fsState) {
 	if state == nil {
 		return
 	}
+	state.cancelPoll()
+	state.closed = true
 	for _, entry := range state.fds {
 		if entry.dirIter != nil {
 			_ = entry.dirIter.Close()
@@ -229,6 +245,7 @@ func (e *Plugin) closeInstance(identity wago.InstanceIdentity) {
 	if state == nil {
 		return
 	}
+	state.cancelPoll()
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	closeFS(state)
@@ -250,6 +267,9 @@ func (e *Plugin) closeAll() {
 	e.fs = nil
 	e.guard.closed = true
 	e.guard.mu.Unlock()
+	for state := range unique {
+		state.cancelPoll()
+	}
 	for state := range unique {
 		state.mu.Lock()
 		closeFS(state)
