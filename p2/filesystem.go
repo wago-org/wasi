@@ -330,6 +330,10 @@ func dupFile(f *os.File) (*os.File, error) {
 	return os.NewFile(uintptr(fd), f.Name()), nil
 }
 
+func newDirectoryStreamFile(dir *os.File) (*os.File, error) {
+	return dupFile(dir)
+}
+
 func splitRelative(name string) ([]string, error) {
 	if strings.IndexByte(name, 0) >= 0 || path.IsAbs(name) {
 		return nil, hostFS.EPERM
@@ -799,7 +803,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if !n.isDir {
 			return fsFailure(hostFS.ENOTDIR), nil
 		}
-		f, e := dupFile(n.file)
+		f, e := newDirectoryStreamFile(n.file)
 		if e != nil {
 			return fsFailure(e), nil
 		}
