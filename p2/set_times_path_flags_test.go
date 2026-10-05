@@ -102,3 +102,90 @@ func TestSetTimesUnderPathFlagsRejectsUnknownFlags(t *testing.T) {
 		t.Fatalf("unknown path flags = %v, want invalid", err)
 	}
 }
+
+func TestSetTimesUnderPathFlagsDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "directory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base, err := openPreopenDirectory(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	want := time.Date(2010, time.November, 12, 13, 14, 15, 0, time.UTC)
+	for _, name := range []string{".", "directory/"} {
+		if err := setTimesUnderPathFlags(base, name, 0, timestampForTest(want), timestampForTest(want), time.Now); err != nil {
+			t.Fatalf("directory %q timestamps: %v", name, err)
+		}
+		info, err := os.Stat(filepath.Join(root, name))
+		if err != nil || !info.ModTime().Equal(want) {
+			t.Fatalf("directory %q mtime = %v, %v", name, info, err)
+		}
+	}
+}
+
+func TestSetTimesUnderPathFlagsNoChange(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2011, time.December, 13, 14, 15, 16, 123456000, time.UTC)
+	if err := os.Chtimes(file, want, want); err != nil {
+		t.Fatal(err)
+	}
+	base, err := openPreopenDirectory(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	before, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noChange := component.VariantValue{Disc: 0}
+	if err := setTimesUnderPathFlags(base, "file", 0, noChange, noChange, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Opening or inspecting metadata can itself update host access time.
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("no-change mtime = %v, want %v", after.ModTime(), before.ModTime())
+	}
+}
+
+func TestSetTimesUnderPathFlagsTraversesIntermediateLinks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "directory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "directory", "file")
+	if err := os.WriteFile(file, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base, err := openPreopenDirectory(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	if err := hostFS.Symlinkat("directory", int(base.Fd()), "dirlink"); err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2012, time.January, 14, 15, 16, 17, 0, time.UTC)
+	for _, name := range []string{"dirlink/file", "dirlink/"} {
+		if err := setTimesUnderPathFlags(base, name, 0, timestampForTest(want), timestampForTest(want), time.Now); err != nil {
+			t.Fatalf("intermediate link %q timestamps: %v", name, err)
+		}
+		info, err := os.Stat(filepath.Join(root, name))
+		if err != nil || !info.ModTime().Equal(want) {
+			t.Fatalf("intermediate link %q mtime = %v, %v", name, info, err)
+		}
+	}
+	if err := setTimesUnderPathFlags(base, "dirlink/file/", 0, timestampForTest(want), timestampForTest(want), time.Now); err == nil || fsError(err) != fsErrNotDirectory {
+		t.Fatalf("file with trailing slash = %v, want not-directory", err)
+	}
+}

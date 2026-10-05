@@ -463,20 +463,16 @@ func symlinkUnder(dir *os.File, oldPath, newPath string) error {
 }
 
 func setTimesUnderPathFlags(dir *os.File, name string, pathFlags uint32, access, modification component.Value, now func() time.Time) error {
-	f, err := openUnder(dir, name, hostFS.O_RDONLY|hostFS.O_WRITE_ATTRIBUTES, 0)
-	if err != nil {
-		return err
+	if pathFlags&^uint32(1) != 0 {
+		return hostFS.EINVAL
 	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return err
+	if strings.IndexByte(name, 0) >= 0 || path.IsAbs(name) {
+		return hostFS.EPERM
 	}
-	at, mt, _, err := requestedTimes(access, modification, info, now)
-	if err == nil {
-		err = setFileTimes(f, at, mt)
+	if name == "" {
+		name = "."
 	}
-	return err
+	return platformSetTimesUnderPathFlags(dir, name, pathFlags&1 != 0, access, modification, now)
 }
 
 func fsError(err error) uint32 {
