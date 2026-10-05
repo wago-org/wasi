@@ -368,7 +368,8 @@ func (s *hostState) outputFailure(rep uint32, err error) ([]component.Value, err
 		}
 		s.outputFailed[rep] = true
 	}
-	delete(s.permits, rep)
+	// A permit granted before the failure is still needed by the next write:
+	// it must return closed when that write stays within the granted size.
 	s.mu.Unlock()
 	return s.streamFailure(err)
 }

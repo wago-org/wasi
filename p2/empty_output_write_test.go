@@ -77,7 +77,7 @@ func (failedFlushAfterPermit) CheckWrite() (uint64, error) { return 3, nil }
 func (failedFlushAfterPermit) TryWrite([]byte) error {
 	panic("closed output stream was written")
 }
-func (failedFlushAfterPermit) BeginFlush() error { return errors.New("flush failed") }
+func (failedFlushAfterPermit) BeginFlush() error                  { return errors.New("flush failed") }
 func (failedFlushAfterPermit) WaitWritable(context.Context) error { return nil }
 
 func TestEmptyOutputWriteReturnsClosedAfterFlushFailure(t *testing.T) {
