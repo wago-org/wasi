@@ -129,6 +129,32 @@ func TestPollPipeReadinessRightsAndCancellation(t *testing.T) {
 	}
 }
 
+type observedPollInput struct{ waited chan struct{} }
+
+func (*observedPollInput) Read([]byte) (int, error) { return 0, nil }
+func (*observedPollInput) Ready() bool              { return false }
+func (p *observedPollInput) Wait(context.Context) error {
+	close(p.waited)
+	return context.Canceled
+}
+
+func TestPollRejectsInvalidResultPointerBeforeWaiting(t *testing.T) {
+	input := &observedPollInput{waited: make(chan struct{})}
+	e := newTestPlugin(t, Config{Stdin: input})
+	mem := make([]byte, 512)
+	putFDSubscription(mem, 0, 1, 1, 0)
+	result := make([]uint64, 1)
+	e.pollOneoff(testModule{mem}, []uint64{0, 256, 1, 510}, result)
+	if result[0] != wasiEFault {
+		t.Fatalf("poll errno = %d, want EFAULT", result[0])
+	}
+	select {
+	case <-input.waited:
+		t.Fatal("poll waited before validating the result pointer")
+	default:
+	}
+}
+
 func TestPerInstanceStateLocksDoNotBlockEachOther(t *testing.T) {
 	e := newTestPlugin(t, Config{})
 	other, err := e.makeFS(true)
