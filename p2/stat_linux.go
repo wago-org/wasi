@@ -5,8 +5,10 @@ package p2
 import (
 	"io/fs"
 	"os"
+	"runtime"
 	"syscall"
 	"time"
+	"unsafe"
 
 	sysunix "golang.org/x/sys/unix"
 )
@@ -24,8 +26,25 @@ func hostStat(info fs.FileInfo) (nlink uint64, atime, mtime, ctime time.Time, de
 }
 
 func setFileTimes(f *os.File, atime, mtime time.Time) error {
-	times := []sysunix.Timeval{sysunix.NsecToTimeval(atime.UnixNano()), sysunix.NsecToTimeval(mtime.UnixNano())}
-	return sysunix.Futimes(int(f.Fd()), times)
+	at, err := sysunix.TimeToTimespec(atime)
+	if err != nil {
+		return hostFS.EOVERFLOW
+	}
+	mt, err := sysunix.TimeToTimespec(mtime)
+	if err != nil {
+		return hostFS.EOVERFLOW
+	}
+	times := [2]sysunix.Timespec{at, mt}
+	// The kernel implements futimens as utimensat(fd, NULL, times, 0).
+	// Unlike AT_EMPTY_PATH this ABI predates Linux 5.8, and it needs no
+	// /proc pathname or nanoseconds-since-epoch conversion.
+	_, _, errno := syscall.Syscall6(sysunix.SYS_UTIMENSAT, f.Fd(), 0,
+		uintptr(unsafe.Pointer(&times[0])), 0, 0, 0)
+	runtime.KeepAlive(f)
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
 
 func setMetadataTimes(f *os.File, atime, mtime time.Time) error {

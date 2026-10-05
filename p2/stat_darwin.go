@@ -6,8 +6,10 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"runtime"
 	"syscall"
 	"time"
+	"unsafe"
 
 	sysunix "golang.org/x/sys/unix"
 )
@@ -94,7 +96,26 @@ func hostStat(info fs.FileInfo) (nlink uint64, atime, mtime, ctime time.Time, de
 }
 
 func setFileTimes(f *os.File, atime, mtime time.Time) error {
-	times := []sysunix.Timeval{sysunix.NsecToTimeval(atime.UnixNano()), sysunix.NsecToTimeval(mtime.UnixNano())}
-	return sysunix.Futimes(int(f.Fd()), times)
+	at, err := sysunix.TimeToTimespec(atime)
+	if err != nil {
+		return hostFS.EOVERFLOW
+	}
+	mt, err := sysunix.TimeToTimespec(mtime)
+	if err != nil {
+		return hostFS.EOVERFLOW
+	}
+	// Darwin's futimens uses fsetattrlist. Attribute order follows the bitmap:
+	// modification time precedes access time, each a native 64-bit timespec.
+	attrs := sysunix.Attrlist{Bitmapcount: sysunix.ATTR_BIT_MAP_COUNT,
+		Commonattr: sysunix.ATTR_CMN_MODTIME | sysunix.ATTR_CMN_ACCTIME}
+	times := [2]sysunix.Timespec{mt, at}
+	_, _, errno := syscall.Syscall6(sysunix.SYS_FSETATTRLIST, f.Fd(),
+		uintptr(unsafe.Pointer(&attrs)), uintptr(unsafe.Pointer(&times[0])),
+		unsafe.Sizeof(times), 0, 0)
+	runtime.KeepAlive(f)
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
 func syncFileData(f *os.File) error { return sysunix.Fsync(int(f.Fd())) }
