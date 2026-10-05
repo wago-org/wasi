@@ -501,7 +501,19 @@ func (e *Plugin) fdFilestatGet(m wago.HostModule, p, r []uint64) {
 		code = require(f, rightFDFilestatGet)
 	}
 	if code == 0 && f.file == nil {
-		code = wasiEBadf
+		// Match fdFdstatGet without inspecting or taking ownership of the
+		// caller's reader/writer. Renumbered streams have the same metadata.
+		mem, ptr := m.Memory(), uint64(uint32(p[1]))
+		if ptr+64 > uint64(len(mem)) {
+			code = wasiEFault
+		} else {
+			stat := mem[ptr : ptr+64]
+			clear(stat)
+			stat[16] = filetypeCharacterDevice
+			binary.LittleEndian.PutUint64(stat[24:], 1)
+		}
+		r[0] = code
+		return
 	}
 	if code == 0 {
 		st, err := f.file.Stat()
