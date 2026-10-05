@@ -666,6 +666,13 @@ func requestedTimes(access, modification component.Value, info fs.FileInfo, now 
 	return at, mt, ac || mc, e
 }
 
+func syncDescriptor(n *descriptorNode, dataOnly bool) error {
+	if dataOnly {
+		return syncFileData(n.file)
+	}
+	return n.file.Sync()
+}
+
 type descriptorHandles interface {
 	NewOwn(uint32, uint32) uint32
 	TakeOwn(uint32, uint32) (uint32, error)
@@ -1044,7 +1051,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		if e = n.file.Sync(); e != nil {
+		if e = syncDescriptor(n, false); e != nil {
 			return fsFailure(e), nil
 		}
 		return ok(nil), nil
@@ -1054,7 +1061,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if e != nil {
 			return nil, e
 		}
-		if e = syncFileData(n.file); e != nil {
+		if e = syncDescriptor(n, true); e != nil {
 			return fsFailure(e), nil
 		}
 		return ok(nil), nil
