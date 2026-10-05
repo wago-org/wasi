@@ -20,7 +20,8 @@ func TestWASI020Surface(t *testing.T) {
 	surfaceRecorder.Lock()
 	surfaceRecorder.fn = func(iface, name string) { got = append(got, iface+"#"+name) }
 	surfaceRecorder.Unlock()
-	Options(Config{})
+	// Registration is deferred until the factory builds one instance bundle.
+	instanceOptions(Config{})
 	surfaceRecorder.Lock()
 	surfaceRecorder.fn = nil
 	surfaceRecorder.Unlock()

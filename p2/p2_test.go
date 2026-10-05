@@ -89,7 +89,7 @@ func p2Consumer(ref **wagoplugin.Ref[p2.Service]) wago.PluginProvider {
 	}}
 }
 
-func pluginSet(t *testing.T, providers []wago.PluginProvider, configs map[string]json.RawMessage) wago.PluginSet {
+func pluginSet(t testing.TB, providers []wago.PluginProvider, configs map[string]json.RawMessage) wago.PluginSet {
 	t.Helper()
 	set := wago.PluginSet{Providers: providers}
 	for _, provider := range providers {
