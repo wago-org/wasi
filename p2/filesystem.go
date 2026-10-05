@@ -429,7 +429,11 @@ func readlinkUnder(dir *os.File, path string) (string, error) {
 			return "", err
 		}
 		if got < len(buf) {
-			return string(buf[:got]), nil
+			target := string(buf[:got])
+			if isRootedSymlinkTarget(target) {
+				return "", hostFS.EPERM
+			}
+			return target, nil
 		}
 		if len(buf) >= maxIOSize {
 			return "", hostFS.ENAMETOOLONG
@@ -439,6 +443,9 @@ func readlinkUnder(dir *os.File, path string) (string, error) {
 }
 
 func symlinkUnder(dir *os.File, oldPath, newPath string) error {
+	if isRootedSymlinkTarget(oldPath) {
+		return hostFS.EPERM
+	}
 	p, name, err := parentUnder(dir, newPath)
 	if err != nil {
 		return err

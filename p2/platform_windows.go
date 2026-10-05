@@ -204,7 +204,26 @@ func linkFileAt(oldFD int, oldName string, newFD int, newName string, _ int) err
 }
 
 func readlinkFileAt(fd int, name string, buf []byte) (int, error) {
-	return winfs.ReadlinkAt(windows.Handle(fd), name, buf)
+	target, relative, err := winfs.ReadlinkTargetAt(windows.Handle(fd), name)
+	if err != nil {
+		return 0, err
+	}
+	target, err = windowsReadlinkTarget(target, relative)
+	if err != nil {
+		return 0, err
+	}
+	return copy(buf, target), nil
+}
+
+func windowsReadlinkTarget(target string, relative bool) (string, error) {
+	if !relative || isRootedSymlinkTarget(target) {
+		return "", errNotPermitted
+	}
+	return filepath.ToSlash(target), nil
+}
+
+func isRootedSymlinkTarget(target string) bool {
+	return len(target) != 0 && (os.IsPathSeparator(target[0]) || filepath.VolumeName(target) != "")
 }
 
 func symlinkFileAt(oldName string, newFD int, newName string) error {

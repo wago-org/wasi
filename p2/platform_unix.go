@@ -4,6 +4,7 @@ package p2
 
 import (
 	"os"
+	"path"
 
 	sysunix "golang.org/x/sys/unix"
 )
@@ -11,6 +12,8 @@ import (
 func openPreopenDirectory(path string, _ bool) (*os.File, error) { return os.Open(path) }
 
 func platformFilesystemError(error) (uint32, bool) { return 0, false }
+
+func isRootedSymlinkTarget(target string) bool { return path.IsAbs(target) }
 
 var hostFS = filesystemPlatform{
 	EROFS: sysunix.EROFS, EINVAL: sysunix.EINVAL, EOVERFLOW: sysunix.EOVERFLOW, EMFILE: sysunix.EMFILE,

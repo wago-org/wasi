@@ -47,10 +47,13 @@ func TestRelativeSymlinkTargetRemainsReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dir.Close()
-	if err := symlinkUnder(dir, "target", "link"); err != nil {
-		t.Fatal(err)
-	}
-	if target, err := readlinkUnder(dir, "link"); err != nil || target != "target" {
-		t.Fatalf("relative symlink = %q, %v; want target", target, err)
+	for i, target := range []string{"target", `\target`, `C:\target`, `..\target`} {
+		name := string(rune('a' + i))
+		if err := symlinkUnder(dir, target, name); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := readlinkUnder(dir, name); err != nil || got != target {
+			t.Fatalf("relative symlink = %q, %v; want %q", got, err, target)
+		}
 	}
 }
