@@ -379,6 +379,10 @@ func openUnder(dir *os.File, name string, flags int, mode uint32) (*os.File, err
 	return os.NewFile(uintptr(fd), parts[len(parts)-1]), nil
 }
 
+func openUnderPathFlags(dir *os.File, name string, flags int, mode, pathFlags uint32) (*os.File, error) {
+	return openUnder(dir, name, flags, mode)
+}
+
 func parentUnder(dir *os.File, name string) (*os.File, string, error) {
 	parts, err := splitRelative(name)
 	if err != nil || len(parts) == 0 {
@@ -636,7 +640,7 @@ func filesystemOptions(s *filesystemState) []component.Option {
 		if descFlags&(2|1<<5) != 0 {
 			flags |= hostFS.O_WRITE_ATTRIBUTES
 		}
-		f, err := openUnder(n.file, args[2].(string), flags, 0o644)
+		f, err := openUnderPathFlags(n.file, args[2].(string), flags, 0o644, args[1].(uint32))
 		if err != nil {
 			return fsFailure(err), nil
 		}
